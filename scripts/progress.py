@@ -10,9 +10,12 @@ The data comes from two places, never from hand edits:
 - the task issues (title `AREA-N: ...`) and the open pull requests, read through the `gh` command line tool;
 - the task table in docs/roadmap.md, for tasks that have no issue yet and as a fallback for sizes.
 
-A task is `done` when its issue is closed as completed, `in review` when an open pull request carries its ID,
-`in progress` when it is labelled `claimed`, `ready` when labelled `ready`, and `planned` otherwise. Issues closed
-as not planned are left out. Progress is weighted by size: S = 1, M = 3, L = 8.
+Only tasks a maintainer stands behind count: roadmap tasks, and issues that a repository member opened or labelled
+`ready` or `claimed`. Issue titles are escaped anyway, because anyone can write them.
+
+A task is `done` when its issue is closed as completed, `in review` when an open, non-draft pull request closes its
+issue (`Closes #N`) and was opened by a member or by the task's assignee, `in progress` when it is labelled `claimed`, `ready` when labelled `ready`, and `planned`
+otherwise. Issues closed as not planned are left out. Progress is weighted by size: S = 1, M = 3, L = 8.
 """
 import argparse
 import json
@@ -31,6 +34,7 @@ END = "<!-- progress:end -->"
 
 AREAS = "NET|SRV|IM|DB|SCRIPT|RP|BOT|CLIENT|LAUNCH|OPS|DOC"
 TASK_TITLE = re.compile(rf"^((?:{AREAS})-[0-9]+): (.+)$")
+CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#([0-9]+)\b", re.IGNORECASE)
 ROADMAP_ROW = re.compile(rf"^\|\s*((?:{AREAS})-[0-9]+)\s*\|\s*(.+?)\s*\|\s*([SML])\s*\|\s*$")
 
 WEIGHT = {"S": 1, "M": 3, "L": 8}
@@ -81,21 +85,50 @@ def roadmap_tasks(text):
     return tasks
 
 
+def labels_of(item):
+    return {label["name"] if isinstance(label, dict) else label for label in item.get("labels", [])}
+
+
+TRUSTED_AUTHORS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
+def trusted_author(item):
+    return item.get("author_association") in TRUSTED_AUTHORS
+
+
+def accepted(item):
+    """A maintainer stands behind the issue: they opened it, or labelled it `ready` or `claimed`.
+
+    Anyone can open an issue with a task-like title, even one that reuses a roadmap ID, and close it themselves,
+    but only maintainers are repository members and only they add labels. Everything else stays off the README.
+    """
+    return trusted_author(item) or bool(labels_of(item) & {"ready", "claimed"})
+
+
+def in_review(issue, pull_requests):
+    """A pull request that closes the issue counts if a member or the task's assignee (its claimer) opened it."""
+    assignees = {a.get("login") for a in issue.get("assignees") or []}
+    return any(trusted_author(p) or (p.get("user") or {}).get("login") in assignees for p in pull_requests)
+
+
 def collect(items, roadmap):
     """Tasks as a list of dicts (id, title, size, status, issue), sorted by stage order and ID.
 
     `items` are issues as the REST API returns them from /issues (pull requests included, marked by the
-    `pull_request` key). `roadmap` is the result of roadmap_tasks().
+    `pull_request` key). `roadmap` is the result of roadmap_tasks(). A task with an issue takes the issue's title,
+    which render_markdown() escapes; a roadmap task without an issue takes the roadmap's (`trusted`).
     """
-    in_review = set()
+    # Issue number -> authors of open, non-draft pull requests that close it.
+    closers = {}
     issues = []
     for item in items:
-        m = TASK_TITLE.match((item.get("title") or "").strip())
-        if not m:
-            continue
         if "pull_request" in item:
             if item.get("state") == "open" and not item.get("draft"):
-                in_review.add(m.group(1))
+                for n in CLOSES.findall(item.get("body") or ""):
+                    closers.setdefault(int(n), []).append(item)
+            continue
+        m = TASK_TITLE.match((item.get("title") or "").strip())
+        if not m or not accepted(item):
             continue
         if item.get("state") == "closed" and item.get("state_reason") == "not_planned":
             continue
@@ -103,10 +136,10 @@ def collect(items, roadmap):
 
     tasks = {}
     for task_id, title, item in issues:
-        labels = {label["name"] if isinstance(label, dict) else label for label in item.get("labels", [])}
+        labels = labels_of(item)
         if item.get("state") == "closed":
             status = "done"
-        elif task_id in in_review:
+        elif in_review(item, closers.get(item.get("number"), [])):
             status = "in review"
         elif "claimed" in labels:
             status = "in progress"
@@ -115,7 +148,8 @@ def collect(items, roadmap):
         else:
             status = "planned"
         size = size_from_labels(labels) or roadmap.get(task_id, (None, DEFAULT_SIZE))[1]
-        task = {"id": task_id, "title": title, "size": size, "status": status, "issue": item.get("number")}
+        task = {"id": task_id, "title": title, "trusted": False, "size": size, "status": status,
+                "issue": item.get("number")}
         # Two issues with one ID: an open one wins over a closed one, so reopened work is not shown as done.
         old = tasks.get(task_id)
         if old is None or (old["status"] == "done" and status != "done"):
@@ -123,8 +157,9 @@ def collect(items, roadmap):
 
     for task_id, (title, size) in roadmap.items():
         if task_id not in tasks:
-            status = "in review" if task_id in in_review else "planned"
-            tasks[task_id] = {"id": task_id, "title": title, "size": size, "status": status, "issue": None}
+            status = "planned"
+            tasks[task_id] = {"id": task_id, "title": title, "trusted": True, "size": size, "status": status,
+                              "issue": None}
 
     order = [a for s in STAGES for a in s["areas"]] + list(TRACK["areas"])
     return sorted(tasks.values(), key=lambda t: (order.index(area(t["id"])), int(t["id"].split("-")[1])))
@@ -156,6 +191,13 @@ def current_stage(tasks):
         if not own or any(t["status"] != "done" for t in own):
             return s
     return STAGES[-1]
+
+
+def escape_markdown(text):
+    """Issue text as inert Markdown for a table cell: no HTML, links, images, code spans, emphasis or autolinks."""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"([\\`*_\[\]()!|#~{}+.:/@-])", r"\\\1", text)
+    return " ".join(text.split())
 
 
 def bar(percent, cells=20):
@@ -206,7 +248,8 @@ def render_markdown(tasks, repo):
     ]
     for t in tasks:
         link = f"[{t['id']}](https://github.com/{repo}/issues/{t['issue']})" if t["issue"] else t["id"]
-        title = t["title"].replace("|", "\\|")
+        # Roadmap titles are maintainer-written Markdown; issue titles are anyone's text.
+        title = t["title"] if t.get("trusted") else escape_markdown(t["title"])
         lines.append(f"| {ICON[t['status']]} | {link}: {title} | {t['size']} | {t['status']} |")
     lines += [
         "",
