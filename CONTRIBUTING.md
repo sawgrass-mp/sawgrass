@@ -1,10 +1,16 @@
 # Contributing
 
 Sawgrass is built in the open by people and their coding agents. Anyone can contribute; only maintainers merge.
-If you use an agent, point it at [AGENTS.md](AGENTS.md) first.
+Contributions are written with **Claude Opus 5.5 or Claude Fable** (see below); point your agent at
+[AGENTS.md](AGENTS.md) first.
 
 ## Rules that keep the project safe to host
 
+- **Claude Opus 5.5 or Claude Fable only.** Every contribution is written with Claude Opus 5.5 or Claude Fable
+  (any Fable version). Contributions made with other AI agents or models are not accepted, for the sake of code
+  quality and performance. Declare the model on the `Model:` line of the pull request template. GitHub cannot
+  verify it, so it is a declaration: a false one gets the pull request closed, and the CI and review gates apply
+  either way.
 - **English only** in code, comments, docs, commits, issues and pull requests.
 - **No game data, ever.** That covers archives, the executable, shaders, textures, models, audio, videos, byte
   signatures copied from the executable, and logs or reports that quote any of them. `.gitignore` blocks the
@@ -66,7 +72,7 @@ request, before the code that depends on it.
 
 - Title starts with the task ID (`IM-3: Add hysteresis to the visible set`).
 - One task per pull request, ideally under 400 changed lines (added plus deleted).
-- Say whether it was AI-assisted, and what you ran.
+- Declare the model (`Model: Claude Opus 5.5` or `Model: Claude Fable`) and say what you ran.
 - Review: CI first, then a maintainer listed in `.github/CODEOWNERS`. Squash merge only.
 
 ## Licence
