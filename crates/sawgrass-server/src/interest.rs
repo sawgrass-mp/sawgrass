@@ -48,9 +48,14 @@ pub const DEFAULT_CELL_SIZE: f32 = 100.0;
 /// Coordinates of a grid cell.
 type CellKey = (i32, i32);
 
-/// Multiplicative hasher for the small integer keys used here (cell coordinates, entity ids). The keys come
-/// from the server, not from clients, so the flooding resistance of the default SipHash is not needed, and
-/// SipHash dominated the benchmark.
+/// Multiplicative hasher for the small integer keys used here (cell coordinates, entity ids).
+///
+/// Entity ids come from the server. Cell keys are derived from positions that clients report, but the server
+/// validates those positions against the map, so the key space is bounded, and each entity occupies at most one
+/// cell: to make cells collide, an attacker needs one connected entity per colliding cell. That bounds the cost
+/// of crafted collisions, so the flooding resistance of the default SipHash is not worth its price here (it took
+/// about 45% of the benchmark's tick). A dense array over the bounded map would remove cell hashing entirely
+/// once the map bounds are known.
 #[derive(Debug, Default, Clone, Copy)]
 struct IntHasher(u64);
 
@@ -239,9 +244,9 @@ impl SpatialGrid {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VisibilityConfig {
     /// An entity outside the set enters it at this distance or closer, in metres.
-    pub enter_radius: f32,
+    enter_radius: f32,
     /// An entity inside the set leaves it only beyond this distance, in metres. At least `enter_radius`.
-    pub leave_radius: f32,
+    leave_radius: f32,
 }
 
 impl Default for VisibilityConfig {
@@ -255,6 +260,18 @@ impl Default for VisibilityConfig {
 }
 
 impl VisibilityConfig {
+    /// An entity outside the set enters it at this distance or closer, in metres.
+    #[must_use]
+    pub fn enter_radius(&self) -> f32 {
+        self.enter_radius
+    }
+
+    /// An entity inside the set leaves it only beyond this distance, in metres.
+    #[must_use]
+    pub fn leave_radius(&self) -> f32 {
+        self.leave_radius
+    }
+
     /// A configuration with these radii.
     ///
     /// # Panics
@@ -352,19 +369,23 @@ impl VisibleSet {
         changes: &mut VisibilityChanges,
     ) {
         changes.clear();
-        let enter_squared = config.enter_radius * config.enter_radius;
+        let enter_squared = config.enter_radius() * config.enter_radius();
         let members = &self.members;
         let next = &mut self.next;
         next.clear();
-        grid.for_each_within(viewer_position, config.leave_radius, |id, _, distance_squared| {
-            if Some(id) == viewer {
-                return;
-            }
-            // Within the leave radius: members stay, others need to be within the enter radius.
-            if distance_squared <= enter_squared || members.binary_search(&id).is_ok() {
-                next.push(id);
-            }
-        });
+        grid.for_each_within(
+            viewer_position,
+            config.leave_radius(),
+            |id, _, distance_squared| {
+                if Some(id) == viewer {
+                    return;
+                }
+                // Within the leave radius: members stay, others need to be within the enter radius.
+                if distance_squared <= enter_squared || members.binary_search(&id).is_ok() {
+                    next.push(id);
+                }
+            },
+        );
         next.sort_unstable();
         diff_sorted(&self.members, &self.next, changes);
         std::mem::swap(&mut self.members, &mut self.next);

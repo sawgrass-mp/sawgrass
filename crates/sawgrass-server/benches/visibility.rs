@@ -140,8 +140,8 @@ fn main() {
     println!(
         "visibility: {points} points, {ticks} ticks at 20 Hz, cell {} m, enter {} m, leave {} m",
         sawgrass_server::interest::DEFAULT_CELL_SIZE,
-        config.enter_radius,
-        config.leave_radius
+        config.enter_radius(),
+        config.leave_radius()
     );
     println!(
         "{:<22} {:>10} {:>10} {:>10} {:>12} {:>16}",
