@@ -6,9 +6,9 @@
 <rect width="880" height="478" rx="16" fill="#060a08"/>
 <rect x="1" y="1" width="878" height="476" rx="15" fill="none" stroke="#1d3b2f"/>
 <text x="28" y="44" class="h">Stage 1: Server without the game</text>
-<text x="28" y="68" class="s">46% of the planned tasks done, weighted by size</text>
+<text x="28" y="68" class="s">56% of the planned tasks done, weighted by size</text>
 <rect x="28" y="84" width="824" height="14" rx="7" fill="#13201b"/>
-<rect x="28" y="84" width="379.0" height="14" rx="7" fill="url(#g)"/>
+<rect x="28" y="84" width="461.4" height="14" rx="7" fill="url(#g)"/>
 <text x="28" y="146" class="l">Stage 0: Repository foundation</text>
 <text x="28" y="164" class="n">Rules, CI, claim bot, review agent</text>
 <rect x="360" y="136" width="380" height="10" rx="5" fill="#13201b"/>
@@ -44,7 +44,7 @@
 <text x="28" y="422" class="l">Tooling and docs</text>
 <text x="28" y="440" class="n">CI gates, review agent, documentation</text>
 <rect x="360" y="412" width="380" height="10" rx="5" fill="#13201b"/>
-<rect x="360" y="412" width="178.6" height="10" rx="5" fill="url(#g)"/>
-<text x="360" y="440" class="n">1 of 6 tasks done</text>
-<text x="852" y="422" class="p" text-anchor="end">47%</text>
+<rect x="360" y="412" width="243.2" height="10" rx="5" fill="url(#g)"/>
+<text x="360" y="440" class="n">2 of 6 tasks done</text>
+<text x="852" y="422" class="p" text-anchor="end">64%</text>
 </svg>
