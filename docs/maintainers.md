@@ -32,6 +32,21 @@ Only people with triage access can add labels, so only maintainers can mark a ta
 - Workflow permissions: read repository contents by default; workflows ask for more themselves.
 - Never add a `pull_request_target` workflow that checks out pull request code.
 
+## Review agent
+
+The review agent (`.github/workflows/review.yml`) is in comment-only mode: it comments, never approves or merges.
+
+1. Create a separate GitHub account for it (for example `sawgrass-reviewer`) and invite it to the organization
+   with Triage access to this repository. A pull request's author and its reviewer must never be the same account.
+2. Add repository secrets (Settings → Secrets and variables → Actions):
+   - `ANTHROPIC_API_KEY`: an Anthropic API key, ideally from a workspace with a monthly spend limit.
+   - `REVIEWER_TOKEN`: a fine-grained token of the reviewer account, limited to this repository, with
+     "Pull requests: read and write" and "Issues: read and write". Without it the comments are posted as
+     `github-actions`.
+3. Without `ANTHROPIC_API_KEY` the workflow logs a warning and does nothing, so it is safe to merge first.
+
+Drafts are skipped; marking a pull request ready for review, or pushing to it, runs a new review.
+
 ## Security
 
 - Enable private vulnerability reporting, Dependabot alerts and secret scanning with push protection.
