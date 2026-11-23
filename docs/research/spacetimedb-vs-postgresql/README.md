@@ -109,6 +109,26 @@ received 426,199 acknowledgements (counted every 50 ms). The log replayed 426,70
 operations, with no torn record and all invariants holding. A process kill leaves the OS page cache intact, so this
 checks the recovery logic, not a power cut; `fdatasync` before the reply is what covers a power cut.
 
+### Was the comparison fair?
+
+The in-process `group` mode batches flushes, and `each` (one flush per transfer, about 6,000 per second) is close to
+the PostgreSQL figures. So the question is whether the other two already had an equivalent batching.
+
+- **PostgreSQL already batches flushes.** Concurrent commits share one WAL flush. Measured with `pg_stat_wal` during
+  a 10-second run of the one-function variant at 64 callers: 68,467 commits, 5,178 WAL flushes, about 13 commits per
+  flush. That run gave 6,844 tps (the table shows 5,666 from an earlier run: run-to-run spread is about 20%).
+  Adding an explicit delay to gather more commits per flush (`commit_delay = 1000`, `commit_siblings = 5`) did not
+  help: 5,170 tps uniform and 478 tps hot at 64 callers. Turning durability off (`synchronous_commit = off`) gave
+  8,417 uniform and 2,196 hot. So the disk is not what limits PostgreSQL here; per-transaction work, locks and round
+  trips are.
+- **SpacetimeDB already batches flushes too.** Its commit log is not flushed once per transaction, and turning
+  confirmed reads off (reply before durability) changed little: 12,451 against 11,352 tps. Keeping 16 calls in
+  flight per connection, so that more work arrives at once, raised it to 21,822 tps with a p99 of 113 ms.
+- **What remains unequal:** the in-process callers are threads in the same process, with no network, protocol or
+  WASM between them and the ledger. That is the point of the design rather than a flaw in the test, but it means
+  the gap measures the whole path, not storage alone. Without any flush the in-process ledger did 110,806 tps, so
+  its flush with batching costs about a third of its throughput.
+
 ### What the numbers mean
 
 - **Network hops and locks dominate.** PostgreSQL spends most of a transfer on round trips and on row locks held
