@@ -12,5 +12,9 @@ publish.workspace = true
 hecs = { version = "0.11", default-features = false, features = ["std"] }
 sawgrass-protocol = { path = "../sawgrass-protocol" }
 
+[[bench]]
+name = "visibility"
+harness = false
+
 [lints]
 workspace = true
