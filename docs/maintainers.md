@@ -18,13 +18,23 @@ gh label create "size: L"        -R $R -c c2e0c6 -d "Several pull requests"
 
 Only people with triage access can add labels, so only maintainers can mark a task `ready`.
 
+## Merge settings
+
+Settings → General → Pull Requests: allow **squash merging only** (untick merge commits and rebase merging), with
+the pull request title and description as the default commit message.
+
 ## Branch protection on `main`
 
-- Require a pull request before merging, with 1 approval and review from Code Owners.
-- Dismiss stale approvals when new commits are pushed.
-- Require these status checks: `fmt`, `clippy`, `test`, `deny`, `scripts`, `no-game-data`, `task-id`.
-- Require linear history (squash merge only); block force pushes and deletion.
-- Do not allow bypassing the above, including for administrators.
+Settings → Branches → add a classic branch protection rule for `main`:
+
+- Require a pull request before merging, with **0 required approvals**. Every pull request is opened from a
+  maintainer's account and GitHub does not count an author's own approval, so a required approval would block all
+  merges. Review happens through the review agent's comment and the maintainer's decision to merge.
+- Require these status checks to pass: `fmt`, `clippy`, `test`, `deny`, `scripts`, `no-game-data`, `task-id`.
+- Require linear history; block force pushes and deletion.
+- Do not allow bypassing the above, including for administrators ("Do not allow bypassing the above settings").
+
+Raise the approval count and require Code Owner review once maintainers and contributors use separate accounts.
 
 ## Actions settings
 
