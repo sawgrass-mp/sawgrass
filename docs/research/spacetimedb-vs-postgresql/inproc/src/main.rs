@@ -3,8 +3,12 @@
 //! One writer thread owns every wallet. Callers (the tick, scripts) send it transfer requests over a channel and
 //! wait for the reply. The writer checks and applies each transfer, appends one record per operation to the log,
 //! and replies only once the record is on disk, so an acknowledged transfer survives a crash. Each record holds a
-//! whole operation (both entries) behind a length and a CRC, so a crash can only lose a torn last record, never
-//! half a transfer, and recovery drops it.
+//! whole operation (both entries) behind a length and a CRC, so a crash can only leave a torn last record, never
+//! half a transfer. Recovery drops a torn last record and refuses to start on a bad record anywhere else, because
+//! acknowledged transfers follow it.
+//!
+//! A retried request with the same idempotency key and the same parameters gets the original operation back, as
+//! with `sawgrass_db::transfer`; the same key with other parameters is an error.
 //!
 //! Commands:
 //!
@@ -16,12 +20,17 @@
 //! `each` flushes to disk after every transfer, `group` once per batch of whatever is waiting (group commit),
 //! `none` never (the OS writes it back later; a crash loses recent transfers). `recover` replays a log, checks the
 //! invariants and prints how long it took.
+//!
+//! Crash tests: with `SAWGRASS_ACK_MARKER` set, the writer records in `<log>.acked` the number of operations it has
+//! made durable, after each flush and before it sends any reply. Every acknowledgement a caller ever received is
+//! therefore covered by the marker, so after killing the process, `recover` must find at least that many
+//! operations.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::os::unix::fs::FileExt;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -50,8 +59,16 @@ struct Request {
 #[derive(Default)]
 struct Ledger {
     balances: Vec<i64>,
-    keys: HashMap<String, u64>,
+    /// Idempotency key to (operation, from, to, amount). A real ledger keeps a bounded window of keys.
+    keys: HashMap<String, (u64, u64, u64, i64)>,
     operations: u64,
+}
+
+/// What a request turns into.
+enum Checked {
+    New(Record),
+    /// The key was used before with the same parameters: this operation already did it.
+    Already(u64),
 }
 
 /// One operation as stored in the log.
@@ -70,20 +87,24 @@ impl Ledger {
     }
 
     /// Checks a transfer and returns the record to write, without changing anything.
-    fn check(&self, key: &str, from: u64, to: u64, amount: i64) -> Result<Record, String> {
+    fn check(&self, key: &str, from: u64, to: u64, amount: i64) -> Result<Checked, String> {
         if amount <= 0 {
             return Err(format!("amount {amount} is not positive"));
         }
         if from == to {
             return Err("same wallet".into());
         }
-        if self.keys.contains_key(key) {
-            return Err(format!("key {key} already used"));
+        if let Some(&(op, f, t, a)) = self.keys.get(key) {
+            return if (f, t, a) == (from, to, amount) {
+                Ok(Checked::Already(op))
+            } else {
+                Err(format!(
+                    "key {key} already used by operation {op} with other parameters"
+                ))
+            };
         }
-        let (Some(&fb), Some(&tb)) = (
-            self.balances.get(from as usize),
-            self.balances.get(to as usize),
-        ) else {
+        let (Some(&fb), Some(&tb)) = (self.balances.get(from as usize), self.balances.get(to as usize))
+        else {
             return Err("unknown wallet".into());
         };
         let from_after = fb.checked_sub(amount).ok_or("overflow")?;
@@ -91,14 +112,14 @@ impl Ledger {
             return Err(format!("wallet {from} holds {fb}, needs {amount}"));
         }
         let to_after = tb.checked_add(amount).ok_or("overflow")?;
-        Ok(Record {
+        Ok(Checked::New(Record {
             key: key.to_string(),
             from,
             to,
             amount,
             from_after,
             to_after,
-        })
+        }))
     }
 
     /// Applies a checked record (or one read back from the log).
@@ -110,15 +131,13 @@ impl Ledger {
         if self.balances[r.from as usize] - r.amount != r.from_after
             || self.balances[r.to as usize] + r.amount != r.to_after
         {
-            return Err(format!(
-                "record {} does not follow from the balances",
-                r.key
-            ));
+            return Err(format!("record {} does not follow from the balances", r.key));
         }
         self.balances[r.from as usize] = r.from_after;
         self.balances[r.to as usize] = r.to_after;
         self.operations += 1;
-        self.keys.insert(r.key.clone(), self.operations);
+        self.keys
+            .insert(r.key.clone(), (self.operations, r.from, r.to, r.amount));
         Ok(self.operations)
     }
 
@@ -127,12 +146,7 @@ impl Ledger {
         if total != 0 {
             return Err(format!("balances sum to {total}"));
         }
-        if let Some(w) = self
-            .balances
-            .iter()
-            .skip(SHOP as usize + 1)
-            .position(|&b| b < 0)
-        {
+        if let Some(w) = self.balances.iter().skip(SHOP as usize + 1).position(|&b| b < 0) {
             return Err(format!("character wallet {} is negative", w + 2));
         }
         Ok(())
@@ -197,51 +211,67 @@ fn crc32(data: &[u8]) -> u32 {
     })
 }
 
-/// Replays a log into a fresh ledger. A torn or corrupt tail (from a crash) ends the replay; its length in bytes
-/// is returned so the caller can truncate it.
-fn replay(path: &str) -> std::io::Result<(Ledger, u64, u64)> {
+/// Replays a log into a fresh ledger and returns it with the length of the valid log.
+///
+/// Only the last record may be torn: one that is cut short, or fails its checksum and ends exactly at the end of
+/// the file (a crash during its write). It is reported so the caller can truncate it. A record that fails its
+/// checksum, decoding or the balance check anywhere else is corruption with acknowledged operations after it, and
+/// replay fails so that an operator decides.
+fn replay(path: &str) -> Result<(Ledger, u64, u64), String> {
     let mut ledger = Ledger::default();
     let Ok(file) = File::open(path) else {
         return Ok((ledger, 0, 0));
     };
-    let total = file.metadata()?.len();
+    let total = file.metadata().map_err(|e| e.to_string())?.len();
     let mut r = BufReader::with_capacity(1 << 20, file);
     let mut good = 0u64;
     let mut head = [0u8; 8];
     let mut payload = Vec::new();
-    loop {
-        if r.read_exact(&mut head).is_err() {
-            break;
+    while good < total {
+        if total - good < 8 {
+            break; // A header cut short: torn tail.
         }
-        let len = u32::from_le_bytes(head[0..4].try_into().unwrap_or_default()) as usize;
-        let crc = u32::from_le_bytes(head[4..8].try_into().unwrap_or_default());
-        payload.resize(len, 0);
-        if len > 1 << 16 || r.read_exact(&mut payload).is_err() || crc32(&payload) != crc {
-            break;
+        r.read_exact(&mut head).map_err(|e| e.to_string())?;
+        let len = u64::from(u32::from_le_bytes([head[0], head[1], head[2], head[3]]));
+        let crc = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+        let end = good + 8 + len;
+        if end > total {
+            break; // A record cut short: torn tail.
         }
-        let Some(record) = decode(&payload) else {
-            break;
+        payload.resize(len as usize, 0);
+        r.read_exact(&mut payload).map_err(|e| e.to_string())?;
+        let record = (crc32(&payload) == crc).then(|| decode(&payload)).flatten();
+        let Some(record) = record else {
+            if end == total {
+                break; // The last record, written in part: torn tail.
+            }
+            return Err(format!(
+                "corrupt record at byte {good}, {} bytes of log after it; refusing to start",
+                total - end
+            ));
         };
-        if ledger.apply(&record).is_err() {
-            break;
-        }
-        good += 8 + len as u64;
+        ledger
+            .apply(&record)
+            .map_err(|e| format!("record at byte {good} is inconsistent: {e}; refusing to start"))?;
+        good = end;
     }
     Ok((ledger, good, total - good))
 }
 
-fn writer(mut ledger: Ledger, mut log: File, flush: Flush, rx: Receiver<Request>) {
+fn writer(mut ledger: Ledger, mut log: File, flush: Flush, marker: Option<File>, rx: Receiver<Request>) {
     let mut buf = Vec::with_capacity(1 << 20);
     let mut pending: Vec<(Sender<Result<u64, String>>, u64)> = Vec::with_capacity(MAX_BATCH);
     while let Ok(first) = rx.recv() {
         let mut next = Some(first);
         while let Some(req) = next.take() {
             match ledger.check(&req.key, req.from, req.to, req.amount) {
-                Ok(record) => {
+                Ok(Checked::New(record)) => {
                     encode(&record, &mut buf);
                     let op = ledger.apply(&record).expect("checked");
                     pending.push((req.reply, op));
                 }
+                // Answered after this batch's flush too: the original may be in it.
+                Ok(Checked::Already(op)) => pending.push((req.reply, op)),
                 Err(e) => {
                     let _ = req.reply.send(Err(e));
                 }
@@ -256,6 +286,11 @@ fn writer(mut ledger: Ledger, mut log: File, flush: Flush, rx: Receiver<Request>
                 log.sync_data().expect("sync log");
             }
             buf.clear();
+        }
+        if let Some(marker) = &marker {
+            marker
+                .write_all_at(&ledger.operations.to_le_bytes(), 0)
+                .expect("write marker");
         }
         for (reply, op) in pending.drain(..) {
             let _ = reply.send(Ok(op));
@@ -274,7 +309,14 @@ impl XorShift {
 }
 
 fn run(path: &str, clients: usize, seconds: u64, hot: bool, flush: Flush) {
-    let (mut ledger, good, torn) = replay(path).expect("replay");
+    let (mut ledger, good, torn) = match replay(path) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let created = !Path::new(path).exists();
     let log = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -282,22 +324,28 @@ fn run(path: &str, clients: usize, seconds: u64, hot: bool, flush: Flush) {
         .open(path)
         .expect("open log");
     log.set_len(good).expect("truncate torn tail");
+    log.sync_all().expect("sync log");
     drop(log);
+    if created {
+        // Make the new file's directory entry durable too, or a power cut can lose the whole file.
+        let dir = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty());
+        File::open(dir.unwrap_or(Path::new(".")))
+            .and_then(|d| d.sync_all())
+            .expect("sync log directory");
+    }
     if torn > 0 {
         eprintln!("dropped {torn} bytes of torn tail");
     }
-    let mut log = OpenOptions::new()
-        .append(true)
-        .open(path)
-        .expect("open log");
+    let mut log = OpenOptions::new().append(true).open(path).expect("open log");
     if ledger.wallet_count() == 0 {
         // Seed: system wallets 0 and 1, then one bank wallet per character funded by the treasury.
         let mut buf = Vec::new();
         ledger.balances.resize(2 + CHARACTERS as usize, 0);
         for w in 2..2 + CHARACTERS {
-            let r = ledger
-                .check(&format!("seed-{w}"), TREASURY, w, STARTING_BALANCE)
-                .expect("seed");
+            let Ok(Checked::New(r)) = ledger.check(&format!("seed-{w}"), TREASURY, w, STARTING_BALANCE)
+            else {
+                panic!("seed");
+            };
             encode(&r, &mut buf);
             ledger.apply(&r).expect("seed");
         }
@@ -311,19 +359,24 @@ fn run(path: &str, clients: usize, seconds: u64, hot: bool, flush: Flush) {
         .as_nanos();
 
     let (tx_unbounded, rx_unbounded) = mpsc::channel::<Request>();
-    let writer_thread = std::thread::spawn(move || writer(ledger, log, flush, rx_unbounded));
+    let marker = std::env::var_os("SAWGRASS_ACK_MARKER").map(|_| {
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(format!("{path}.acked"))
+            .expect("open marker")
+    });
+    let writer_thread = std::thread::spawn(move || writer(ledger, log, flush, marker, rx_unbounded));
 
-    let acked = Arc::new(AtomicU64::new(0));
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let started = Instant::now();
     let handles: Vec<_> = (0..clients)
         .map(|client| {
             let tx = tx_unbounded.clone();
-            let acked = Arc::clone(&acked);
             std::thread::spawn(move || {
-                let mut rng = XorShift(
-                    0x9E37_79B9_7F4A_7C15 ^ (client as u64 + 1).wrapping_mul(0xA24B_AED4_963E_E407),
-                );
+                let mut rng =
+                    XorShift(0x9E37_79B9_7F4A_7C15 ^ (client as u64 + 1).wrapping_mul(0xA24B_AED4_963E_E407));
                 let (reply, replies) = mpsc::channel();
                 let mut latencies = Vec::new();
                 let mut n = 0u64;
@@ -351,31 +404,18 @@ fn run(path: &str, clients: usize, seconds: u64, hot: bool, flush: Flush) {
                     n += 1;
                     replies.recv().expect("reply").expect("transfer");
                     latencies.push(begun.elapsed());
-                    acked.fetch_add(1, Ordering::Relaxed);
                 }
                 latencies
             })
         })
         .collect();
     drop(tx_unbounded);
-    // For crash tests: the number of acknowledged transfers so far, written where a killed run leaves it.
-    let progress = std::thread::spawn({
-        let acked = Arc::clone(&acked);
-        let path = format!("{path}.acked");
-        move || {
-            while Instant::now() < deadline {
-                let _ = std::fs::write(&path, acked.load(Ordering::Relaxed).to_string());
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-    });
     let mut latencies: Vec<Duration> = handles
         .into_iter()
         .flat_map(|h| h.join().expect("client"))
         .collect();
     let elapsed = started.elapsed();
     writer_thread.join().expect("writer");
-    progress.join().expect("progress");
     latencies.sort_unstable();
     let at = |q: f64| {
         let i = ((latencies.len() as f64 - 1.0) * q).round() as usize;
@@ -416,12 +456,23 @@ fn main() {
         }
         Some("recover") if args.len() == 3 => {
             let started = Instant::now();
-            let (ledger, good, torn) = replay(&args[2]).expect("replay");
+            let (ledger, good, torn) = match replay(&args[2]) {
+                Ok(state) => state,
+                Err(e) => {
+                    println!("{}: {e}", args[2]);
+                    std::process::exit(1);
+                }
+            };
             let elapsed = started.elapsed();
+            let marker = std::fs::read(format!("{}.acked", args[2]))
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_le_bytes);
             let consistent = ledger.check_invariants();
             println!(
-                "operations={} log_bytes={good} torn_bytes={torn} seconds={:.2} invariants={}",
+                "operations={} acknowledged_marker={} log_bytes={good} torn_bytes={torn} seconds={:.2} invariants={}",
                 ledger.operations,
+                marker.map_or_else(|| "none".into(), |m| m.to_string()),
                 elapsed.as_secs_f64(),
                 consistent.map_or_else(|e| e, |()| "ok".into())
             );

@@ -18,7 +18,8 @@ must survive a crash. This page records what was measured, what was not, and wha
 - **The fastest design is our own server holding the state in memory**, with an append-only log flushed to disk
   before each reply. Callers' transfers are flushed to disk together, one flush per batch. It was 6.4 times faster
   than SpacetimeDB and 13 to 21 times faster than PostgreSQL, with sub-millisecond median latency and no penalty
-  for a hot wallet. A crash test (kill -9 under load) lost no acknowledged transfer, and the invariants held.
+  for a hot wallet. In three kill -9 tests under load the log held every acknowledged transfer, and the invariants
+  held (a process kill, not a power cut; see [Results](#results)).
 - **SpacetimeDB is second.** It works on the same principle (state in memory, logic next to it, batched durability)
   but adds a WebSocket hop and a WASM call per transfer. On this machine it was 2 to 3.3 times faster than
   PostgreSQL on even load and 12 to 17 times faster on a hot wallet.
@@ -29,8 +30,8 @@ must survive a crash. This page records what was measured, what was not, and wha
   admin tools and history. That needs an ADR before code; see [Proposed design](#proposed-design) for what it
   costs.
 
-The prototype is about 430 lines and passed one crash test. It is not a hardened storage engine, and the figures
-come from one 4-core VM. Read [What was not measured](#what-was-not-measured) before relying on them.
+The prototype is about 480 lines and passed three kill tests and three corruption tests. It is not a hardened
+storage engine, and the figures come from one 4-core VM. Read [What was not measured](#what-was-not-measured) before relying on them.
 
 ## What was compared
 
@@ -51,8 +52,10 @@ operation stored as a pair of entries with `balance_after`.
   wallet; callers in the same process send a request over a channel and wait for the reply. The writer checks and
   applies the transfer and appends one record per operation (length, CRC32, both entries) to a log file. It replies
   once the record is on disk. Flush modes: `each` (one `fdatasync` per transfer), `group` (one per batch of up to
-  4,096 waiting requests), `none` (no flush; a crash loses recent transfers). Recovery replays the log, drops a
-  torn last record and checks the invariants.
+  4,096 waiting requests), `none` (no flush; a crash loses recent transfers). Recovery replays the log and checks
+  the invariants. It drops only a torn last record (cut short, or failing its checksum and ending exactly at the
+  end of the file); a bad record anywhere else stops start-up with an error, because acknowledged transfers follow
+  it. A retry with the same idempotency key and parameters returns the original operation, as in `sawgrass-db`.
 
 Workload: 10,000 characters with funded bank wallets. `uniform` moves 1 to 100 units between two random characters;
 `hot` has every transfer pay the one shop wallet. Each caller sends a transfer, waits for the reply and sends the
@@ -72,8 +75,8 @@ The headline figures use the first three rows only.
 ## Results
 
 Machine: one cloud VM, 4 vCPU (Intel Xeon 2.1 GHz), 16 GB RAM, virtual disk (`open_datasync` about 8,500 flushes
-per second). Database, server and callers all ran on this one machine. Single runs: treat differences under about
-10% as noise.
+per second). Database, server and callers all ran on this one machine. Single runs: run-to-run spread was up to about
+20% (see [Was the comparison fair?](#was-the-comparison-fair)), so treat smaller differences as noise.
 
 Transfers per second (p99 latency):
 
@@ -104,10 +107,26 @@ Restart after a crash or shutdown, with about 1.8 million transfers stored:
 | SpacetimeDB | 27 s after a crash, 13 s after a clean stop | Loads all tables into memory; an empty server starts in 0.15 s |
 | PostgreSQL | 0.8 s after a crash | Redoes only the WAL since the last checkpoint; data stays on disk |
 
-Crash test of the in-process ledger: killed with SIGKILL after 6 seconds of `group` load at 64 callers. Callers had
-received 426,199 acknowledgements (counted every 50 ms). The log replayed 426,706 transfers plus the 10,000 seed
-operations, with no torn record and all invariants holding. A process kill leaves the OS page cache intact, so this
-checks the recovery logic, not a power cut; `fdatasync` before the reply is what covers a power cut.
+Crash tests of the in-process ledger. With `SAWGRASS_ACK_MARKER` set, the writer records how many operations are
+durable after each flush and before it sends any reply, so every acknowledgement a caller ever received is covered
+by that number. The process was killed with SIGKILL after 2, 5 and 9 seconds of `group` load at 64 callers:
+
+| Killed after | Operations in the log | Covered by acknowledgements | Invariants |
+|---:|---:|---:|---|
+| 2 s | 148,967 | 148,967 | hold |
+| 5 s | 365,096 | 365,096 | hold |
+| 9 s | 657,721 | 657,663 | hold |
+
+The log never held fewer operations than were acknowledged. The extra 58 in the last run were on disk but not yet
+answered. A process kill leaves the OS page cache intact, so these test the recovery logic and the ordering of flush
+and reply, not a power cut. For a power cut the guarantee rests on `fdatasync` before the reply (and an `fsync` of
+the directory when the log is created), which was not tested by cutting power.
+
+Corruption tests on the 9-second log: one byte changed in the middle of the log stops start-up ("corrupt record at
+byte 19999994, 33537404 bytes of log after it; refusing to start"). The last record cut short by 30 bytes, or with a
+byte changed, is dropped as a torn tail. A limit of this rule: a last record that was durable and later rotted looks
+the same as a torn one and is dropped. A real engine needs a durable record of how far the log was flushed to tell
+them apart.
 
 ### Was the comparison fair?
 
@@ -156,16 +175,19 @@ the PostgreSQL figures. So the question is whether the other two already had an 
 
 ## Proposed design
 
-Authoritative roleplay state lives in the world server's memory, in one writer per kind of state (or per shard of
-wallets). Changes are made durable by an append-only log with group commit before the caller is told "done".
+Authoritative roleplay state lives in the world server's memory, owned by one writer with one log for everything
+that has value (money, inventory, property, factions), so an action that touches several kinds, such as buying an
+item, is one record and cannot be half applied. Changes are made durable by that append-only log with group commit
+before the caller is told "done".
 Snapshots bound the replay time. PostgreSQL is fed from the log asynchronously and serves history, admin queries,
 backups and analytics, but never decides a balance.
 
 What it costs, in honesty:
 
-- **We own a storage engine.** Log format, CRC, torn-tail recovery, snapshots, log rotation and checks against
-  silent corruption all become our code and need tests: crash tests at random points, fuzzed logs, replay
-  equivalence against PostgreSQL.
+- **We own a storage engine.** Log format, CRC, torn-tail recovery, refusing to start on corruption, directory
+  `fsync`, snapshots, log rotation, a bounded window of idempotency keys and checks against silent corruption all
+  become our code and need tests: crash tests at random points, power-cut tests, fuzzed logs, replay equivalence
+  against PostgreSQL.
 - **One machine holds the truth.** A dead disk loses everything not yet copied elsewhere. Shipping the log to a
   second machine (and to the PostgreSQL archive) has to come with it, ideally before acknowledgement for money.
 - **Reads must respect durability.** With group commit, a transfer is applied in memory before its flush. Game
