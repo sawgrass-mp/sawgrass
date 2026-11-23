@@ -1,0 +1,21 @@
+[package]
+name = "sawgrass-db"
+description = "PostgreSQL storage for Sawgrass: characters, wallets and the money ledger."
+version.workspace = true
+edition.workspace = true
+# sqlx 0.9 needs Rust 1.94; the rest of the workspace keeps its 1.85 minimum.
+rust-version = "1.94"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `macros` and `migrate` embed `migrations/` into the binary with `sqlx::migrate!`. No TLS feature yet: the
+# database is reached over a private network until a deployment task decides otherwise.
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate"] }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
