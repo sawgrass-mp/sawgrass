@@ -1,6 +1,6 @@
 # ADR 0002: Support two client runtimes, Leonida and XCL
 
-Status: proposed, 2026-11-23
+Status: accepted, 2026-11-23. Supersedes the Leonida-only point of ADR 0001.
 
 ## Context
 
@@ -35,5 +35,7 @@ character, so the client cannot be tied to one of them.
   is its own task and waits for that runtime.
 - Open question for the maintainers: XCL is licensed GPL-2.0-only, which is not compatible with this project's
   AGPL-3.0 when both are combined in one program. Leonida is GPL-3.0, which is. Before an XCL adapter is written,
-  the maintainers decide how the client module and XCL are combined (for example a separate process talking over
-  IPC, or a differently licensed shim) or seek upstream relicensing.
+  the maintainers choose one of: keep the Sawgrass client in its own process and let only a minimal shim inside
+  the XCL process pass hooked calls to it over local IPC (the shim licensed compatibly with GPL-2.0); license the
+  in-process part of the client so that it can be combined with GPL-2.0-only code; or ask XCL's authors to
+  relicense. This is a licensing question, not legal advice.
