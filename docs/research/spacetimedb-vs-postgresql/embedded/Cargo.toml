@@ -1,0 +1,19 @@
+# The money ledger on embedded storage engines (SQLite, redb, RocksDB, LMDB) behind the same single writer and
+# group commit as ../inproc, for the comparison in ../README.md. Not part of the Sawgrass workspace.
+[package]
+name = "embedded_ledger"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+redb = "3"
+rocksdb = { version = "0.24", default-features = false }
+heed = "0.22"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace]

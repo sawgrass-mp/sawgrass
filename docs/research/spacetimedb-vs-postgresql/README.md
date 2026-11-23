@@ -1,6 +1,7 @@
-# Storage for roleplay state: in-process log, SpacetimeDB, PostgreSQL
+# Storage for roleplay state: our own log, embedded engines, TigerBeetle, SpacetimeDB, PostgreSQL
 
-Measured 2026-11-23 with SpacetimeDB 2.16.1, PostgreSQL 16.15 and a prototype in-process ledger. Task: DB-2.
+Measured 2026-11-23 with a prototype in-process ledger, SQLite 3.50.2, redb 3.1.3, RocksDB 10.4.2, LMDB 0.9.70,
+TigerBeetle 0.17.9, SpacetimeDB 2.16.1 and PostgreSQL 16.15. Tasks: DB-2, DB-4.
 
 The question: what is the fastest sound way to store roleplay state with money in it (money, inventory, property,
 factions)? Keeping existing code is not a goal. Money must never be created or lost, and an acknowledged change
@@ -8,27 +9,46 @@ must survive a crash. This page records what was measured, what was not, and wha
 
 ## Short answer
 
-| Design (same ledger, same rules, 64 callers) | Transfers per second, durable | One hot wallet | Restart with 1.8 M operations |
+| Design (same ledger, same rules, 64 callers, durable) | Transfers per second | One hot wallet | Restart |
 |---|---:|---:|---:|
-| **In-process ledger**, log on disk, group commit | **72,781** | **71,969** | **1.7 s** replay |
+| **In-process ledger**, its own log, group commit | **72,781** | **71,969** | 1.7 s for 1.8 M operations |
+| In-process ledger on RocksDB | 51,542 | 56,738 | 1.2 s for 1.3 M operations |
+| In-process ledger on LMDB | 36,968 | 38,278 | 0.6 s for 0.9 M operations |
+| In-process ledger on redb | 29,142 | 29,343 | 0.7 s for 0.7 M operations |
+| In-process ledger on SQLite, `synchronous=FULL` | 24,042 | 21,553 | 0.2 s for 0.3 M operations |
+| TigerBeetle, one transfer per request | 20,781 | 22,281 | 3.0 s after a kill, 1.3 s clean |
 | SpacetimeDB 2.16.1 | 11,352 | 10,707 | 13 s clean, 27 s after a crash |
 | PostgreSQL, one SQL function per transfer | 5,666 | 917 | 0.8 s after a crash |
 | PostgreSQL, current `sawgrass-db` code | 3,437 | 642 | (same) |
+
+"In-process ledger on X" is the same server-side writer with the same group commit, with X storing each batch
+instead of our own log. Two variants are left out of the table because they do not meet the same bar: SQLite with
+`synchronous=NORMAL` (29,616 and 30,861: it can lose recent acknowledged transfers on a power cut) and TigerBeetle
+with 100 transfers per request (50,516 and 60,037, but a p99 of 0.6 to 0.7 s, and our callers send one at a time).
 
 - **The fastest design is our own server holding the state in memory**, with an append-only log flushed to disk
   before each reply. Callers' transfers are flushed to disk together, one flush per batch. It was 6.4 times faster
   than SpacetimeDB and 13 to 21 times faster than PostgreSQL, with sub-millisecond median latency and no penalty
   for a hot wallet. In three kill -9 tests under load the log held every acknowledged transfer, and the invariants
   held (a process kill, not a power cut; see [Results](#results)).
-- **SpacetimeDB is second.** It works on the same principle (state in memory, logic next to it, batched durability)
-  but adds a WebSocket hop and a WASM call per transfer. On this machine it was 2 to 3.3 times faster than
-  PostgreSQL on even load and 12 to 17 times faster on a hot wallet.
+- **An embedded engine under the same writer comes close.** RocksDB reached 71% of our own log at 64 callers and
+  70% at 256, LMDB 51% and 74%. Either would replace the storage code we would otherwise own (record format,
+  checksums, recovery, compaction) with a tested engine. See
+  [Embedded engines and TigerBeetle](#embedded-engines-and-tigerbeetle).
+- **Group commit decides it for every engine.** One commit per transfer gave 3,300 to 6,100 per second for all of
+  them except SQLite `NORMAL`, the speed of the disk.
+- **SQLite's speed-up is `synchronous=NORMAL`**, which skips the flush on commit. Here it gave 23% more at 64
+  callers and 2.8 times more for a single caller, at the cost of durability against a power cut.
+- **TigerBeetle** is a ledger database built for this kind of load, but it holds only accounts and transfers, not
+  inventory or property, and it could not be run here as it is meant to run in production (see below).
+- **SpacetimeDB is next.** It works on the same principle (state in memory, logic next to it, batched durability)
+  but adds a WebSocket hop and a WASM call per transfer.
 - **PostgreSQL is last on writes**, mostly because every transfer holds row locks across a network round trip and a
   disk flush. It is still the best tool for history, queries, backups and replicas.
 - **Proposed design:** authoritative roleplay state in the world server's memory, made durable by its own log with
   group commit, plus periodic snapshots. PostgreSQL becomes an asynchronous archive fed from the log, for queries,
-  admin tools and history. That needs an ADR before code; see [Proposed design](#proposed-design) for what it
-  costs.
+  admin tools and history. See [Proposed design](#proposed-design) for what it costs, and for RocksDB as the
+  storage under it.
 
 The prototype is about 490 lines and passed three kill tests and four corruption tests. It is not a hardened
 storage engine, and the figures come from one 4-core VM. Read [What was not measured](#what-was-not-measured)
@@ -58,10 +78,19 @@ operation stored as a pair of entries with `balance_after`.
   failing its checksum and ending exactly at the end of the file); a bad record anywhere else stops start-up with
   an error, because acknowledged transfers follow it. A retry with the same idempotency key and parameters returns
   the original operation, as in `sawgrass-db`.
+- **In-process ledger on an embedded engine:** [`embedded/`](embedded/src/main.rs). The same writer thread, checks
+  and group commit as `inproc`, but each batch is one transaction in the engine (every operation plus the new
+  balance of each wallet it touched) instead of a record in our log. Engines: SQLite in WAL mode with
+  `synchronous=FULL` and with `synchronous=NORMAL`, redb with `Durability::Immediate`, RocksDB with a write batch
+  and `sync=true`, LMDB with default flags (synced on commit). On start it loads the balances and rebuilds the
+  idempotency keys from the stored operations.
+- **TigerBeetle:** one replica, driven by [`tigerbeetle/`](tigerbeetle/src/main.rs) through the official Rust
+  client. Character accounts carry `debits_must_not_exceed_credits`, so they cannot go negative; the transfer id is
+  the idempotency key. One shared client, which batches concurrent requests itself.
 
 Workload: 10,000 characters with funded bank wallets. `uniform` moves 1 to 100 units between two random characters;
 `hot` has every transfer pay the one shop wallet. Each caller sends a transfer, waits for the reply and sends the
-next. Runs last 20 seconds (10 seconds for the in-process ledger).
+next. Runs last 20 seconds (10 seconds for the in-process ledger, the embedded engines and TigerBeetle).
 
 ### Durability, stated for each
 
@@ -70,9 +99,12 @@ next. Runs last 20 seconds (10 seconds for the in-process ledger).
 | PostgreSQL, `synchronous_commit = on` | After the WAL record is flushed | Nothing acknowledged |
 | SpacetimeDB, confirmed reads (default) | After the transaction is durable | Nothing acknowledged |
 | In-process, `each` or `group` | After `fdatasync` of the log | Nothing acknowledged |
+| In-process on SQLite `FULL`, redb, RocksDB or LMDB | After the engine's commit, which syncs to disk | Nothing acknowledged |
+| In-process on SQLite `NORMAL` | After the commit reaches the WAL file, before any sync | Nothing on a process crash; recent acknowledged transfers on a power cut or OS crash |
+| TigerBeetle, one replica | After the replica has written the transfer to its own log | Nothing acknowledged on a process kill (power cut not checked here; see below) |
 | In-process `none`, PostgreSQL `synchronous_commit = off`, SpacetimeDB confirmed reads off | Before the flush | Recent acknowledged transfers, always whole ones |
 
-The headline figures use the first three rows only.
+The headline figures use only the rows where nothing acknowledged is lost.
 
 ## Results
 
@@ -139,6 +171,59 @@ was cut short never rests on unchecked bytes.
 A limit of the last rule: a last record that was durable and later rotted looks the same as a torn one and is
 dropped. A real engine needs a durable note of how far the log was flushed to tell them apart.
 
+### Embedded engines and TigerBeetle
+
+Same machine, same workload, run with the machine otherwise idle. Transfers per second (p99 latency), `group`
+commit unless noted; our own log repeated from the table above for comparison:
+
+| Pattern | Callers | Own log | RocksDB | LMDB | redb | SQLite `FULL` | SQLite `NORMAL` | TigerBeetle |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| uniform | 1 | 5,444 (0.42 ms) | 4,643 (0.52 ms) | 2,688 (0.81 ms) | 3,052 (0.76 ms) | 4,563 (0.67 ms) | 12,649 (0.25 ms) | not run |
+| uniform | 16 | 44,718 (0.78 ms) | 33,362 (1.0 ms) | 16,319 (2.3 ms) | 13,845 (2.4 ms) | 15,764 (3.2 ms) | 26,046 (7.9 ms) | not run |
+| uniform | 64 | 72,781 (2.0 ms) | 51,542 (2.2 ms) | 36,968 (3.0 ms) | 29,142 (4.0 ms) | 24,042 (6.8 ms) | 29,616 (12 ms) | 20,781 (32 ms) |
+| uniform | 256 | 93,862 (4.0 ms) | 65,905 (6.1 ms) | 69,849 (5.8 ms) | 51,928 (8.2 ms) | 27,617 (19 ms) | 31,334 (21 ms) | 30,016 (48 ms) |
+| hot | 64 | 71,969 (1.7 ms) | 56,738 (2.3 ms) | 38,278 (3.1 ms) | 29,343 (4.6 ms) | 21,553 (7.4 ms) | 30,861 (12 ms) | 22,281 (30 ms) |
+| hot | 256 | 97,107 (4.1 ms) | not run | not run | not run | not run | not run | 33,492 (47 ms) |
+| uniform, one commit per transfer | 64 | 6,128 (16 ms) | 5,357 (21 ms) | 3,322 (34 ms) | 3,315 (33 ms) | 4,855 (25 ms) | 14,791 (12 ms) | |
+
+TigerBeetle with 100 transfers per request at 64 callers: 50,516 uniform (p50 98 ms, p99 694 ms) and 57,690 to
+60,037 hot (p99 604 ms). Its invariant check (debits equal credits, no character overdrawn) passed after every run.
+
+Restart and crash, measured after dropping the page cache:
+
+| Engine | Restart | Kill -9 under load at 64 callers, after 6 s |
+|---|---|---|
+| RocksDB | 1.17 s for 1,269,388 operations (104 MB) | 332,229 operations recovered, invariants hold |
+| LMDB | 0.60 s for 886,233 operations (81 MB) | 225,065 recovered, invariants hold |
+| redb | 0.68 s for 712,429 operations (114 MB) | 181,582 recovered, invariants hold |
+| SQLite `FULL` | 0.23 s for 303,867 operations (31 MB) | 154,172 recovered, invariants hold |
+| SQLite `NORMAL` | 0.50 s for 716,994 operations (72 MB) | 205,617 recovered, invariants hold |
+| TigerBeetle | 3.0 s after kill -9, 1.3 s after SIGTERM (2.8 GB preallocated file) | invariants hold after the kill |
+
+For the embedded engines restart time is about one second per million operations, almost all of it rebuilding the
+idempotency keys from every stored operation, which this harness does and a real server would bound. Unlike our own
+log, they keep balances on disk, so a bounded key window would make restarts close to instant without snapshots.
+The kill tests check that each engine comes back consistent; unlike the tests of our own log above, they did not
+record which operations had been acknowledged.
+
+What to keep in mind about these rows:
+
+- **TigerBeetle did not run as it is meant to.** This VM's disk does not support Direct I/O, which TigerBeetle uses
+  to make a write durable when it completes, so it ran with `--development`; its own help says that mode "should
+  not be used for production or benchmarks". It ran as one replica on the same machine as the callers. Production
+  runs six replicas, which adds network round trips to every commit and adds fault tolerance. Treat its figures as
+  a rough indication only. It also holds only accounts and transfers, so inventory and property would live in a
+  second store, and a purchase would span two systems.
+- **RocksDB and LMDB gain more from more callers** than our log does, so the gap narrows at 256 callers (70% and 74%
+  of our log). Our log reached 94,000 there with one `fdatasync` per batch; these engines do more work per batch
+  (index updates, page writes) but are mature and tested.
+- **SQLite `NORMAL` is the fast mode people know SQLite for.** In WAL mode it skips the sync at commit and syncs
+  at checkpoints, which is safe against a process crash but not a power cut. Its single-caller figure is high for
+  that reason. It also hit a ceiling near 31,000 at 256 callers.
+- **Building them.** SQLite (bundled) and RocksDB compile C and C++ code during the build, through their `-sys`
+  crates' build scripts; RocksDB also needs clang and adds minutes to a clean build. LMDB is a small C library;
+  redb is pure Rust.
+
 ### Was the comparison fair?
 
 The in-process `group` mode batches flushes, and `each` (one flush per transfer, about 6,000 per second) is close
@@ -172,8 +257,8 @@ to the PostgreSQL figures. So the question is whether the other two already had 
   wait for. SpacetimeDB behaves the same; PostgreSQL does not.
 - **The in-process figure is a lower bound for the design.** Callers here are threads that pass messages, one
   transfer at a time. In the real server the tick could hand over a whole tick's transfers at once.
-- **Our expected load** is a guess until BOT-2: about 1,200 storage writes per second at peak for 4096 players. All
-  three designs cover that on even load; PostgreSQL does not cover it on one hot wallet.
+- **Our expected load** is a guess until BOT-2: about 1,200 storage writes per second at peak for 4096 players. Every
+  design here covers that on even load; PostgreSQL does not cover it on one hot wallet.
 
 ### What was not measured
 
@@ -183,6 +268,9 @@ to the PostgreSQL figures. So the question is whether the other two already had 
 - Inventory, property and factions. The ledger is the strictest of them; that they behave alike is an assumption.
 - The asynchronous PostgreSQL archive of the proposed design, and snapshots for faster restarts. Neither exists
   yet.
+- For the embedded engines: which acknowledged operations survive a kill (only consistency was checked), tuning
+  beyond the settings named above (RocksDB and LMDB both have many), and memory use.
+- TigerBeetle with Direct I/O, with several replicas, or with callers on other machines.
 
 ## Proposed design
 
@@ -206,6 +294,12 @@ What it costs, in honesty:
 - **The architecture changes.** `docs/architecture.md` names PostgreSQL as the source of truth for characters,
   money, inventory and property. Moving that is an ADR first, then the code.
 
+**Or keep the design and use RocksDB under it.** The same writer with RocksDB as its store did 71% of our own log's
+throughput at 64 callers and 70% at 256, with a p99 of 2.2 ms. That removes the first cost above (format,
+checksums, recovery, compaction become a mature engine's job, and balances live on disk, so restarts need no
+snapshots) and keeps the others. LMDB is the next candidate. Choosing between our own log and an engine is a
+decision for the ADR.
+
 SpacetimeDB would give most of this ready-made (in-memory state, log, snapshots, logic next to the data). It is
 about 6 times slower here than our own process, needs a network hop from the world server, and comes with the
 licence terms below.
@@ -223,7 +317,24 @@ The core (QUIC datagrams through gateways, the spatial grid, the 20 Hz tick) is 
 - **Volume.** 4096 players at 20 Hz is 81,920 position updates per second before fan-out. The best SpacetimeDB
   figure here was about 22,000 reducer calls per second, on 4 cores.
 
-## SpacetimeDB licence
+## Licences
+
+Checked against the licence files of the crates and sources used. Sawgrass is AGPL-3.0, and #44 proposes MIT OR
+Apache-2.0.
+
+| Engine | Licence | Fits AGPL-3.0 and MIT OR Apache-2.0 |
+|---|---|---|
+| SQLite | Public domain; `rusqlite` and `libsqlite3-sys` MIT | Yes |
+| redb | MIT OR Apache-2.0 | Yes |
+| RocksDB | GPL-2.0 OR Apache-2.0, used under Apache-2.0 (parts from LevelDB, BSD-3-Clause); `rocksdb` crate Apache-2.0 | Yes |
+| LMDB | OpenLDAP Public License 2.8, a BSD-style licence; `heed` MIT, `lmdb-master-sys` Apache-2.0 | Yes |
+| TigerBeetle | Apache-2.0, server and Rust client | Yes |
+| PostgreSQL | PostgreSQL Licence, a BSD-style licence | Yes |
+| SpacetimeDB | Business Source License 1.1 for the server and SDK; details below | Use limit, see below |
+
+None of the open-source engines limits how many instances run or who runs them. SpacetimeDB is the exception.
+
+### SpacetimeDB
 
 Checked against the licence files of the 2.16.1 crates.
 
@@ -284,6 +395,27 @@ In-process ledger:
 cd inproc
 cargo run --release -- run /tmp/ledger.log 64 10 uniform group    # log, callers, seconds, pattern, each|group|none
 cargo run --release -- recover /tmp/ledger.log                    # replay time and invariants
+```
+
+In-process ledger on an embedded engine (RocksDB's build needs clang; set `LIBCLANG_PATH` if it is not found):
+
+```sh
+cd embedded
+cargo run --release -- run rocksdb /tmp/ledger-rocksdb 64 10 uniform group   # engine, dir, callers, seconds, pattern, each|group
+cargo run --release -- recover rocksdb /tmp/ledger-rocksdb                   # load time and invariants
+```
+
+Engines: `sqlite-full`, `sqlite-normal`, `redb`, `rocksdb`, `lmdb`. Use a new directory per engine.
+
+TigerBeetle (binary from <https://github.com/tigerbeetle/tigerbeetle/releases>; drop `--development` on a disk with Direct I/O):
+
+```sh
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development /tmp/0_0.tigerbeetle
+tigerbeetle start --addresses=3010 --development /tmp/0_0.tigerbeetle &
+cd tigerbeetle
+cargo run --release -- seed 3010
+cargo run --release -- run 3010 64 10 uniform 1    # address, callers, seconds, pattern, transfers per request
+cargo run --release -- check 3010                  # fails if the ledger is inconsistent
 ```
 
 ## Sources

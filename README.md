@@ -16,6 +16,7 @@
   <a href="#where-the-project-is">Status</a> ·
   <a href="#progress">Progress</a> ·
   <a href="#how-it-fits-together">Architecture</a> ·
+  <a href="#storage-measured">Storage</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#contributing">Contributing</a>
 </p>
@@ -100,8 +101,8 @@ flowchart LR
   traffic, not simulation, is the bottleneck.
 - **Protocol** (`crates/sawgrass-protocol`): the wire format every peer shares, with quantized positions and
   rotations.
-- **PostgreSQL** is the source of truth for characters, money, inventory and property. Storage options (an
-  in-process log, SpacetimeDB, PostgreSQL) are measured in [docs/research](docs/research/spacetimedb-vs-postgresql/).
+- **PostgreSQL** is the source of truth for characters, money, inventory and property. Faster storage options
+  are measured below, in [Storage, measured](#storage-measured).
 - **Client module**: loaded by Leonida's runtime on the player's PC; syncs the local game with the server.
 - **Launcher**: checks the player's Leonida build, installs the signed client module and starts the game.
 
@@ -113,6 +114,33 @@ flowchart LR
 | Downstream per player | about 40 KB/s at 100 visible entities |
 
 The design is in [docs/architecture.md](docs/architecture.md), the stages in [docs/roadmap.md](docs/roadmap.md).
+
+## Storage, measured
+
+Roleplay state with money in it needs storage that is fast and never loses an acknowledged change. We measured
+nine designs on the same money ledger, with the same rules and the same load.
+
+<p align="center"><img src="docs/assets/storage.svg" alt="Durable money transfers per second at 64 callers: own log in the server 72,781; RocksDB 51,542; LMDB 36,968; redb 29,142; SQLite FULL 24,042; TigerBeetle 20,781; SpacetimeDB 11,352; PostgreSQL 5,666 and 3,437" width="100%"></p>
+
+| Design | Durable transfers/s | One hot wallet | p99 |
+|---|---:|---:|---:|
+| **Own log in the server**, group commit | **72,781** | **71,969** | 2.0 ms |
+| RocksDB in the server | 51,542 | 56,738 | 2.2 ms |
+| LMDB in the server | 36,968 | 38,278 | 3.0 ms |
+| redb in the server | 29,142 | 29,343 | 4.0 ms |
+| SQLite (`synchronous=FULL`) in the server | 24,042 | 21,553 | 6.8 ms |
+| TigerBeetle, one replica | 20,781 | 22,281 | 32 ms |
+| SpacetimeDB | 11,352 | 10,707 | 11 ms |
+| PostgreSQL | 3,437 to 5,666 | 642 to 917 | 37 ms (current code) |
+
+- Keeping the state in the server's memory and flushing many transfers with one disk write wins. RocksDB under the
+  same writer reaches about 70% of our own log and is the alternative to writing our own storage.
+- SQLite's fast mode (`synchronous=NORMAL`, 29,616) can lose recent transfers on a power cut, so it is not ranked.
+- Caveats: one 4-core VM, single runs with up to 20% spread, a prototype that is not a hardened engine, kill tests
+  rather than power cuts, and TigerBeetle in development mode because the VM lacks Direct I/O.
+
+Full results, crash tests, licences and how to reproduce:
+[docs/research](docs/research/spacetimedb-vs-postgresql/).
 
 ## How it is built
 

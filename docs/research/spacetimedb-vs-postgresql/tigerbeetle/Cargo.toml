@@ -1,0 +1,12 @@
+# Load client for the money ledger on TigerBeetle, for the comparison in ../README.md. Not part of the Sawgrass
+# workspace.
+[package]
+name = "tb_ledger"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tigerbeetle = "=0.17.9"
+
+[workspace]
