@@ -6,8 +6,9 @@
 //! the tick interval. The architecture budget is met while that fraction stays under
 //! [`TickStats::P99_BUDGET_FRACTION`].
 //!
-//! A tick's duration is the time its systems take to run, not the time between ticks: the sleep until the
-//! next tick is excluded. An overrun is a tick that took longer than the tick interval.
+//! A tick's duration is the work done in its slot (the `between` hook of [`crate::TickLoop::run`] and every
+//! system), not the time between ticks: the sleep until the next tick is excluded. An overrun is a tick that
+//! took longer than the tick interval.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -24,13 +25,19 @@ pub struct TickMetrics {
 }
 
 impl TickMetrics {
+    /// The most window slots allocated up front; a larger window grows as ticks are recorded.
+    const MAX_PREALLOCATED: usize = 1 << 16;
+
     /// Metrics for ticks of `interval`, keeping the last `capacity` durations (at least one).
+    ///
+    /// At most [`Self::MAX_PREALLOCATED`] slots are allocated here, so a huge `capacity` costs memory only
+    /// as the window fills.
     #[must_use]
     pub fn new(interval: Duration, capacity: usize) -> Self {
         let capacity = capacity.max(1);
         Self {
             interval,
-            window: VecDeque::with_capacity(capacity),
+            window: VecDeque::with_capacity(capacity.min(Self::MAX_PREALLOCATED)),
             capacity,
             ticks: 0,
             overruns: 0,
@@ -148,6 +155,14 @@ mod tests {
     use super::*;
 
     const MS: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn huge_capacity_is_not_preallocated() {
+        let mut metrics = TickMetrics::new(50 * MS, usize::MAX);
+        assert!(metrics.window.capacity() <= 2 * TickMetrics::MAX_PREALLOCATED);
+        metrics.record(MS);
+        assert_eq!(metrics.stats().window, 1);
+    }
 
     #[test]
     fn empty_window_reports_zero() {

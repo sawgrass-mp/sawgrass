@@ -5,6 +5,10 @@
 //! ticks on a fixed grid (tick `n` starts at `start + n * interval`), so the rate does not drift with tick
 //! duration. When a tick overruns and the loop falls more than one interval behind, the grid restarts from
 //! the current time instead of running the missed ticks back to back.
+//!
+//! A tick's recorded duration runs from the start of its slot, when [`TickLoop::run`] calls `between`, to the
+//! end of its last system: everything that delays the schedule counts against the budget. The loop reads
+//! time through a [`Clock`], so tests can drive the schedule with a simulated clock instead of sleeping.
 
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
@@ -27,6 +31,8 @@ impl TickConfig {
     pub const MAX_RATE_HZ: u32 = 1000;
     /// Seconds of ticks the metrics window covers by default.
     pub const DEFAULT_WINDOW_SECS: u32 = 60;
+    /// The longest accepted metrics window: one hour, at most 3.6 million ticks at [`Self::MAX_RATE_HZ`].
+    pub const MAX_WINDOW_SECS: u32 = 3600;
 
     /// A configuration ticking at `rate_hz` (1 to [`Self::MAX_RATE_HZ`]).
     pub fn new(rate_hz: u32) -> Result<Self, TickConfigError> {
@@ -39,10 +45,10 @@ impl TickConfig {
         })
     }
 
-    /// Sets how many seconds of ticks the metrics window covers (at least one tick).
+    /// Sets how many seconds of ticks the metrics window covers, clamped to 1 to [`Self::MAX_WINDOW_SECS`].
     #[must_use]
     pub fn with_window_secs(mut self, secs: u32) -> Self {
-        self.window_secs = secs;
+        self.window_secs = secs.clamp(1, Self::MAX_WINDOW_SECS);
         self
     }
 
@@ -101,6 +107,31 @@ pub struct TickInfo {
     pub tick: u64,
     /// Simulated time this tick advances: always the tick interval, so simulation is deterministic.
     pub dt: Duration,
+}
+
+/// The time source of [`TickLoop::run_with_clock`].
+pub trait Clock {
+    /// The current time.
+    fn now(&self) -> Instant;
+    /// Blocks until `deadline`; returns at once if it has passed.
+    fn sleep_until(&mut self, deadline: Instant);
+}
+
+/// The real clock: [`Instant::now`] and [`std::thread::sleep`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep_until(&mut self, deadline: Instant) {
+        let now = Instant::now();
+        if now < deadline {
+            std::thread::sleep(deadline - now);
+        }
+    }
 }
 
 type System = Box<dyn FnMut(&mut World, &TickInfo) + Send>;
@@ -182,36 +213,53 @@ impl TickLoop {
 
     /// Runs every system once, records the duration and returns it. Does not wait.
     pub fn run_tick(&mut self) -> Duration {
+        let clock = SystemClock;
+        let start = clock.now();
+        self.finish_tick(&clock, start)
+    }
+
+    /// Runs every system once and records the time from `slot_start` to the end of the last system.
+    fn finish_tick(&mut self, clock: &impl Clock, slot_start: Instant) -> Duration {
         let info = TickInfo {
             tick: self.tick,
             dt: self.config.interval(),
         };
-        let start = Instant::now();
         for (_, system) in &mut self.systems {
             system(&mut self.world, &info);
         }
-        let duration = start.elapsed();
+        let duration = clock.now().saturating_duration_since(slot_start);
         self.metrics.record(duration);
         self.tick += 1;
         duration
     }
 
-    /// Runs ticks at the configured rate until `between` returns [`ControlFlow::Break`].
+    /// Runs ticks at the configured rate on the real clock until `between` returns [`ControlFlow::Break`].
     ///
-    /// `between` is called before every tick, outside the measured tick time. It is the place for work that
-    /// is not simulation: reporting metrics, applying commands, deciding to stop.
-    pub fn run(&mut self, mut between: impl FnMut(&mut Self) -> ControlFlow<()>) {
+    /// `between` is called at the start of every tick slot, before the systems. It is the place for work
+    /// that is not simulation: reporting metrics, applying commands, deciding to stop. Its time counts in the
+    /// recorded tick duration, because it delays the schedule like any system.
+    pub fn run(&mut self, between: impl FnMut(&mut Self) -> ControlFlow<()>) {
+        self.run_with_clock(&mut SystemClock, between);
+    }
+
+    /// [`Self::run`] with time read from `clock`.
+    pub fn run_with_clock(
+        &mut self,
+        clock: &mut impl Clock,
+        mut between: impl FnMut(&mut Self) -> ControlFlow<()>,
+    ) {
         let interval = self.config.interval();
-        let mut next = Instant::now();
+        let mut next = clock.now();
         loop {
+            let slot_start = clock.now();
             if between(self).is_break() {
                 return;
             }
-            self.run_tick();
+            self.finish_tick(clock, slot_start);
             next += interval;
-            let now = Instant::now();
+            let now = clock.now();
             if now < next {
-                std::thread::sleep(next - now);
+                clock.sleep_until(next);
             } else if now - next > interval {
                 // More than a whole tick behind: drop the missed slots instead of bursting to catch up.
                 next = now;
@@ -230,6 +278,16 @@ mod tests {
         assert_eq!(config.rate_hz(), 20);
         assert_eq!(config.interval(), Duration::from_millis(50));
         assert_eq!(config.window_ticks(), 1200);
+    }
+
+    #[test]
+    fn window_is_clamped_to_one_hour() {
+        let config = TickConfig::new(TickConfig::MAX_RATE_HZ).expect("valid rate");
+        assert_eq!(config.with_window_secs(u32::MAX).window_ticks(), 3_600_000);
+        assert_eq!(config.with_window_secs(0).window_ticks(), 1000);
+        // Building the loop with the largest window must not try to allocate it all up front.
+        let tick_loop = TickLoop::new(config.with_window_secs(u32::MAX));
+        assert_eq!(tick_loop.metrics().stats().window, 0);
     }
 
     #[test]
