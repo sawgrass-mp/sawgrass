@@ -2,9 +2,10 @@
 
 The language model never decides these; it only reviews the content. See docs/roadmap.md, "Review agent".
 
-    python3 -I tools/reviewer/policy.py PR_NUMBER [OWNER/REPO]
+    python3 -I tools/reviewer/policy.py [--check] PR_NUMBER [OWNER/REPO]
 
-prints the tier and the policy checks of a pull request, read through the `gh` command line tool.
+prints the tier and the policy checks of a pull request, read through the `gh` command line tool. With --check it
+exits 1 when any check fails (the `policy` CI job).
 """
 import fnmatch
 import json
@@ -102,6 +103,8 @@ def _gh(path):
 
 
 def main(argv):
+    strict = argv[:1] == ["--check"]
+    argv = argv[1:] if strict else argv
     if len(argv) not in (1, 2) or not argv[0].isdigit():
         print(__doc__, file=sys.stderr)
         return 2
@@ -119,7 +122,13 @@ def main(argv):
     issue = _gh(f"{base}/issues/{number}") if number is not None else None
     if issue is not None and "pull_request" in issue:
         issue = None
-    print("\n".join(report(pr, files, issue)))
+    lines = report(pr, files, issue)
+    print("\n".join(lines))
+    if strict and any(line.startswith("- ❌") for line in lines):
+        for line in lines[1:]:
+            if line.startswith("- ❌"):
+                print(f"::error::{line[4:]}")
+        return 1
     return 0
 
 

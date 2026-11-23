@@ -1,0 +1,33 @@
+name: Policy
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Runs tools/reviewer/policy.py from the default branch, so a pull request cannot edit the rules it is checked
+# against. It never checks out or runs pull request code and uses no secret. It fails when a check fails: task ID in
+# the title, `Closes #N` to an issue labelled `ready`, the `Model:` line, and the tier 1 size limit.
+# Labelling the task `ready` later does not re-run it: edit the description or re-run the job.
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Policy checks
+        run: python3 -I tools/reviewer/policy.py --check "$PR_NUMBER" "$GITHUB_REPOSITORY"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
