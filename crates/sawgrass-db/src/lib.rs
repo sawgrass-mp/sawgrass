@@ -1,9 +1,15 @@
 //! PostgreSQL storage for Sawgrass: characters, wallets and the money ledger.
 //!
 //! PostgreSQL is the source of truth for everything with roleplay value (see `docs/architecture.md`). Money moves
-//! only through [`transfer`], which writes the ledger entries and the new balances in one transaction. The schema in
-//! `migrations/` enforces the same rules with triggers, so even a hand-written query cannot change a balance
-//! without a balanced, append-only ledger entry.
+//! only through [`transfer`], which writes an operation and its ledger entries in one transaction. In the schema in
+//! `migrations/` the ledger drives the balances: inserting an entry applies it to its wallet, a direct balance
+//! update is refused, the entries of an operation must sum to zero and the ledger is append-only. So a
+//! hand-written query cannot create or lose money either.
+//!
+//! These triggers bind every role except the owner of the tables, which can disable or drop them. Run the
+//! migrations as an owner role and the server as a separate role with `SELECT` and `INSERT` on the tables, `USAGE`
+//! on their sequences, and `UPDATE (balance)` on `wallets`, which `FOR UPDATE` row locks require. The triggers still
+//! refuse a balance change from that role that does not come from a ledger entry.
 //!
 //! Amounts are whole minor units (cents) in `i64`. Money enters and leaves the economy through system wallets
 //! (see [`system_wallet`]), the only wallets allowed to go negative, so the sum of all balances is always zero.
@@ -185,7 +191,7 @@ pub async fn transfer(pool: &PgPool, request: &Transfer<'_>) -> Result<TransferO
         .checked_add(request.amount)
         .ok_or(Error::Overflow(request.to))?;
 
-    // Entries first: the wallet trigger accepts a new balance only if it matches the newest entry.
+    // Each entry applies itself to its wallet (trigger `ledger_entries_apply`), which checks `balance_after`.
     for (wallet, delta, after) in [
         (request.from, -request.amount, from_after),
         (request.to, request.amount, to_after),
@@ -200,11 +206,6 @@ pub async fn transfer(pool: &PgPool, request: &Transfer<'_>) -> Result<TransferO
         .bind(after)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE wallets SET balance = $2 WHERE id = $1")
-            .bind(wallet.0)
-            .bind(after)
-            .execute(&mut *tx)
-            .await?;
     }
 
     tx.commit().await?;

@@ -375,31 +375,121 @@ async fn the_database_refuses_untracked_changes() {
         assert!(result.is_err(), "the database accepted: {statement}");
     }
 
-    // An operation whose entries do not sum to zero fails at commit, even with a matching wallet update.
-    let mut tx = pool.begin().await.expect("begin");
-    let op: i64 = sqlx::query_scalar(
-        "INSERT INTO operations (idempotency_key, reason) VALUES ('forged', 'test') RETURNING id",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .expect("insert operation");
-    sqlx::query("INSERT INTO ledger_entries (operation_id, wallet_id, delta, balance_after) VALUES ($1, $2, 900, 1000)")
-        .bind(op)
-        .bind(c.cash.0)
-        .execute(&mut *tx)
-        .await
-        .expect("insert entry");
-    sqlx::query("UPDATE wallets SET balance = 1000 WHERE id = $1")
-        .bind(c.cash.0)
-        .execute(&mut *tx)
-        .await
-        .expect("update matches the newest entry");
-    assert!(
-        tx.commit().await.is_err(),
-        "an unbalanced operation must not commit"
-    );
+    let other = create_character(pool, "Other", "Person").await.expect("create");
+    fund(pool, treasury, other.cash, 100).await;
 
-    assert_eq!(balance(pool, c.cash).await.expect("balance"), 100);
+    // An entry whose `balance_after` is not the current balance plus `delta` is refused when inserted. This is
+    // the two-entry forgery from review: entries that sum to zero, but only one wallet would really move.
+    let forged = forge(
+        pool,
+        "two-entry",
+        &[(c.cash, 900, 1_000), (other.cash, -900, 100)],
+    )
+    .await;
+    assert!(
+        forged.is_err(),
+        "an entry that does not match its wallet must be refused"
+    );
+    let forged = forge(pool, "stale", &[(c.cash, 900, 1_000), (treasury, -900, 0)]).await;
+    assert!(forged.is_err(), "a stale balance_after must be refused");
+
+    // A correct entry applies itself, but an operation whose entries do not sum to zero fails at commit.
+    let forged = forge(pool, "one-entry", &[(c.cash, 900, 1_000)]).await;
+    assert!(forged.is_err(), "an unbalanced operation must not commit");
+
+    // A balanced operation written by hand is an ordinary operation: both wallets move, nothing is created.
+    forge(pool, "by-hand", &[(c.cash, -40, 60), (other.cash, 40, 140)])
+        .await
+        .expect("a balanced, correct operation is accepted");
+    assert_eq!(balance(pool, c.cash).await.expect("balance"), 60);
+    assert_eq!(balance(pool, other.cash).await.expect("balance"), 140);
     assert_ledger_consistent(pool).await;
     db.drop().await;
+}
+
+/// Writes an operation and its entries by hand, bypassing `transfer`, and commits.
+async fn forge(pool: &PgPool, key: &str, entries: &[(WalletId, i64, i64)]) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let op: i64 = sqlx::query_scalar(
+        "INSERT INTO operations (idempotency_key, reason) VALUES ($1, 'test') RETURNING id",
+    )
+    .bind(key)
+    .fetch_one(&mut *tx)
+    .await?;
+    for &(wallet, delta, after) in entries {
+        sqlx::query(
+            "INSERT INTO ledger_entries (operation_id, wallet_id, delta, balance_after) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(op)
+        .bind(wallet.0)
+        .bind(delta)
+        .bind(after)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
+}
+
+/// The server can run as a role that does not own the tables, with the rights the crate docs list.
+#[tokio::test]
+async fn a_least_privilege_role_can_transfer_but_not_edit_balances() {
+    let Some(db) = TestDb::create("role").await else {
+        return;
+    };
+    let role = format!("{}_server", db.name);
+    // The role name is built from digits and a fixed label, never from input.
+    for statement in [
+        format!("CREATE ROLE {role} LOGIN PASSWORD 'test'"),
+        format!("GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO {role}"),
+        format!("GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO {role}"),
+        format!("GRANT UPDATE (balance) ON wallets TO {role}"),
+    ] {
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(&db.pool)
+            .await
+            .expect("set up the role");
+    }
+    let url = std::env::var(URL_VAR).expect("URL");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().expect("parse the URL");
+    let server = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options.database(&db.name).username(&role).password("test"))
+        .await
+        .expect("connect as the server role");
+
+    let treasury = system_wallet(&db.pool, "treasury").await.expect("treasury");
+    let c = create_character(&server, "Least", "Privilege")
+        .await
+        .expect("create as the server role");
+    let outcome = transfer(
+        &server,
+        &Transfer {
+            idempotency_key: "role-salary",
+            from: treasury,
+            to: c.bank,
+            amount: 250,
+            reason: "salary",
+        },
+    )
+    .await
+    .expect("transfer as the server role");
+    assert!(matches!(outcome, TransferOutcome::Applied(_)));
+    assert_eq!(balance(&server, c.bank).await.expect("balance"), 250);
+    let update = sqlx::query("UPDATE wallets SET balance = 0")
+        .execute(&server)
+        .await;
+    assert!(
+        update.is_err(),
+        "the server role must not update wallets directly"
+    );
+
+    server.close().await;
+    assert_ledger_consistent(&db.pool).await;
+    let admin = db.admin.clone();
+    db.drop().await;
+    sqlx::query(AssertSqlSafe(format!("DROP ROLE {role}")))
+        .execute(&admin)
+        .await
+        .expect("drop the role");
 }
