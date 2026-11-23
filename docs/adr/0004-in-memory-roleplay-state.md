@@ -10,7 +10,7 @@ performance, with no need to keep existing code, as long as money is never creat
 change survives a crash.
 
 DB-2 measured three designs on the DB-1 ledger with the same rules and workload
-([results](../research/spacetimedb-vs-postgresql/README.md), figures as of commit `a5409a2`). It used one 4-vCPU VM,
+([results](../research/spacetimedb-vs-postgresql/README.md), figures as of commit `664d8a9`). It used one 4-vCPU VM,
 64 callers, and each transfer on disk before the reply:
 
 | Design | Transfers per second | One hot wallet | Restart, 1.8 M operations |
@@ -51,7 +51,8 @@ against a power cut rests on `fdatasync` before each reply and was not tested by
   disk can then lose.
 - **Recovery rule.** Start-up loads the latest valid snapshot and replays the log after it. Only the last record may
   be torn: cut short, or failing its checksum while ending exactly at the end of the log. That record was never
-  acknowledged and is dropped. A record that fails its checksum, decoding or consistency checks anywhere else, or
+  acknowledged and is dropped. The torn-tail decision never rests on unchecked bytes: a record's length carries its
+  own checksum, and a bad length is corruption, not a torn tail. A record that fails its checksum, decoding or consistency checks anywhere else, or
   an invalid snapshot, stops start-up with an error for an operator. Nothing is truncated silently.
 - **Snapshots bound restart time.** The writer periodically writes a snapshot of its state with the log position it
   covers.
