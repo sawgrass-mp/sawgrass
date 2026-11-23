@@ -11,5 +11,6 @@
 /rust-toolchain.toml @spaceosint
 /Cargo.lock         @spaceosint
 /scripts/           @spaceosint
+/tools/reviewer/    @spaceosint
 /docs/adr/          @spaceosint
 build.rs            @spaceosint

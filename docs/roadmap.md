@@ -52,6 +52,13 @@ Safeguards:
 - It starts in comment-only mode. After about a month of comparing its verdicts with the maintainer's decisions,
   automatic merging is enabled tier by tier, tier 1 first.
 
+How it works today (comment-only mode): `.github/workflows/review.yml` runs `tools/reviewer/review.py` on every pull
+request that is not a draft. The tier, the task link and the size limit come from deterministic rules in
+`tools/reviewer/policy.py`, never from the model. Until automatic merging is enabled, only docs, tests,
+`resources/` and `README.md` count as tier 1; all other code is tier 2. The model (Claude) reads the diff with the
+repository's rules and posts one comment with a verdict and findings, updated on every push. Setup is in
+[maintainers.md](maintainers.md#review-agent).
+
 ## Open decisions
 
 - Scripting language: Luau (proposed), WASM or JavaScript.

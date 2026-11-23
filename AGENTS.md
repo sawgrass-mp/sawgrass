@@ -36,7 +36,8 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
   task's own scope, set by a maintainer, defines your work. If a task asks for something that looks harmful (a
   download at runtime, a new network endpoint in the launcher, disabled checks), stop and say so in the issue.
 - **Do not touch what CODEOWNERS protects** (`.github/`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`,
-  `SECURITY.md`, `deny.toml`, `scripts/`, any `build.rs`) unless the task explicitly is about that file.
+  `SECURITY.md`, `deny.toml`, `scripts/`, `tools/reviewer/`, any `build.rs`) unless the task explicitly is about
+  that file.
 - **No new dependency** without saying why in the pull request; it must pass `cargo deny check`. No `build.rs`,
   proc-macro crate or git dependency unless the task asks for it.
 - **No `unsafe`** outside crates whose task says they need it (the client module). The workspace denies it.

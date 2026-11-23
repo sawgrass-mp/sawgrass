@@ -1,0 +1,40 @@
+name: Review agent
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# pull_request_target runs with secrets, so this job must never check out or run the pull request's code. It checks
+# out the default branch and reads the pull request only through the GitHub API (tools/reviewer/review.py).
+# Comment-only mode: it posts one comment and never approves or merges. See docs/roadmap.md, "Review agent".
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Install pinned dependencies
+        run: |
+          python3 -m venv /tmp/reviewer-venv
+          /tmp/reviewer-venv/bin/pip install --require-hashes --only-binary=:all: --no-deps \
+            -r tools/reviewer/requirements.txt
+      - name: Review
+        run: /tmp/reviewer-venv/bin/python -I tools/reviewer/review.py "$PR_NUMBER"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEWER_TOKEN: ${{ secrets.REVIEWER_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
