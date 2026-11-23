@@ -1,0 +1,49 @@
+name: Claims
+on:
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: claims-${{ github.event.issue.number || 'expire' }}
+  cancel-in-progress: false
+
+# Runs the scripts from the default branch only (issue_comment and schedule never check out pull request code).
+# The comment body reaches the script through the event file, never the shell.
+jobs:
+  command:
+    if: >-
+      github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+      (contains(github.event.comment.body, '/claim') || contains(github.event.comment.body, '/unclaim'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -I scripts/claims.py command
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  expire:
+    if: github.event_name != 'issue_comment'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -I scripts/claims.py expire
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

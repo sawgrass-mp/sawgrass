@@ -1,0 +1,29 @@
+# ---- never commit the game or anything made from it ----
+# (archives, executables, carved files, shaders, textures, models, audio, reports that quote game data)
+*.rpf
+*.ttpf
+*.xvd
+*.msixvc
+*.dxbc
+*.fssm
+*.spv
+*.spvasm
+*.dds
+*.bk2
+*.awc
+*.r9modeldata
+*.obj
+*.glb
+*.ogg
+*.wav
+*.exe
+*.dll
+
+# ---- build output, local config ----
+/target/
+__pycache__/
+*.pyc
+*.log
+.env
+.env.*
+.claude/settings.local.json

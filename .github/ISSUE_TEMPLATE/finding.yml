@@ -1,0 +1,31 @@
+name: Finding
+description: Something that needs doing that you won't do yourself (a bug, a missing test, a stale doc).
+labels: [triage]
+body:
+  - type: input
+    id: summary
+    attributes:
+      label: Finding
+      description: One line.
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: File and line, or the component.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: This issue contains no game data, keys or logs that quote them.
+          required: true
