@@ -79,8 +79,11 @@ fn entity_state_round_trips() {
 #[test]
 fn position_codes_are_exact_centimetres() {
     let p = Position::from_metres([1.0, -0.004, 0.006]).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(p.cm, [100, 0, 1]);
-    assert_eq!(Position::from_metres([-0.016, 0.0, 0.0]).map(|p| p.cm[0]), Ok(-2));
+    assert_eq!(p.cm(), [100, 0, 1]);
+    assert_eq!(
+        Position::from_metres([-0.016, 0.0, 0.0]).map(|p| p.cm()[0]),
+        Ok(-2)
+    );
 }
 
 #[test]
@@ -216,4 +219,60 @@ fn rotation_handles_sign_and_axes() {
         Rotation::from_quaternion([f32::NAN, 0.0, 0.0, 1.0]),
         Err(EncodeError::NotFinite)
     );
+}
+
+#[test]
+fn position_from_cm_checks_the_i24_range() {
+    let max = (1 << 23) - 1;
+    assert_eq!(
+        Position::from_cm([max, -max - 1, 0]).map(Position::cm),
+        Ok([max, -max - 1, 0])
+    );
+    assert_eq!(Position::from_cm([max + 1, 0, 0]), Err(EncodeError::OutOfRange));
+    assert_eq!(Position::from_cm([0, 0, -max - 2]), Err(EncodeError::OutOfRange));
+}
+
+#[test]
+fn rotation_survives_huge_and_tiny_inputs() {
+    for scale in [1e20, 1e-20] {
+        let q = [1.0, 1.0, 1.0, 2.0].map(|c: f32| c * scale);
+        let unit = [1.0, 1.0, 1.0, 2.0].map(|c: f32| c / 7.0_f32.sqrt());
+        let decoded = Rotation::from_quaternion(q)
+            .unwrap_or_else(|e| panic!("{scale}: {e}"))
+            .to_quaternion();
+        assert!(
+            angle_degrees(unit, decoded) <= ROTATION_MAX_ERROR_DEGREES,
+            "{scale}: {decoded:?}"
+        );
+    }
+    let max = Rotation::from_quaternion([f32::MAX; 4])
+        .unwrap_or_else(|e| panic!("{e}"))
+        .to_quaternion();
+    assert!(
+        angle_degrees([0.5; 4], max) <= ROTATION_MAX_ERROR_DEGREES,
+        "{max:?}"
+    );
+}
+
+/// Wire bytes come from the network, so every value must decode to something sane.
+#[test]
+fn arbitrary_wire_bytes_decode_to_valid_values() {
+    let mut rng = Rng(0xBAD);
+    let specials = [0, u32::MAX, 0x3FFF_FFFF, 0xC000_0000, 0x4000_0000, 0x8000_0000];
+    for bits in specials
+        .into_iter()
+        .chain((0..100_000).map(|_| rng.next_f32().to_bits().wrapping_mul(0x9E37_79B9)))
+    {
+        let q = Rotation { bits }.to_quaternion();
+        assert!(q.iter().all(|c| c.is_finite()), "{bits:#x}: {q:?}");
+        let unit = q.iter().map(|c| c * c).sum::<f32>();
+        assert!((unit - 1.0).abs() < 1e-5, "{bits:#x}: {q:?}");
+    }
+    // The decoder accepts -2^23, which the encoder never produces from metres but `from_cm` allows.
+    let mut r = Reader {
+        input: &[0, 0, 0x80, 0xFF, 0xFF, 0x7F, 0, 0, 0],
+    };
+    let p = Position::read(&mut r).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(p.cm(), [-(1 << 23), (1 << 23) - 1, 0]);
+    assert_eq!(Position::from_cm(p.cm()), Ok(p));
 }

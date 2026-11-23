@@ -56,8 +56,8 @@ fn quantize(value: f32, limit: i32) -> Result<i32, EncodeError> {
 /// A world position in metres, sent with 1 cm precision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Position {
-    /// Coordinates in centimetres.
-    pub cm: [i32; 3],
+    /// Coordinates in centimetres, always within the `i24` range.
+    cm: [i32; 3],
 }
 
 impl Position {
@@ -71,6 +71,20 @@ impl Position {
             *out = quantize(value, I24_MAX)?;
         }
         Ok(Self { cm })
+    }
+
+    /// A position from coordinates in centimetres. Fails if one does not fit in 24 bits.
+    pub fn from_cm(cm: [i32; 3]) -> Result<Self, EncodeError> {
+        if cm.iter().any(|c| !(-(I24_MAX + 1)..=I24_MAX).contains(c)) {
+            return Err(EncodeError::OutOfRange);
+        }
+        Ok(Self { cm })
+    }
+
+    /// The coordinates in centimetres.
+    #[must_use]
+    pub fn cm(self) -> [i32; 3] {
+        self.cm
     }
 
     /// The position in metres.
@@ -156,8 +170,13 @@ impl Rotation {
         if q.iter().any(|c| !c.is_finite()) {
             return Err(EncodeError::NotFinite);
         }
-        let len = q.iter().map(|c| c * c).sum::<f32>().sqrt();
-        if len < 1e-6 {
+        // f64 so that large finite inputs do not overflow to infinity and tiny ones do not underflow to zero.
+        let len = q
+            .iter()
+            .map(|c| f64::from(*c) * f64::from(*c))
+            .sum::<f64>()
+            .sqrt();
+        if len == 0.0 {
             return Err(EncodeError::OutOfRange);
         }
         let mut largest = 0;
@@ -173,7 +192,7 @@ impl Rotation {
             if i == largest {
                 continue;
             }
-            let unit = (c * sign / len / ROTATION_RANGE).clamp(-1.0, 1.0);
+            let unit = ((f64::from(*c) * sign / len) as f32 / ROTATION_RANGE).clamp(-1.0, 1.0);
             let code = ((unit + 1.0) * 0.5 * ROTATION_MAX_CODE as f32).round() as u32;
             bits |= code << shift;
             shift = shift.saturating_sub(ROTATION_BITS);
