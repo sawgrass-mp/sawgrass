@@ -42,7 +42,8 @@ Every task is a GitHub issue with an ID in its title. The prefix names the area:
 | `DOC-` | documentation |
 
 Labels: `ready` (triaged, can be claimed), `claimed`, `triage` (new, not yet reviewed), `good first task`, and
-`size: S` (an evening), `size: M` (a few days), `size: L` (several pull requests). Only maintainers add `ready`.
+`size: S` (an evening), `size: M` (a few days), `size: L` (several pull requests). Only maintainers add `ready`, by hand or through the
+dispatcher for task IDs they approved in advance (`.github/approved-tasks.txt`).
 
 ### Taking a task
 
