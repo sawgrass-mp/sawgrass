@@ -58,7 +58,7 @@ So the work is split in two:
 | **Tooling and docs**<br><sub>CI gates, review agent, documentation</sub> | `█████████████░░░░░░░` 64% | 2 of 6 tasks done |
 
 <details open>
-<summary><b>Tasks</b>: 5 done, 0 in review, 1 in progress, 0 ready, 7 planned</summary>
+<summary><b>Tasks</b>: 5 done, 1 in review, 0 in progress, 0 ready, 7 planned</summary>
 
 | | Task | Size | Status |
 |---|---|---|---|
@@ -68,7 +68,7 @@ So the work is split in two:
 | ✅ | [IM-1](https://github.com/sawgrass-mp/sawgrass/issues/4): Spatial grid and visible sets | M | done |
 | ⚪ | [BOT-1](https://github.com/sawgrass-mp/sawgrass/issues/6): Headless bot client | M | planned |
 | ⚪ | [BOT-2](https://github.com/sawgrass-mp/sawgrass/issues/7): Load report for N bots | S | planned |
-| 🛠️ | [DB-1](https://github.com/sawgrass-mp/sawgrass/issues/8): Character and wallet schema | S | in progress |
+| 🔍 | [DB-1](https://github.com/sawgrass-mp/sawgrass/issues/8): Character and wallet schema | S | in review |
 | ⚪ | [OPS-1](https://github.com/sawgrass-mp/sawgrass/issues/9): Benchmark regression gate | M | planned |
 | ⚪ | [OPS-2](https://github.com/sawgrass-mp/sawgrass/issues/10): Markdown link check | S | planned |
 | ⚪ | [OPS-3](https://github.com/sawgrass-mp/sawgrass/issues/11): Protocol version gate | S | planned |

@@ -16,13 +16,14 @@ ROADMAP = """
 """
 
 
-def issue(number, title, state="open", labels=(), reason=None):
-    return {"number": number, "title": title, "state": state, "state_reason": reason,
-            "labels": [{"name": n} for n in labels]}
+def issue(number, title, state="open", labels=(), reason=None, author="MEMBER", assignees=()):
+    return {"number": number, "title": title, "state": state, "state_reason": reason, "author_association": author,
+            "labels": [{"name": n} for n in labels], "assignees": [{"login": a} for a in assignees]}
 
 
-def pr(number, title, draft=False, state="open", body=""):
-    return {"number": number, "title": title, "state": state, "draft": draft, "body": body, "pull_request": {}}
+def pr(number, title, draft=False, state="open", body="", author="MEMBER", login="maintainer"):
+    return {"number": number, "title": title, "state": state, "draft": draft, "body": body, "pull_request": {},
+            "author_association": author, "user": {"login": login}}
 
 
 def by_id(tasks):
@@ -58,10 +59,25 @@ class Collect(unittest.TestCase):
             issue(2, "Interest management: no task covers this"),
             issue(3, "SRV-1 follow-ups: metrics window"),
             pr(4, "OPS-9: Merged", state="closed"),
-            issue(5, "IM-2: Filed by anyone", labels=("triage",)),
-            issue(6, "NET-99: Closed by its author", state="closed", reason="completed"),
+            issue(5, "IM-2: Filed by anyone", labels=("triage",), author="NONE"),
+            issue(6, "NET-99: Closed by its author", state="closed", reason="completed", author="CONTRIBUTOR"),
         ]
         self.assertEqual(progress.collect(items, {}), [])
+
+    def test_outsider_cannot_reuse_a_roadmap_id(self):
+        items = [issue(1, "NET-1: Packet format", state="closed", reason="completed"),
+                 issue(2, "NET-1: [spam](https://e.invalid)", author="NONE"),
+                 issue(3, "NET-2: Closed by an outsider", state="closed", reason="completed", author="NONE")]
+        tasks = by_id(progress.collect(items, progress.roadmap_tasks(ROADMAP)))
+        self.assertEqual((tasks["NET-1"]["status"], tasks["NET-1"]["issue"]), ("done", 1))
+        self.assertEqual((tasks["NET-2"]["status"], tasks["NET-2"]["issue"]), ("planned", None))
+
+    def test_review_needs_a_member_or_the_assignee(self):
+        task = issue(1, "NET-2: Connection", labels=("ready", "claimed"), assignees=("alice",))
+        outsider = pr(2, "NET-2: Drive-by", body="Closes #1", author="NONE", login="mallory")
+        self.assertEqual(progress.collect([task, outsider], {})[0]["status"], "in progress")
+        claimer = pr(3, "NET-2: The work", body="Closes #1", author="CONTRIBUTOR", login="alice")
+        self.assertEqual(progress.collect([task, outsider, claimer], {})[0]["status"], "in review")
 
     def test_open_issue_wins_over_closed_one(self):
         items = [issue(1, "NET-1: Old", state="closed", reason="completed"),
@@ -121,10 +137,10 @@ class Render(unittest.TestCase):
     def test_hostile_title_is_inert(self):
         title = ('[Download the client](https://example.invalid) ``` <img src="https://tracker.invalid/p.png"> '
                  '![x](https://e.invalid/i.png) www.example.invalid **bold** _x_ | <!-- comment')
-        tasks = progress.collect([issue(1, f"NET-99: {title}", labels=("ready",))], {})
+        tasks = progress.collect([issue(1, f"NET-99: {title}", labels=("ready",), author="NONE")], {})
         block = progress.render_markdown(tasks, "o/r")
         row = next(line for line in block.splitlines() if "NET-99" in line)
-        for raw in ("](", "![", "<img", "<!--", "```", "https://e", "www.", "**", " | <"):
+        for raw in ("](", "![", "<img", "<!--", "```", "https://e", "www.", "**", " | <", " @", "a@"):
             self.assertNotIn(raw, row.split("): ", 1)[1], raw)
         self.assertEqual(row.count(" | "), 3)  # still four cells
 

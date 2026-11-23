@@ -10,11 +10,11 @@ The data comes from two places, never from hand edits:
 - the task issues (title `AREA-N: ...`) and the open pull requests, read through the `gh` command line tool;
 - the task table in docs/roadmap.md, for tasks that have no issue yet and as a fallback for sizes.
 
-Only tasks a maintainer accepted count: those in the roadmap table and issues labelled `ready` or `claimed`.
-`triage` issues and findings stay off the README, and issue titles are escaped, because anyone can write them.
+Only tasks a maintainer stands behind count: roadmap tasks, and issues that a repository member opened or labelled
+`ready` or `claimed`. Issue titles are escaped anyway, because anyone can write them.
 
 A task is `done` when its issue is closed as completed, `in review` when an open, non-draft pull request closes its
-issue (`Closes #N`), `in progress` when it is labelled `claimed`, `ready` when labelled `ready`, and `planned`
+issue (`Closes #N`) and was opened by a member or by the task's assignee, `in progress` when it is labelled `claimed`, `ready` when labelled `ready`, and `planned`
 otherwise. Issues closed as not planned are left out. Progress is weighted by size: S = 1, M = 3, L = 8.
 """
 import argparse
@@ -89,13 +89,26 @@ def labels_of(item):
     return {label["name"] if isinstance(label, dict) else label for label in item.get("labels", [])}
 
 
-def accepted(task_id, item, roadmap):
-    """A maintainer accepted the task: it is in docs/roadmap.md, or its issue is labelled `ready` or `claimed`.
+TRUSTED_AUTHORS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
-    Anyone can open an issue with a task-like title, and its author can close it, but only maintainers edit the
-    roadmap and add labels. Everything else (`triage` issues, findings) stays off the README.
+
+def trusted_author(item):
+    return item.get("author_association") in TRUSTED_AUTHORS
+
+
+def accepted(item):
+    """A maintainer stands behind the issue: they opened it, or labelled it `ready` or `claimed`.
+
+    Anyone can open an issue with a task-like title, even one that reuses a roadmap ID, and close it themselves,
+    but only maintainers are repository members and only they add labels. Everything else stays off the README.
     """
-    return task_id in roadmap or bool(labels_of(item) & {"ready", "claimed"})
+    return trusted_author(item) or bool(labels_of(item) & {"ready", "claimed"})
+
+
+def in_review(issue, pull_requests):
+    """A pull request that closes the issue counts if a member or the task's assignee (its claimer) opened it."""
+    assignees = {a.get("login") for a in issue.get("assignees") or []}
+    return any(trusted_author(p) or (p.get("user") or {}).get("login") in assignees for p in pull_requests)
 
 
 def collect(items, roadmap):
@@ -105,15 +118,17 @@ def collect(items, roadmap):
     `pull_request` key). `roadmap` is the result of roadmap_tasks(). A task with an issue takes the issue's title,
     which render_markdown() escapes; a roadmap task without an issue takes the roadmap's (`trusted`).
     """
-    in_review = set()  # issue numbers that an open, non-draft pull request closes
+    # Issue number -> authors of open, non-draft pull requests that close it.
+    closers = {}
     issues = []
     for item in items:
         if "pull_request" in item:
             if item.get("state") == "open" and not item.get("draft"):
-                in_review.update(int(n) for n in CLOSES.findall(item.get("body") or ""))
+                for n in CLOSES.findall(item.get("body") or ""):
+                    closers.setdefault(int(n), []).append(item)
             continue
         m = TASK_TITLE.match((item.get("title") or "").strip())
-        if not m or not accepted(m.group(1), item, roadmap):
+        if not m or not accepted(item):
             continue
         if item.get("state") == "closed" and item.get("state_reason") == "not_planned":
             continue
@@ -124,7 +139,7 @@ def collect(items, roadmap):
         labels = labels_of(item)
         if item.get("state") == "closed":
             status = "done"
-        elif item.get("number") in in_review:
+        elif in_review(item, closers.get(item.get("number"), [])):
             status = "in review"
         elif "claimed" in labels:
             status = "in progress"
@@ -181,7 +196,7 @@ def current_stage(tasks):
 def escape_markdown(text):
     """Issue text as inert Markdown for a table cell: no HTML, links, images, code spans, emphasis or autolinks."""
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r"([\\`*_\[\]()!|#~{}+.:/-])", r"\\\1", text)
+    text = re.sub(r"([\\`*_\[\]()!|#~{}+.:/@-])", r"\\\1", text)
     return " ".join(text.split())
 
 
