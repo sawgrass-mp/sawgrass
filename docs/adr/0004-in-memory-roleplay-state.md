@@ -66,12 +66,40 @@ against a power cut rests on `fdatasync` before each reply and was not tested by
   analytics and backups. It never decides a balance and is never on the path of a game action.
 - **The realtime core is unchanged.** Positions and other per-tick entity state are not written to this log.
 
+## Alternative considered: RocksDB under the same writer
+
+DB-4 (#47, #48) kept the same writer, checks and group commit and replaced our log with an embedded engine as the store.
+At 64 callers, durable: our log 72,781 transfers per second, RocksDB 51,542 (p99 2.2 ms), LMDB 36,968, redb 29,142,
+SQLite with `synchronous=FULL` 24,042. At 256 callers RocksDB reached 65,905 against 93,862, and LMDB 69,849.
+
+RocksDB gives about 70% of our log's throughput, and in return its format, checksums, recovery and compaction are
+a mature engine's job rather than ours, and balances stay on disk, so restarts need no snapshots. It does not
+remove the rest of the work: the copy to a second machine, no reads before durability, and the idempotency window.
+It compiles C++ at build time and needs clang.
+
+This ADR keeps our own log, because the maintainer's stated priority is maximum performance and the 30% is
+measured. The answer would change to RocksDB if:
+
+- the log task (crash tests at random points, power-cut tests, fuzzed logs) turns out larger than one or two
+  tasks, or finds faults a mature engine would not have;
+- the copy to a second machine or the tick-batched hand-over to the writer becomes the bottleneck, so the store's
+  speed no longer decides throughput;
+- a repeat on larger hardware with BOT-2 load shows the gap below about 15%.
+
+Both are far above the expected peak of about 1,200 storage writes per second, so the 30% is headroom, not a need.
+The choice follows the maintainer's priority, and a reviewer who weighs maintenance higher should argue for RocksDB
+here.
+
+Both designs keep the same writer interface, so the store behind it can be swapped later without changing game
+code.
+
 ## Consequences
 
 - `docs/architecture.md` names the world server as the owner of roleplay state and PostgreSQL as its archive.
 - We own a storage engine: the log format, checksums, recovery, snapshots, log rotation, the copy to a second
-  machine and the idempotency window. Each needs its own tests: crash tests at random points, power-cut tests,
-  fuzzed and truncated logs, and replay compared with the PostgreSQL archive.
+  machine and the idempotency window (RocksDB would take the first four; see the alternative above). Each needs
+  its own tests: crash tests at random points, power-cut tests, fuzzed and truncated logs, and replay compared with
+  the PostgreSQL archive.
 - One process holds the truth. Its memory must fit all state with value. DB-2 used about 82 bytes of log per
   transfer; memory use was not measured.
 - A record that was durable and later rotted at the very end of the log looks like a torn one. Telling them apart
