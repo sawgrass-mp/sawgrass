@@ -8,7 +8,7 @@ whichever comes first, boots the game to a world with a controllable character (
 2. **Stage 1: server without the game.** Protocol, gateway, simulation, interest management, bots, web map.
    Gates: 1000 bots on one machine, then 4096.
 3. **Stage 2: roleplay base.** Roleplay state in server memory with its own log and a PostgreSQL archive
-   (ADR 0003), scripting runtime, base resources (characters, money, inventory, jobs), admin tools. Everything
+   (ADR 0004), scripting runtime, base resources (characters, money, inventory, jobs), admin tools. Everything
    tested with bots.
 4. **Stage 3: client in the game.** A runtime adapter for the first runtime that boots the game, a module-loading
    API proposed upstream, hooks, sync of players, vehicles and damage, in-game UI. The second runtime's adapter

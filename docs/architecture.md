@@ -34,7 +34,7 @@ player by more than 5% says so with numbers.
   runs the game-mode scripts and decides who sees what.
 - **Roleplay state** (characters, money, inventory, property) is owned by the world server in memory and made
   durable by its own write-ahead log with group commit and snapshots
-  ([ADR 0003](adr/0003-in-memory-roleplay-state.md)). A change is acknowledged only once it is on disk.
+  ([ADR 0004](adr/0004-in-memory-roleplay-state.md)). A change is acknowledged only once it is on disk.
 - **PostgreSQL** is the archive, fed from that log asynchronously, for history, admin queries and backups. It never
   decides a balance.
 - **Web map** shows live positions for debugging and administration.
