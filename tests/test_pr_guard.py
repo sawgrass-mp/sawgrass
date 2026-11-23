@@ -130,6 +130,18 @@ class Smuggling(unittest.TestCase):
         self.assertEqual([p for p, _ in warnings], ["docs/x.md"])
 
 
+class Build(unittest.TestCase):
+    def test_build_script_and_git_source_in_cargo_toml(self):
+        files = [changed("crates/x/Cargo.toml", ['build = "gen.rs"', 'evil = { git = "https://e.x/r" }'])]
+        self.assertEqual(len(run(files, task("`crates/x/`"))[0]), 2)
+        self.assertEqual(run(files, task("`crates/x/` Allows: `build`"))[0], [])
+
+    def test_cargo_config(self):
+        files = [changed(".cargo/config.toml", ["[build]", 'rustc-wrapper = "x"'], status="added")]
+        self.assertEqual(len(run(files, task("`crates/`"))[0]), 1)
+        self.assertEqual(run(files, task("`.cargo/` Allows: `build`"))[0], [])
+
+
 class Vandalism(unittest.TestCase):
     """The CUDA pattern: a feature title that replaces the README with something else."""
 
@@ -175,6 +187,15 @@ class ShellInjection(unittest.TestCase):
         files = [changed("launch.bat", ["@echo off"], status="added")]
         self.assertEqual(len(run(files, task("`launch.bat`"))[0]), 1)
         self.assertEqual(run(files, task("`launch.bat` Allows: `shell`")), ([], []))
+
+    def test_rust_path_prefix_is_not_a_comment(self):
+        files = [changed("crates/x/src/a.rs", [f'::std::process::{RUN}("cmd")'])]
+        self.assertEqual(len(run(files, task("`crates/x/`"))[0]), 1)
+
+    def test_uninspectable_code_fails_anywhere(self):
+        files = [changed("src/big.rs", patch=False)]
+        self.assertEqual(len(run(files, task("`src/`"))[0]), 1)
+        self.assertEqual(run([changed("docs/assets/logo.png", patch=False)], task("`docs/`"))[0], [])
 
     def test_comments_and_markdown_are_ignored(self):
         files = [changed("crates/x/src/a.rs", [f"// never {RUN}(\"sh\")"]),

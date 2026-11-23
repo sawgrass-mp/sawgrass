@@ -56,6 +56,12 @@ SHELL_RULE = re.compile(
     r"|\b(os\.execute|io\.popen)\s*\("
     r"|\bShellExecute|\bWinExec\s*\(|\bCreateProcess[AW]?\s*\("
 )
+# Files that change how Cargo builds or which code it pulls in. Allowed by `Allows: build`.
+BUILD_PATHS = (".cargo/*", "*/.cargo/*")
+BUILD_RULE = re.compile(r"^\s*(build|links)\s*=|proc-macro\s*=\s*true|\bgit\s*="
+                        r"|^\s*\[(patch|replace)\b|\brustc-wrapper\b")
+# Binary files that carry no code; any other file without an inspectable diff fails.
+INERT_BINARY = ("docs/*.png", "docs/*.jpg", "docs/*.gif", "docs/*.webp")
 SCRIPT_EXTENSIONS = (".bat", ".cmd", ".ps1", ".psm1", ".sh", ".bash", ".vbs", ".hta")
 NO_CODE_EXTENSIONS = (".md", ".txt", ".svg")
 
@@ -103,10 +109,23 @@ def added_lines(patch):
     return out
 
 
-def _code(text):
-    """False for blank and comment lines, which cannot run anything."""
+COMMENT_PREFIXES = (
+    ((".rs", ".js", ".ts", ".c", ".cpp", ".h"), ("//",)),
+    ((".py", ".sh", ".bash", ".ps1", ".psm1", ".toml", ".yml", ".yaml"), ("#",)),
+    ((".lua", ".luau", ".sql"), ("--",)),
+    ((".bat", ".cmd"), ("REM ", "rem ", "::")),
+)
+
+
+def _code(name, text):
+    """False for blank lines and for comment lines in the file's own language, which cannot run anything."""
     stripped = text.strip()
-    return bool(stripped) and not stripped.startswith(("#", "//", "REM ", "rem ", "::"))
+    if not stripped:
+        return False
+    for extensions, prefixes in COMMENT_PREFIXES:
+        if name.lower().endswith(extensions):
+            return not stripped.startswith(prefixes)
+    return True
 
 
 def _clean(text):
@@ -138,7 +157,7 @@ def evaluate(pr, files, issue, base_lines):
         name, status, patch = f["filename"], f.get("status"), f.get("patch")
         names = [p for p in (name, f.get("previous_filename")) if p]
         lines = added_lines(patch)
-        added = [(n, t) for n, t in lines if _code(t)]
+        added = [(n, t) for n, t in lines if _code(name, t)]
 
         # 1. Protected paths and workflow constructs.
         for p in names:
@@ -159,6 +178,16 @@ def evaluate(pr, files, issue, base_lines):
                         failures.append((f"{name}:{n}", f"adds `{construct}` to a workflow, which the task does not "
                                                         f"allow: {text.strip()[:120]}"))
 
+        # Build configuration that can run code at build time or pull it from elsewhere.
+        if "build" not in allows and status != "removed":
+            if policy._matches(name, BUILD_PATHS) and not in_scope(name, paths):
+                failures.append((name, "Cargo configuration changed; the task must list it and allow `build`"))
+            elif name == "Cargo.toml" or name.endswith("/Cargo.toml"):
+                for n, text in added:
+                    if BUILD_RULE.search(text):
+                        failures.append((f"{name}:{n}", f"adds a build script, proc macro, git source or patch, "
+                                                        f"which the task does not allow: {text.strip()[:120]}"))
+
         # 2. Vandalism of prominent files.
         for p in names:
             if p not in PROMINENT or in_scope(p, paths):
@@ -174,8 +203,8 @@ def evaluate(pr, files, issue, base_lines):
             continue
         if name.lower().endswith(SCRIPT_EXTENSIONS) and status in ("added", "renamed", "copied"):
             failures.append((name, "new shell, batch or script file; the task must allow `shell`"))
-        if patch is None and name.startswith(("crates/", "scripts/", "tools/", "resources/")):
-            failures.append((name, "diff is too large or binary to inspect for shell execution"))
+        if patch is None and not policy._matches(name, INERT_BINARY):
+            failures.append((name, "diff is too large or binary to inspect"))
         for n, text in added:
             if SHELL_RULE.search(text):
                 failures.append((f"{name}:{n}", f"hands a command to a shell, which the task does not allow: "
