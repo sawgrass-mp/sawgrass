@@ -1,178 +1,204 @@
-# SpacetimeDB versus PostgreSQL for roleplay state
+# Storage for roleplay state: in-process log, SpacetimeDB, PostgreSQL
 
-Measured 2026-11-23 with SpacetimeDB 2.16.1 and PostgreSQL 16.15. Task: DB-2.
+Measured 2026-11-23 with SpacetimeDB 2.16.1, PostgreSQL 16.15 and a prototype in-process ledger. Task: DB-2.
 
-The question was whether [SpacetimeDB](https://spacetimedb.com) should replace PostgreSQL for the slow roleplay
-state (money, inventory, property, factions), and whether it deserves a place in the realtime core. This page
-records what was checked, what was measured and what was not, so the decision does not have to be argued again from
-memory.
+The question: what is the fastest sound way to store roleplay state with money in it (money, inventory, property,
+factions)? Keeping existing code is not a goal. Money must never be created or lost, and an acknowledged change
+must survive a crash. This page records what was measured, what was not, and what follows from it.
 
 ## Short answer
 
-- **SpacetimeDB is faster, clearly.** On the same money ledger with the same checks it ran 3.3 times more transfers
-  per second than our current PostgreSQL code with even load across wallets, and about 16 times more when every
-  transfer hits one wallet. Latency was lower too.
-- **We do not need that speed yet.** PostgreSQL handled about 3,500 transfers per second on a 4-core machine with
-  every commit flushed to disk. Our rough worst case for 4096 players is a few hundred money operations per second.
-- **The costs are in licensing and operations, not speed.** The server and the Rust client SDK are under the
-  Business Source License: one production instance per application, no replicas, and the SDK does not pass our
-  `deny.toml`. All data lives in RAM, and our ledger only grows.
-- **Not for the realtime core.** Clients connect over WebSocket (TCP) only. Our core is built on QUIC datagrams,
-  and the core's own load is above what SpacetimeDB reached here.
-- **Decision proposed: keep PostgreSQL.** Revisit when the conditions under [When to revisit](#when-to-revisit) are
-  met.
+| Design (same ledger, same rules, 64 callers) | Transfers per second, durable | One hot wallet | Restart with 1.8 M operations |
+|---|---:|---:|---:|
+| **In-process ledger**, log on disk, group commit | **72,781** | **71,969** | **1.7 s** replay |
+| SpacetimeDB 2.16.1 | 11,352 | 10,707 | 13 s clean, 27 s after a crash |
+| PostgreSQL, one SQL function per transfer | 5,666 | 917 | 0.8 s after a crash |
+| PostgreSQL, current `sawgrass-db` code | 3,437 | 642 | (same) |
+
+- **The fastest design is our own server holding the state in memory**, with an append-only log flushed to disk
+  before each reply. Callers' transfers are flushed to disk together, one flush per batch. It was 6.4 times faster
+  than SpacetimeDB and 13 to 21 times faster than PostgreSQL, with sub-millisecond median latency and no penalty
+  for a hot wallet. A crash test (kill -9 under load) lost no acknowledged transfer, and the invariants held.
+- **SpacetimeDB is second.** It works on the same principle (state in memory, logic next to it, batched durability)
+  but adds a WebSocket hop and a WASM call per transfer. On this machine it was 2 to 3.3 times faster than
+  PostgreSQL on even load and 12 to 17 times faster on a hot wallet.
+- **PostgreSQL is last on writes**, mostly because every transfer holds row locks across a network round trip and a
+  disk flush. It is still the best tool for history, queries, backups and replicas.
+- **Proposed design:** authoritative roleplay state in the world server's memory, made durable by its own log with
+  group commit, plus periodic snapshots. PostgreSQL becomes an asynchronous archive fed from the log, for queries,
+  admin tools and history. That needs an ADR before code; see [Proposed design](#proposed-design) for what it
+  costs.
+
+The prototype is about 430 lines and passed one crash test. It is not a hardened storage engine, and the figures
+come from one 4-core VM. Read [What was not measured](#what-was-not-measured) before relying on them.
 
 ## What was compared
 
-The DB-1 money ledger, implemented twice with the same rules:
+The DB-1 money ledger, implemented with the same rules in each design: an idempotency key per operation, funds and
+overflow checks, character wallets never negative, system wallets (treasury, shop) may go negative, and every
+operation stored as a pair of entries with `balance_after`.
 
-- **PostgreSQL:** the real code, `sawgrass_db::transfer` over the schema in
-  [`migrations/0001`](../../../migrations/0001_characters_wallets_ledger.sql). One transfer is a transaction of
-  five statements from the client: insert the operation (idempotency key), lock both wallets, insert two ledger
-  entries. Triggers apply each entry to its wallet, refuse any other balance change and check at commit that the
-  entries sum to zero.
-- **SpacetimeDB:** [`stdb-module/`](stdb-module/src/lib.rs), the same tables and the same checks (idempotency key,
-  funds, overflow, append-only entries with `balance_after`) in a Rust reducer. A reducer is one transaction;
-  returning an error rolls it back. Its `check` reducer confirmed afterwards that balances still summed to zero and
-  matched the ledger after 1.7 million transfers.
+- **PostgreSQL, current code:** `sawgrass_db::transfer` over
+  [`migrations/0001`](../../../migrations/0001_characters_wallets_ledger.sql). Five statements per transfer from
+  the client. Triggers apply each entry, refuse any other balance change and check at commit that the entries sum
+  to zero. Driver: [`transfer_load`](../../../crates/sawgrass-db/examples/transfer_load.rs).
+- **PostgreSQL, one function:** the same transfer as one PL/pgSQL call
+  ([`postgres/transfer_fn.sql`](postgres/transfer_fn.sql)), driven by `pgbench`.
+- **SpacetimeDB:** a Rust module ([`stdb-module/`](stdb-module/src/lib.rs)) with one reducer per transfer, called
+  from N WebSocket connections by [`stdb-client/`](stdb-client/src/main.rs). Its `check` reducer confirmed the
+  invariants after 1.7 million transfers.
+- **In-process ledger:** [`inproc/`](inproc/src/main.rs), standard library only. One writer thread owns every
+  wallet; callers in the same process send a request over a channel and wait for the reply. The writer checks and
+  applies the transfer and appends one record per operation (length, CRC32, both entries) to a log file. It replies
+  once the record is on disk. Flush modes: `each` (one `fdatasync` per transfer), `group` (one per batch of up to
+  4,096 waiting requests), `none` (no flush; a crash loses recent transfers). Recovery replays the log, drops a
+  torn last record and checks the invariants.
 
-Workload: 10,000 characters, each with a funded bank wallet. `uniform` moves 1 to 100 units between two random
-characters. `hot` has every character pay the one shop wallet: one contended row, like a popular store or the
-treasury paying salaries. Each client sends a transfer, waits for the reply and sends the next (one in flight),
-unless the table says otherwise. Each row is a 20-second run.
+Workload: 10,000 characters with funded bank wallets. `uniform` moves 1 to 100 units between two random characters;
+`hot` has every transfer pay the one shop wallet. Each caller sends a transfer, waits for the reply and sends the
+next. Runs last 20 seconds (10 seconds for the in-process ledger).
 
-Durability was equal: PostgreSQL ran with `synchronous_commit = on` (the reply waits for the WAL flush), and
-SpacetimeDB with confirmed reads, its default since 2.0 (the reply waits until the transaction is durable).
+### Durability, stated for each
+
+| Design | When the caller gets "done" | Lost on a crash |
+|---|---|---|
+| PostgreSQL, `synchronous_commit = on` | After the WAL record is flushed | Nothing acknowledged |
+| SpacetimeDB, confirmed reads (default) | After the transaction is durable | Nothing acknowledged |
+| In-process, `each` or `group` | After `fdatasync` of the log | Nothing acknowledged |
+| In-process `none`, PostgreSQL `synchronous_commit = off`, SpacetimeDB confirmed reads off | Before the flush | Recent acknowledged transfers, always whole ones |
+
+The headline figures use the first three rows only.
 
 ## Results
 
 Machine: one cloud VM, 4 vCPU (Intel Xeon 2.1 GHz), 16 GB RAM, virtual disk (`open_datasync` about 8,500 flushes
-per second). The database and the load client ran on the same machine. Single runs, not averaged: treat differences
-under about 10% as noise.
+per second). Database, server and callers all ran on this one machine. Single runs: treat differences under about
+10% as noise.
 
-| Pattern | Clients | PostgreSQL, `transfer` today | PostgreSQL, one function call | SpacetimeDB |
-|---|---:|---:|---:|---:|
-| uniform | 1 | 660 tps, p99 3.2 ms | 1,143 tps | 871 tps, p99 2.5 ms |
-| uniform | 16 | 3,506 tps, p99 9.0 ms | 4,852 tps | 7,135 tps, p99 4.7 ms |
-| uniform | 64 | 3,437 tps, p99 37 ms | 5,666 tps | 11,352 tps, p99 11 ms |
-| uniform | 256 | 2,697 tps, p99 189 ms | 4,487 tps | 12,438 tps, p99 32 ms |
-| hot | 16 | 731 tps, p99 114 ms | 1,151 tps | 7,449 tps, p99 5.1 ms |
-| hot | 64 | 642 tps, p99 492 ms | 917 tps | 10,707 tps, p99 12 ms |
+Transfers per second (p99 latency):
 
-More rows:
+| Pattern | Callers | PostgreSQL today | PostgreSQL function | SpacetimeDB | In-process, `each` | In-process, `group` |
+|---|---:|---:|---:|---:|---:|---:|
+| uniform | 1 | 660 (3.2 ms) | 1,143 | 871 (2.5 ms) | 5,546 (0.41 ms) | 5,444 (0.42 ms) |
+| uniform | 16 | 3,506 (9.0 ms) | 4,852 | 7,135 (4.7 ms) | 6,116 (5.0 ms) | 44,718 (0.78 ms) |
+| uniform | 64 | 3,437 (37 ms) | 5,666 | 11,352 (11 ms) | 6,128 (16 ms) | 72,781 (2.0 ms) |
+| uniform | 256 | 2,697 (189 ms) | 4,487 | 12,438 (32 ms) | 6,425 (52 ms) | 93,862 (4.0 ms) |
+| hot | 16 | 731 (114 ms) | 1,151 | 7,449 (5.1 ms) | 6,223 (4.8 ms) | 44,727 (0.74 ms) |
+| hot | 64 | 642 (492 ms) | 917 | 10,707 (12 ms) | 6,187 (17 ms) | 71,969 (1.7 ms) |
+| hot | 256 | not run | not run | not run | 6,308 (59 ms) | 97,107 (4.1 ms) |
+
+Without durability (for scale, not for money):
 
 | Variant | Result |
 |---|---|
-| SpacetimeDB, 64 clients, 16 calls in flight each | 21,822 tps, p50 44 ms, p99 113 ms |
-| SpacetimeDB, 64 clients, confirmed reads off | 12,451 tps, p99 9.2 ms (durability barely matters here) |
-| PostgreSQL function, `synchronous_commit = off`, uniform, 16 clients | 8,417 tps |
-| PostgreSQL function, `synchronous_commit = off`, hot, 16 clients | 2,196 tps |
+| In-process `none`, 64 callers | 110,806 tps, p99 0.84 ms (uniform); 108,181 (hot) |
+| SpacetimeDB, confirmed reads off, 64 callers | 12,451 tps |
+| SpacetimeDB, 64 connections with 16 calls in flight each (durable) | 21,822 tps, p99 113 ms |
+| PostgreSQL function, `synchronous_commit = off`, 16 callers | 8,417 tps uniform, 2,196 hot |
 
-"One function call" is the same transfer moved into a PL/pgSQL function
-([`postgres/transfer_fn.sql`](postgres/transfer_fn.sql)) and driven by `pgbench`, so one round trip instead of
-five. It uses a different client from the other PostgreSQL column, so it shows the size of the round-trip cost, not
-an exact figure.
+Restart after a crash or shutdown, with about 1.8 million transfers stored:
 
-Resources: during the 64-client SpacetimeDB run the server used about 1.6 cores. Its reducer thread was at about
-60%, so the limit was not reducer execution yet. Resident memory was 1.1 GB with 1.7 million operations and 3.4
-million ledger entries in tables.
+| Design | Time until it answers | Notes |
+|---|---:|---|
+| In-process | 1.7 s | Replays the whole 151 MB log (82 bytes per operation) after dropping the page cache; grows with the log until snapshots exist |
+| SpacetimeDB | 27 s after a crash, 13 s after a clean stop | Loads all tables into memory; an empty server starts in 0.15 s |
+| PostgreSQL | 0.8 s after a crash | Redoes only the WAL since the last checkpoint; data stays on disk |
+
+Crash test of the in-process ledger: killed with SIGKILL after 6 seconds of `group` load at 64 callers. Callers had
+received 426,199 acknowledgements (counted every 50 ms). The log replayed 426,706 transfers plus the 10,000 seed
+operations, with no torn record and all invariants holding. A process kill leaves the OS page cache intact, so this
+checks the recovery logic, not a power cut; `fdatasync` before the reply is what covers a power cut.
 
 ### What the numbers mean
 
-- **Where SpacetimeDB wins.** A reducer runs inside the database with no network round trips and no row locks held
-  across them. Transactions run one after another on one thread, and durability is batched. A hot row costs it
-  nothing, while PostgreSQL holds the wallet's row lock for the whole transaction. Even with asynchronous commit,
-  PostgreSQL stays near 2,000 transfers per second on one row, so the limit there is the lock and the MVCC row
-  versions, not the disk.
-- **Where PostgreSQL stands.** Our code spends most of its time on round trips: one function call instead of five
-  statements gives 1.4 to 1.6 times more throughput. Part of the remaining cost is ours, not the engine's: the
-  triggers that make the ledger tamper-proof (applying each entry, guarding balances, checking at commit that an
-  operation sums to zero) run on every transfer. The SpacetimeDB module enforces the same rules in its reducer, but
-  only for callers that go through it, so a plain PostgreSQL table without triggers would be faster than measured. Throughput falls past 64 connections on 4 cores, so a pool of
-  about 16 to 32 connections is the right size here.
-- **What we need.** We have not measured our load yet (BOT-2). Our assumption for 4096 players: one money operation
-  per player every 10 seconds and one inventory write every 5 seconds is about 1,200 writes per second at peak.
-  PostgreSQL covers that with room to spare even on this small machine. The risk is a single hot wallet: about 700
-  transfers per second today. A treasury or a shop that every player pays at once should be split into several
-  wallets, or its transfers batched.
-- **One thread is also a limit.** In these runs every reducer executed on one thread (a single `wasm` thread in
-  `top`), so writes to one database do not spread over more cores. PostgreSQL can: on a larger server its uniform
-  figures grow, and SpacetimeDB's stay near one core's worth. This was not measured here (4 cores only).
+- **Network hops and locks dominate.** PostgreSQL spends most of a transfer on round trips and on row locks held
+  until the commit is flushed, so one hot row caps it below about 1,000 per second. Some of its cost is our own
+  protective triggers, and a plain table would be faster than measured, but that would not change the order.
+- **Group commit is what makes the in-process design fast.** Flushing each transfer alone gave about 6,000 per
+  second, the speed of the disk. One flush per batch gave 45,000 to 97,000 with lower latency at the same time.
+  SpacetimeDB and PostgreSQL also batch flushes, but they pay for the network, protocol and (for SpacetimeDB) a
+  WASM call on every transfer.
+- **A hot wallet costs nothing in memory.** One writer applies transfers one after another, so there is no lock to
+  wait for. SpacetimeDB behaves the same; PostgreSQL does not.
+- **The in-process figure is a lower bound for the design.** Callers here are threads that pass messages, one
+  transfer at a time. In the real server the tick could hand over a whole tick's transfers at once.
+- **Our expected load** is a guess until BOT-2: about 1,200 storage writes per second at peak for 4096 players. All
+  three designs cover that on even load; PostgreSQL does not cover it on one hot wallet.
 
 ### What was not measured
 
-- Subscriptions under load: thousands of clients subscribed to queries, which is where SpacetimeDB is meant to save
-  code. Nothing in Sawgrass uses that model yet, so there was nothing fair to compare.
-- Larger hardware, separate client and server machines, long runs, crash recovery, and startup time with a large
-  data set (SpacetimeDB loads tables into memory on start).
-- Inventory, property and factions. The money ledger is the strictest of them, so the others should be easier for
-  both databases. That is an assumption.
+- Machines larger than 4 cores, callers on another machine, runs longer than 30 seconds, and a real power cut.
+- Reads under write load, subscriptions (SpacetimeDB's push of changes to clients), and memory use of the
+  in-process ledger. It keeps every idempotency key in memory as built; a real one keeps a bounded window.
+- Inventory, property and factions. The ledger is the strictest of them; that they behave alike is an assumption.
+- The asynchronous PostgreSQL archive of the proposed design, and snapshots for faster restarts. Neither exists
+  yet.
+
+## Proposed design
+
+Authoritative roleplay state lives in the world server's memory, in one writer per kind of state (or per shard of
+wallets). Changes are made durable by an append-only log with group commit before the caller is told "done".
+Snapshots bound the replay time. PostgreSQL is fed from the log asynchronously and serves history, admin queries,
+backups and analytics, but never decides a balance.
+
+What it costs, in honesty:
+
+- **We own a storage engine.** Log format, CRC, torn-tail recovery, snapshots, log rotation and checks against
+  silent corruption all become our code and need tests: crash tests at random points, fuzzed logs, replay
+  equivalence against PostgreSQL.
+- **One machine holds the truth.** A dead disk loses everything not yet copied elsewhere. Shipping the log to a
+  second machine (and to the PostgreSQL archive) has to come with it, ideally before acknowledgement for money.
+- **Reads must respect durability.** With group commit, a transfer is applied in memory before its flush. Game
+  logic that reads a balance in that window sees money that a crash could still undo. Either reads go through the
+  writer after the flush, or the server accepts that, as SpacetimeDB does with confirmed reads off.
+- **The architecture changes.** `docs/architecture.md` names PostgreSQL as the source of truth for characters,
+  money, inventory and property. Moving that is an ADR first, then the code.
+
+SpacetimeDB would give most of this ready-made (in-memory state, log, snapshots, logic next to the data). It is
+about 6 times slower here than our own process, needs a network hop from the world server, and comes with the
+licence terms below.
 
 ## The realtime core
 
-The core (QUIC datagrams through gateways, the spatial grid, the 20 Hz tick) stays as it is:
+The core (QUIC datagrams through gateways, the spatial grid, the 20 Hz tick) is unchanged by any of this:
 
-- **Transport.** SpacetimeDB clients connect over a WebSocket (with an HTTP API beside it). The docs mention no
-  UDP, QUIC, WebTransport or unreliable messages. Over TCP one lost packet holds back everything after it, which is
-  why movement in [architecture.md](../../architecture.md) uses unreliable datagrams.
-- **Update model.** Clients subscribe to SQL queries, and each transaction produces at most one update message per
-  client. Our interest management sends each player a snapshot every tick, ranked and cut to a byte budget, with
-  hysteresis and lower rates for far entities. Subscriptions do not offer that budget control.
-- **Volume.** 4096 players at 20 Hz is 81,920 position updates per second before any fan-out. The best figure here
-  was about 22,000 reducer calls per second, on 4 cores. Batching a whole tick into one call is possible, but then
-  the database does the job of our interest grid. That fan-out is exactly what was not measured.
+- **Transport.** SpacetimeDB clients connect over a WebSocket (plus an HTTP API). The docs mention no UDP, QUIC,
+  WebTransport or unreliable messages. Over TCP one lost packet holds back everything after it, which is why
+  movement in [architecture.md](../../architecture.md) uses unreliable datagrams.
+- **Update model.** Subscriptions send at most one update per transaction per client. Our interest management sends
+  each player a ranked snapshot per tick, cut to a byte budget, with hysteresis. Subscriptions offer no such
+  budget.
+- **Volume.** 4096 players at 20 Hz is 81,920 position updates per second before fan-out. The best SpacetimeDB
+  figure here was about 22,000 reducer calls per second, on 4 cores.
 
-## Licence
+## SpacetimeDB licence
 
-Checked against the licence files shipped in the 2.16.1 crates.
+Checked against the licence files of the 2.16.1 crates.
 
-| Part | Licence | For Sawgrass |
-|---|---|---|
-| Server (`spacetimedb-standalone`) | Business Source License 1.1 | Separate process, so not combined with our AGPL code. Every operator accepts its terms. |
-| Module bindings (`spacetimedb` crate) | Apache-2.0 | Allowed by `deny.toml`. Our module code could stay AGPL. |
-| Client SDK (`spacetimedb-sdk` crate) | Business Source License 1.1 | The world server would link it. Not on the `deny.toml` allow list. It is not an open-source licence, so a binary shipped under AGPL cannot carry it. |
+| Part | Licence |
+|---|---|
+| Server (`spacetimedb-standalone`) | Business Source License 1.1 |
+| Module bindings (`spacetimedb`), `spacetimedb-sats`, `spacetimedb-lib`, `spacetimedb-primitives` | Apache-2.0 |
+| Client SDK (`spacetimedb-sdk`), protocol messages (`spacetimedb-client-api-messages`) | Business Source License 1.1 |
 
 The BSL's Additional Use Grant allows production use "with no more than one SpacetimeDB instance in production",
 and not as a commercial "Database Service" where third parties create their own tables. Each version becomes "GNU
-Affero General Public License v3.0 with a linking exception" four years after its release; for 2.16.1 the Change
-Date is 2031-11-19. So production use is not forbidden, but replicas or a second instance for one server are, and
-the client SDK keeps the server away from a clean AGPL build until then.
+Affero General Public License v3.0 with a linking exception" four years after release (2.16.1: 2031-11-19).
 
-## Operations
+**Without the BSL SDK.** A module can be written with the Apache-2.0 crates only. A client could be written from
+the published WebSocket protocol, using the Apache-2.0 `spacetimedb-sats` for the BSATN encoding, without the SDK
+or the BSL message crate. That keeps BSL code out of our binaries. The server itself is still BSL, and every
+operator runs it under the grant. Whether an independent client is free of the BSL is a legal question, not
+answered here.
 
-| | PostgreSQL | SpacetimeDB (self-hosted) |
-|---|---|---|
-| Data location | Disk, with a cache | All tables in RAM, commit log on disk |
-| Replication, failover | Streaming replicas, well-known tools | None self-hosted (its managed cloud replicates) |
-| Backups, point-in-time recovery | `pg_dump`, WAL archiving | Commit log and snapshots; less tooling |
-| Logic location | Our server and SQL triggers | Inside the database as reducers |
-| Analytics, admin SQL | Full SQL | A subset of SQL |
+**One instance in practice.** For one world server with one SpacetimeDB process, the limit is met. It rules out a
+replica or hot standby, a second instance for another region or a zone split (stage 5 of the roadmap), and sharding
+across instances. Whether each community that runs its own Sawgrass server counts as a separate "application or
+service" is not clear from the text; a host running many servers for others may need Clockwork Labs to confirm, or
+a commercial licence.
 
-An append-only ledger in RAM grows for the life of a server: here 1.7 million transfers took about 1 GB. On
-PostgreSQL old history costs disk space only.
-
-## Common claims, checked
-
-Claims often made about SpacetimeDB, checked against its docs and licence files:
-
-- "Clients connect over WebSocket only": **true**, apart from an HTTP API.
-- "The BSL forbids production use": **not quite.** Production use is allowed with one instance and outside a
-  database service. The limits that matter are the one-instance rule and the licence of the client SDK.
-- "It is faster for slow roleplay state": **true**, by a wide margin. That speed is not needed at our expected
-  load.
-- "Adopting it means rewriting the server": true only for moving the core. For the slow state, only the wallet code
-  (`sawgrass-db`) would move into a module.
-
-## When to revisit
-
-- BOT-2 or production shows storage writes above about 2,000 per second, or a hot wallet the game design cannot
-  split.
-- Scripts need live push of roleplay state to many clients, and building it on PostgreSQL turns out to be a large
-  job.
-- The licence changes: a version reaches its Change Date, or the client SDK moves to an open-source licence.
-
-Worth doing either way: move `transfer` into one SQL function (1.4 to 1.6 times more throughput, measured above)
-and keep system wallets that every player pays split by shop or by shard. These would be their own tasks.
+The project's own licence is being reconsidered separately. That affects whether the SDK may be linked, but not the
+one-instance limit, which binds whoever runs the server.
 
 ## Reproduce
 
@@ -196,13 +222,21 @@ spacetime publish -s local -b stdb-module/target/wasm32-unknown-unknown/release/
 spacetime call -s local ledger seed 10000 100000000
 spacetime generate --lang rust --out-dir stdb-client/src/module_bindings \
     --bin-path stdb-module/target/wasm32-unknown-unknown/release/ledger_module.wasm
-cd stdb-client && cargo run --release -- ledger 64 20 uniform 1   # database, clients, seconds, pattern, in flight
+cd stdb-client && cargo run --release -- ledger 64 20 uniform 1   # database, callers, seconds, pattern, in flight
 spacetime call -s local ledger check                              # fails if the ledger is inconsistent
+```
+
+In-process ledger:
+
+```sh
+cd inproc
+cargo run --release -- run /tmp/ledger.log 64 10 uniform group    # log, callers, seconds, pattern, each|group|none
+cargo run --release -- recover /tmp/ledger.log                    # replay time and invariants
 ```
 
 ## Sources
 
-- SpacetimeDB licence: the `LICENSE` files of the `spacetimedb` and `spacetimedb-sdk` 2.16.1 crates on crates.io.
+- SpacetimeDB licences: the `LICENSE` files of the 2.16.1 crates on crates.io.
 - Connection and transport: <https://spacetimedb.com/docs/clients/connection>, <https://spacetimedb.com/docs/ws>
 - Subscription semantics: <https://spacetimedb.com/docs/clients/subscriptions/semantics>
 - Self-hosting and storage: <https://spacetimedb.com/docs/how-to/deploy/self-hosting>,
