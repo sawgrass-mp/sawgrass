@@ -31,7 +31,9 @@ Settings → Branches → add a classic branch protection rule for `main`:
   maintainer's account and GitHub does not count an author's own approval, so a required approval would block all
   merges. Review happens through the review agent's comment and the maintainer's decision to merge.
 - Require these status checks to pass: `fmt`, `clippy`, `test`, `deny`, `scripts`, `no-game-data`, `task-id`,
-  `pr-guard`.
+  `pr-guard`, `policy`. The last two run on `pull_request_target` from the default branch, so they report on every
+  pull request, drafts included. `policy` does not re-run when the task is labelled `ready` later: edit the pull
+  request's description or re-run the job.
 - Require linear history; block force pushes and deletion.
 - Do not allow bypassing the above, including for administrators ("Do not allow bypassing the above settings").
 
