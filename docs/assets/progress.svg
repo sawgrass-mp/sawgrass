@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="478" viewBox="0 0 880 478" role="img" aria-label="Sawgrass progress">
+<defs>
+<linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#14e1f0"/><stop offset="1" stop-color="#7cf000"/></linearGradient>
+</defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:14px;fill:#8fb3a6}.l{font-size:15px;font-weight:600;fill:#e8fff4}.n{font-size:12px;fill:#7d9a90}.p{font-size:14px;font-weight:700;fill:#a6ff4d}.w{font-size:13px;fill:#5fe3f0}</style>
+<rect width="880" height="478" rx="16" fill="#060a08"/>
+<rect x="1" y="1" width="878" height="476" rx="15" fill="none" stroke="#1d3b2f"/>
+<text x="28" y="44" class="h">Stage 1: Server without the game</text>
+<text x="28" y="68" class="s">46% of the planned tasks done, weighted by size</text>
+<rect x="28" y="84" width="824" height="14" rx="7" fill="#13201b"/>
+<rect x="28" y="84" width="379.0" height="14" rx="7" fill="url(#g)"/>
+<text x="28" y="146" class="l">Stage 0: Repository foundation</text>
+<text x="28" y="164" class="n">Rules, CI, claim bot, review agent</text>
+<rect x="360" y="136" width="380" height="10" rx="5" fill="#13201b"/>
+<rect x="360" y="136" width="380.0" height="10" rx="5" fill="url(#g)"/>
+<text x="360" y="164" class="n">done</text>
+<text x="852" y="146" class="p" text-anchor="end">100%</text>
+<text x="28" y="192" class="l">Stage 1: Server without the game</text>
+<text x="28" y="210" class="n">Gates: 1000 bots on one machine, then 4096</text>
+<rect x="360" y="182" width="380" height="10" rx="5" fill="#13201b"/>
+<rect x="360" y="182" width="190.0" height="10" rx="5" fill="url(#g)"/>
+<text x="360" y="210" class="n">3 of 6 tasks done</text>
+<text x="852" y="192" class="p" text-anchor="end">50%</text>
+<text x="28" y="238" class="l">Stage 2: Roleplay base</text>
+<text x="28" y="256" class="n">PostgreSQL, scripting, characters, money, jobs</text>
+<rect x="360" y="228" width="380" height="10" rx="5" fill="#13201b"/>
+<text x="360" y="256" class="n">0 of 1 task done</text>
+<text x="852" y="238" class="p" text-anchor="end">0%</text>
+<text x="28" y="284" class="l">Stage 3: Client in the game</text>
+<text x="28" y="302" class="n">Waits until the game boots on PC through Leonida</text>
+<rect x="360" y="274" width="380" height="10" rx="5" fill="#13201b"/>
+<text x="360" y="302" class="n">waiting for the game</text>
+<text x="852" y="284" class="w" text-anchor="end">waiting</text>
+<text x="28" y="330" class="l">Stage 4: Launcher and releases</text>
+<text x="28" y="348" class="n">Signing, auto-update, server list</text>
+<rect x="360" y="320" width="380" height="10" rx="5" fill="#13201b"/>
+<text x="360" y="348" class="n">not started</text>
+<text x="852" y="330" class="p" text-anchor="end">0%</text>
+<text x="28" y="376" class="l">Stage 5: Scale</text>
+<text x="28" y="394" class="n">Real players; zones only if measurements call for them</text>
+<rect x="360" y="366" width="380" height="10" rx="5" fill="#13201b"/>
+<text x="360" y="394" class="n">not started</text>
+<text x="852" y="376" class="p" text-anchor="end">0%</text>
+<text x="28" y="422" class="l">Tooling and docs</text>
+<text x="28" y="440" class="n">CI gates, review agent, documentation</text>
+<rect x="360" y="412" width="380" height="10" rx="5" fill="#13201b"/>
+<rect x="360" y="412" width="178.6" height="10" rx="5" fill="url(#g)"/>
+<text x="360" y="440" class="n">1 of 6 tasks done</text>
+<text x="852" y="422" class="p" text-anchor="end">47%</text>
+</svg>
