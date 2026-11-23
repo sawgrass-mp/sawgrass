@@ -30,8 +30,9 @@ must survive a crash. This page records what was measured, what was not, and wha
   admin tools and history. That needs an ADR before code; see [Proposed design](#proposed-design) for what it
   costs.
 
-The prototype is about 480 lines and passed three kill tests and three corruption tests. It is not a hardened
-storage engine, and the figures come from one 4-core VM. Read [What was not measured](#what-was-not-measured) before relying on them.
+The prototype is about 490 lines and passed three kill tests and four corruption tests. It is not a hardened
+storage engine, and the figures come from one 4-core VM. Read [What was not measured](#what-was-not-measured)
+before relying on them.
 
 ## What was compared
 
@@ -50,12 +51,13 @@ operation stored as a pair of entries with `balance_after`.
   invariants after 1.7 million transfers.
 - **In-process ledger:** [`inproc/`](inproc/src/main.rs), standard library only. One writer thread owns every
   wallet; callers in the same process send a request over a channel and wait for the reply. The writer checks and
-  applies the transfer and appends one record per operation (length, CRC32, both entries) to a log file. It replies
-  once the record is on disk. Flush modes: `each` (one `fdatasync` per transfer), `group` (one per batch of up to
-  4,096 waiting requests), `none` (no flush; a crash loses recent transfers). Recovery replays the log and checks
-  the invariants. It drops only a torn last record (cut short, or failing its checksum and ending exactly at the
-  end of the file); a bad record anywhere else stops start-up with an error, because acknowledged transfers follow
-  it. A retry with the same idempotency key and parameters returns the original operation, as in `sawgrass-db`.
+  applies the transfer and appends one record per operation (length with its own CRC32, CRC32 of the body, both
+  entries) to a log file. It replies once the record is on disk. Flush modes: `each` (one `fdatasync` per
+  transfer), `group` (one per batch of up to 4,096 waiting requests), `none` (no flush; a crash loses recent
+  transfers). Recovery replays the log and checks the invariants. It drops only a torn last record (cut short, or
+  failing its checksum and ending exactly at the end of the file); a bad record anywhere else stops start-up with
+  an error, because acknowledged transfers follow it. A retry with the same idempotency key and parameters returns
+  the original operation, as in `sawgrass-db`.
 
 Workload: 10,000 characters with funded bank wallets. `uniform` moves 1 to 100 units between two random characters;
 `hot` has every transfer pay the one shop wallet. Each caller sends a transfer, waits for the reply and sends the
@@ -75,8 +77,8 @@ The headline figures use the first three rows only.
 ## Results
 
 Machine: one cloud VM, 4 vCPU (Intel Xeon 2.1 GHz), 16 GB RAM, virtual disk (`open_datasync` about 8,500 flushes
-per second). Database, server and callers all ran on this one machine. Single runs: run-to-run spread was up to about
-20% (see [Was the comparison fair?](#was-the-comparison-fair)), so treat smaller differences as noise.
+per second). Database, server and callers all ran on this one machine. Single runs: run-to-run spread was up to
+about 20% (see [Was the comparison fair?](#was-the-comparison-fair)), so treat smaller differences as noise.
 
 Transfers per second (p99 latency):
 
@@ -103,7 +105,7 @@ Restart after a crash or shutdown, with about 1.8 million transfers stored:
 
 | Design | Time until it answers | Notes |
 |---|---:|---|
-| In-process | 1.7 s | Replays the whole 151 MB log (82 bytes per operation) after dropping the page cache; grows with the log until snapshots exist |
+| In-process | 1.7 s | Replays the whole 158 MB log (86 bytes per operation) after dropping the page cache; grows with the log until snapshots exist |
 | SpacetimeDB | 27 s after a crash, 13 s after a clean stop | Loads all tables into memory; an empty server starts in 0.15 s |
 | PostgreSQL | 0.8 s after a crash | Redoes only the WAL since the last checkpoint; data stays on disk |
 
@@ -113,33 +115,42 @@ by that number. The process was killed with SIGKILL after 2, 5 and 9 seconds of 
 
 | Killed after | Operations in the log | Covered by acknowledgements | Invariants |
 |---:|---:|---:|---|
-| 2 s | 148,967 | 148,967 | hold |
-| 5 s | 365,096 | 365,096 | hold |
-| 9 s | 657,721 | 657,663 | hold |
+| 2 s | 84,966 | 84,902 | hold |
+| 5 s | 235,110 | 235,055 | hold |
+| 9 s | 327,608 | 327,608 | hold |
 
-The log never held fewer operations than were acknowledged. The extra 58 in the last run were on disk but not yet
-answered. A process kill leaves the OS page cache intact, so these test the recovery logic and the ordering of flush
-and reply, not a power cut. For a power cut the guarantee rests on `fdatasync` before the reply (and an `fsync` of
-the directory when the log is created), which was not tested by cutting power.
+The log never held fewer operations than were acknowledged. The few extra operations were on disk but not yet
+answered. (These runs shared the machine with a compiler, so their throughput is lower than in the tables above.
+With the machine idle, the final version of the prototype did 73,272 tps uniform and 70,517 hot at 64 callers.) A
+process kill leaves the OS page cache intact, so these test the recovery logic and the ordering of flush and reply,
+not a power cut. For a power cut the guarantee rests on `fdatasync` before the reply (and an `fsync` of the
+directory when the log is created), which was not tested by cutting power.
 
-Corruption tests on the 9-second log: one byte changed in the middle of the log stops start-up ("corrupt record at
-byte 19999994, 33537404 bytes of log after it; refusing to start"). The last record cut short by 30 bytes, or with a
-byte changed, is dropped as a torn tail. A limit of this rule: a last record that was durable and later rotted looks
-the same as a torn one and is dropped. A real engine needs a durable record of how far the log was flushed to tell
-them apart.
+Corruption tests on the 9-second log. Each record's length has its own checksum, so deciding that the last record
+was cut short never rests on unchecked bytes.
+
+| Damage | Result |
+|---|---|
+| One byte of a record's length changed, mid-log | Start-up refused: "corrupt record header at byte 13911279" |
+| One byte of a record's body changed, mid-log | Start-up refused: "corrupt record at byte 13911279" |
+| Log cut 30 bytes short | Last record dropped as torn, invariants hold |
+| One byte of the last record changed | Last record dropped as torn, invariants hold |
+
+A limit of the last rule: a last record that was durable and later rotted looks the same as a torn one and is
+dropped. A real engine needs a durable note of how far the log was flushed to tell them apart.
 
 ### Was the comparison fair?
 
-The in-process `group` mode batches flushes, and `each` (one flush per transfer, about 6,000 per second) is close to
-the PostgreSQL figures. So the question is whether the other two already had an equivalent batching.
+The in-process `group` mode batches flushes, and `each` (one flush per transfer, about 6,000 per second) is close
+to the PostgreSQL figures. So the question is whether the other two already had an equivalent batching.
 
-- **PostgreSQL already batches flushes.** Concurrent commits share one WAL flush. Measured with `pg_stat_wal` during
-  a 10-second run of the one-function variant at 64 callers: 68,467 commits, 5,178 WAL flushes, about 13 commits per
-  flush. That run gave 6,844 tps (the table shows 5,666 from an earlier run: run-to-run spread is about 20%).
-  Adding an explicit delay to gather more commits per flush (`commit_delay = 1000`, `commit_siblings = 5`) did not
-  help: 5,170 tps uniform and 478 tps hot at 64 callers. Turning durability off (`synchronous_commit = off`) gave
-  8,417 uniform and 2,196 hot. So the disk is not what limits PostgreSQL here; per-transaction work, locks and round
-  trips are.
+- **PostgreSQL already batches flushes.** Concurrent commits share one WAL flush. Measured with `pg_stat_wal`
+  during a 10-second run of the one-function variant at 64 callers: 68,467 commits, 5,178 WAL flushes, about 13
+  commits per flush. That run gave 6,844 tps (the table shows 5,666 from an earlier run: run-to-run spread is about
+  20%). Adding an explicit delay to gather more commits per flush (`commit_delay = 1000`, `commit_siblings = 5`)
+  did not help: 5,170 tps uniform and 478 tps hot at 64 callers. Turning durability off (`synchronous_commit =
+  off`) gave 8,417 uniform and 2,196 hot. So the disk is not what limits PostgreSQL here; per-transaction work,
+  locks and round trips are.
 - **SpacetimeDB already batches flushes too.** Its commit log is not flushed once per transaction, and turning
   confirmed reads off (reply before durability) changed little: 12,451 against 11,352 tps. Keeping 16 calls in
   flight per connection, so that more work arrives at once, raised it to 21,822 tps with a p99 of 113 ms.
@@ -178,9 +189,8 @@ the PostgreSQL figures. So the question is whether the other two already had an 
 Authoritative roleplay state lives in the world server's memory, owned by one writer with one log for everything
 that has value (money, inventory, property, factions), so an action that touches several kinds, such as buying an
 item, is one record and cannot be half applied. Changes are made durable by that append-only log with group commit
-before the caller is told "done".
-Snapshots bound the replay time. PostgreSQL is fed from the log asynchronously and serves history, admin queries,
-backups and analytics, but never decides a balance.
+before the caller is told "done". Snapshots bound the replay time. PostgreSQL is fed from the log asynchronously
+and serves history, admin queries, backups and analytics, but never decides a balance.
 
 What it costs, in honesty:
 

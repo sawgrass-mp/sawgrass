@@ -163,7 +163,9 @@ fn encode(r: &Record, out: &mut Vec<u8>) {
     for v in [r.amount, r.from_after, r.to_after] {
         p.extend_from_slice(&v.to_le_bytes());
     }
-    out.extend_from_slice(&(p.len() as u32).to_le_bytes());
+    let len = (p.len() as u32).to_le_bytes();
+    out.extend_from_slice(&len);
+    out.extend_from_slice(&crc32(&len).to_le_bytes());
     out.extend_from_slice(&crc32(&p).to_le_bytes());
     out.extend_from_slice(&p);
 }
@@ -225,18 +227,27 @@ fn replay(path: &str) -> Result<(Ledger, u64, u64), String> {
     let total = file.metadata().map_err(|e| e.to_string())?.len();
     let mut r = BufReader::with_capacity(1 << 20, file);
     let mut good = 0u64;
-    let mut head = [0u8; 8];
+    let mut head = [0u8; 12];
     let mut payload = Vec::new();
     while good < total {
-        if total - good < 8 {
+        if total - good < 12 {
             break; // A header cut short: torn tail.
         }
         r.read_exact(&mut head).map_err(|e| e.to_string())?;
-        let len = u64::from(u32::from_le_bytes([head[0], head[1], head[2], head[3]]));
-        let crc = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
-        let end = good + 8 + len;
+        let word = |i: usize| u32::from_le_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
+        // The length has its own checksum, so the torn-tail decision below never rests on unchecked bytes. A bad
+        // header is never taken for a torn tail: start-up stops and an operator decides.
+        if crc32(&head[0..4]) != word(4) {
+            return Err(format!(
+                "corrupt record header at byte {good}, {} bytes of log from there; refusing to start",
+                total - good
+            ));
+        }
+        let len = u64::from(word(0));
+        let crc = word(8);
+        let end = good + 12 + len;
         if end > total {
-            break; // A record cut short: torn tail.
+            break; // A record cut short (by its checked length): torn tail.
         }
         payload.resize(len as usize, 0);
         r.read_exact(&mut payload).map_err(|e| e.to_string())?;
