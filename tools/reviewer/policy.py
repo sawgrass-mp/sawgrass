@@ -1,9 +1,17 @@
 """Deterministic rules of the review agent: risk tier, task link, size. Standard library only.
 
 The language model never decides these; it only reviews the content. See docs/roadmap.md, "Review agent".
+
+    python3 -I tools/reviewer/policy.py PR_NUMBER [OWNER/REPO]
+
+prints the tier and the policy checks of a pull request, read through the `gh` command line tool.
 """
 import fnmatch
+import json
+import os
 import re
+import subprocess
+import sys
 
 # Tier 3: maintainers only. Changes here can reach players' machines, weaken CI, or change the agents' rules.
 TIER3 = (
@@ -70,5 +78,46 @@ def checks(title, body, paths, changed_lines, issue):
         ("Linked task", issue is not None, "`Closes #N` in the description, pointing at an issue"),
         ("Task is `ready`", "ready" in labels, "a maintainer labelled the task `ready`"),
         ("Size", tier != 1 or changed_lines <= TIER1_MAX_LINES,
-         f"{changed_lines} changed lines (tier 1 limit {TIER1_MAX_LINES})"),
+         f"{changed_lines} changed lines, added plus deleted (tier 1 limit {TIER1_MAX_LINES})"),
     ]
+
+
+def report(pr, files, issue):
+    """Markdown lines with the tier and checks, from the pull request, file and linked issue JSON of the REST API."""
+    paths = [p for f in files for p in (f["filename"], f.get("previous_filename")) if p]
+    changed = sum(f["additions"] + f["deletions"] for f in files)
+    lines = [f"Tier {pr_tier(paths)}"]
+    for name, ok, detail in checks(pr["title"], pr.get("body"), paths, changed, issue):
+        lines.append(f"- {'✅' if ok else '❌'} {name}: {detail}")
+    return lines
+
+
+def _gh(path):
+    out = subprocess.run(["gh", "api", path], check=True, capture_output=True, text=True).stdout
+    return json.loads(out)
+
+
+def main(argv):
+    if len(argv) not in (1, 2) or not argv[0].isdigit():
+        print(__doc__, file=sys.stderr)
+        return 2
+    repo = argv[1] if len(argv) == 2 else os.environ.get("GITHUB_REPOSITORY", "sawgrass-mp/sawgrass")
+    base = f"repos/{repo}"
+    pr = _gh(f"{base}/pulls/{argv[0]}")
+    files, page = [], 1
+    while True:
+        batch = _gh(f"{base}/pulls/{argv[0]}/files?per_page=100&page={page}")
+        files += batch
+        if len(batch) < 100:
+            break
+        page += 1
+    number = linked_issue(pr.get("body"))
+    issue = _gh(f"{base}/issues/{number}") if number is not None else None
+    if issue is not None and "pull_request" in issue:
+        issue = None
+    print("\n".join(report(pr, files, issue)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

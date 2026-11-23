@@ -152,7 +152,7 @@ def render(pr, tier, check_rows, review, note, model):
     if review is None:
         lines += ["### Verdict: none", "", note]
     else:
-        verdict = "approve" if review["verdict"] == "approve" else "request changes"
+        verdict = "looks good to merge" if review["verdict"] == "approve" else "request changes"
         lines += [f"### Verdict: {verdict}", "", review["summary"]]
         if not review["scope_ok"]:
             lines += ["", "⚠️ The change goes beyond the linked task."]

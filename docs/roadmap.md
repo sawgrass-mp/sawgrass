@@ -16,7 +16,8 @@ world with a controllable character.
 
 ## First tasks
 
-These become issues labelled `ready` once this foundation is merged.
+Each is an issue that starts in `triage`. A maintainer labels it `ready` when it may start; until then it cannot be
+claimed.
 
 | ID | Task | Size |
 |---|---|---|
@@ -35,8 +36,9 @@ These become issues labelled `ready` once this foundation is merged.
 
 ## Review agent
 
-A separate agent reviews pull requests and, in time, merges the low-risk ones. It runs under its own bot account,
-so the author of a pull request and its reviewer are never the same identity.
+A separate agent reviews pull requests and, in time, merges the low-risk ones. The reviewer is a Claude session
+run by a maintainer (in the maintainers' Claude project or on a maintainer's machine), acting through that
+maintainer's GitHub access. It is never the session that wrote the pull request.
 
 | Tier | Covers | Who merges |
 |---|---|---|
@@ -46,18 +48,23 @@ so the author of a pull request and its reviewer are never the same identity.
 
 Safeguards:
 
-- The reviewer runs from `main` and only reads pull request code; it never builds or runs it.
-- Author and reviewer are different agents with different instructions and different accounts.
+- The reviewer reads its rules from `main` and only reads pull request code; it never builds or runs it.
+- Author and reviewer are different sessions with different instructions. They may share a maintainer's GitHub
+  account, so a review is a comment, not a GitHub approval (GitHub does not let an account approve its own pull
+  request).
 - Anyone with triage rights stops an automatic merge with a label; agent merges are squash commits, easy to revert.
 - It starts in comment-only mode. After about a month of comparing its verdicts with the maintainer's decisions,
   automatic merging is enabled tier by tier, tier 1 first.
 
-How it works today (comment-only mode): `.github/workflows/review.yml` runs `tools/reviewer/review.py` on every pull
-request that is not a draft. The tier, the task link and the size limit come from deterministic rules in
-`tools/reviewer/policy.py`, never from the model. Until automatic merging is enabled, only docs, tests,
-`resources/` and `README.md` count as tier 1; all other code is tier 2. The model (Claude) reads the diff with the
-repository's rules and posts one comment with a verdict and findings, updated on every push. Setup is in
-[maintainers.md](maintainers.md#review-agent).
+How it works today (comment-only mode): a maintainer starts a reviewer session, which follows
+[maintainers.md](maintainers.md#review-agent). The tier, the task link and the size limit come from deterministic
+rules in `tools/reviewer/policy.py`, never from the model. Until automatic merging is enabled, only docs, tests,
+`resources/` and `README.md` count as tier 1; all other code is tier 2. Reviews happen only while such a session
+runs.
+
+`.github/workflows/review.yml` and `tools/reviewer/review.py` can run the same review from GitHub Actions with an
+API key. They stay dormant (they do nothing without the `ANTHROPIC_API_KEY` secret) unless the maintainers decide
+to use them.
 
 ## Open decisions
 

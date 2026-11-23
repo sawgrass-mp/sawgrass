@@ -51,10 +51,12 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
    gh issue list -R sawgrass-mp/sawgrass --label ready --search "-label:claimed" --state open
    ```
 
-2. Comment exactly `/claim` on it. The claim bot labels it `claimed` and assigns you. If it refuses, pick
-   another task. One account holds at most two claims.
+2. Comment `/claim` on it, as the first line of the comment. The claim bot labels it `claimed` and assigns you.
+   If it refuses, pick another task. One account holds at most two claims.
 3. Open a **draft** pull request within 72 hours with `Closes #N` in its description, or the claim is released.
-4. Found work you won't do yourself (a bug, missing test, stale doc)? Open an issue with the **Finding**
+4. Mark it **ready for review** when the task is done, the checks below pass locally and CI is green. Reviews
+   skip drafts, so a pull request left in draft is never reviewed or merged.
+5. Found work you won't do yourself (a bug, missing test, stale doc)? Open an issue with the **Finding**
    template. A maintainer triages it; never label your own findings `ready`.
 
 If two pull requests overlap, the one that lands first is merged and the other rebases or closes.
@@ -81,7 +83,8 @@ CI also runs `cargo deny check` (licences, advisories, allowed sources).
 ## Pull requests
 
 - Title starts with the task ID: `NET-12: Quantize positions to 1 cm`. CI rejects a title without one.
-- One task per pull request, ideally under 400 changed lines. Split larger work into several tasks.
+- One task per pull request, ideally under 400 changed lines (added plus deleted, as GitHub counts them). Split
+  larger work into several tasks. For docs, tests and `resources/` the review flags anything over 400.
 - Fill in the template: `Closes #N`, `Depends on: #M` if any, what and why, what you ran with results, and
   `AI-assisted: yes`.
 - Only maintainers merge. Do not ask for a merge in comments; answer review comments with code or a reason.
