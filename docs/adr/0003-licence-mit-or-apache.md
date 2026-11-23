@@ -1,0 +1,36 @@
+# ADR 0003: License the project under MIT OR Apache-2.0
+
+Status: proposed, 2026-11-23. Supersedes the licence point of ADR 0001.
+
+This records a licensing decision; it is not legal advice.
+
+## Context
+
+ADR 0001 chose AGPL-3.0. Two things now conflict with it:
+
+- **Storage.** The maintainers put maximum performance above keeping existing code, and storage is chosen by
+  measurement among an in-memory ledger with a write-ahead log, SpacetimeDB and PostgreSQL. SpacetimeDB's Rust
+  client SDK (`spacetimedb-sdk`) is under the Business Source License 1.1, which cannot be part of an AGPL-3.0
+  program. (Its module bindings crate `spacetimedb` is Apache-2.0.) The licence must leave every candidate usable.
+- **Client runtimes.** ADR 0002 left open how the client module combines with XCL, which is GPL-2.0-only and not
+  compatible with AGPL-3.0. Leonida is GPL-3.0.
+
+Everything in `main` was contributed through the maintainer's account, so the maintainer can relicense it.
+
+## Decision
+
+- The project is licensed under **MIT OR Apache-2.0**, at the user's option (`LICENSE-MIT`, `LICENSE-APACHE`),
+  for the server, the client module, the launcher and the resources alike.
+- Contributions are accepted under the same terms (inbound equals outbound).
+- `scripts/check_no_game_data.py` was copied from Leonida and stays GPL-3.0, as its header says. It is a CI tool,
+  never shipped or linked into Sawgrass.
+
+## Consequences
+
+- Any storage candidate can be used. Using SpacetimeDB still binds every server operator to its own terms
+  (currently one SpacetimeDB instance in production and no database service), whatever our licence; that is
+  weighed in the storage decision, and `deny.toml` would need an explicit entry for its SDK.
+- The client module can be combined with Leonida (MIT and Apache-2.0 are compatible with GPL-3.0) and with XCL
+  (under the MIT option, compatible with GPL-2.0-only). This answers the licensing question in ADR 0002.
+- **Given up:** AGPL-3.0 required anyone who ran a modified server for players to publish the changes. Now anyone
+  may take Sawgrass, change it and run or sell a closed server or client without sharing anything back.

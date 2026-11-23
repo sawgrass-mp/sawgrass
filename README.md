@@ -8,7 +8,7 @@
   <a href="https://github.com/sawgrass-mp/sawgrass/actions/workflows/ci.yml"><img src="https://github.com/sawgrass-mp/sawgrass/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <img src="https://img.shields.io/badge/rust-2024_edition-14e1f0" alt="Rust 2024 edition">
   <img src="https://img.shields.io/badge/target-4096_players-7cf000" alt="Target: 4096 players">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-AGPL--3.0-14e1f0" alt="Licence: AGPL-3.0"></a>
+  <a href="#licence"><img src="https://img.shields.io/badge/licence-MIT_or_Apache--2.0-14e1f0" alt="Licence: MIT or Apache-2.0"></a>
   <img src="https://img.shields.io/badge/built_by-people_%2B_AI_agents-7cf000" alt="Built by people and AI agents">
 </p>
 
@@ -142,8 +142,9 @@ comment `/claim`, and open a draft pull request. Security issues go through [SEC
 
 ## Licence
 
-[GNU Affero General Public License v3.0](LICENSE). If you run a modified server for others, you must publish your
-changes.
+MIT or Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)); see
+[ADR 0003](docs/adr/0003-licence-mit-or-apache.md). One CI script copied from Leonida,
+`scripts/check_no_game_data.py`, stays GPL-3.0.
 
 Grand Theft Auto and Grand Theft Auto VI are trademarks of Take-Two Interactive Software. This project is not
 affiliated with or endorsed by Take-Two Interactive or Rockstar Games.

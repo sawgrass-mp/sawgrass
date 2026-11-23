@@ -1,5 +1,6 @@
-"""Copied from Leonida (https://github.com/ItsNotRexed/Leonida, GPL-3.0, scripts/check_no_game_data.py);
-GPL-3.0 code may be combined with AGPL-3.0 code (section 13 of both licenses).
+"""Copied from Leonida (https://github.com/ItsNotRexed/Leonida, GPL-3.0, scripts/check_no_game_data.py).
+This file stays under GPL-3.0, unlike the rest of the repository (MIT OR Apache-2.0, ADR 0003). It is a CI tool
+and is never shipped with or linked into Sawgrass.
 
 Fail when a tracked file starts like game data, whatever its name.
 
