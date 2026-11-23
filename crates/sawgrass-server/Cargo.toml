@@ -11,5 +11,9 @@ publish.workspace = true
 [dependencies]
 sawgrass-protocol = { path = "../sawgrass-protocol" }
 
+[[bench]]
+name = "visibility"
+harness = false
+
 [lints]
 workspace = true
