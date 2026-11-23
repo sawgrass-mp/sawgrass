@@ -1,0 +1,32 @@
+name: PR Guard
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: pr-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# pull_request_target runs this file and scripts/pr_guard.py as they are on the default branch, so a pull request
+# cannot edit the guard to pass. The job never checks out or runs pull request code: the script reads the diff and
+# the linked task through the REST API as data. The token is read-only and no repository secret is used.
+jobs:
+  pr-guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Guard against smuggled workflows, vandalism and shell execution
+        run: python3 -I scripts/pr_guard.py "$PR_NUMBER"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}

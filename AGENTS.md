@@ -66,6 +66,29 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
 
 If two pull requests overlap, the one that lands first is merged and the other rebases or closes.
 
+## Protected changes
+
+`scripts/pr_guard.py` runs on every pull request from `main` (the `pr-guard` check) and fails it when:
+
+- a tier 3 path (as `tools/reviewer/policy.py` lists them: `.github/`, rule files, `scripts/`, the reviewer, the
+  client and launcher crates, `build.rs`) changes but the linked task's `Scope` does not list it;
+- a workflow gains `schedule`, `pull_request_target`, `workflow_run`, secrets or `github.token`, write
+  permissions, a force push, an API write, or a download piped into a shell, and the task does not allow it;
+- `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` or `docs/architecture.md` is
+  deleted or more than half rewritten and the task does not list it;
+- `.cargo/` changes, or a `Cargo.toml` gains `build =`, `links =`, a proc macro, a git source or `[patch]`, and
+  the task does not allow `build`;
+- code hands a command to a shell (`cmd /C`, `sh -c`, `powershell`, `shell=True`, `os.system`, ...) or a new
+  `.bat`, `.cmd`, `.ps1`, `.sh` or `.vbs` file appears, and the task does not allow `shell`. Start programs
+  directly with a fixed executable and separate arguments instead; never build a command line from a file, a
+  setting or network input.
+
+Scope is granted only by the task's `### Scope` section, in backticks: paths, then `Allows:` and construct names
+(`schedule`, `pull_request_target`, `workflow_run`, `secrets`, `write-permissions`, `force-push`, `api-write`,
+`pipe-to-shell`, `build`, `shell`). It counts only on an open `ready` task that a maintainer opened and you
+claimed. If the guard fails, ask in the issue; never edit the guard or a task to get green. The guard is an alarm,
+not a proof: passing it does not make a change safe, and the review still reads every line.
+
 ## Before you guess, look
 
 - The behaviour may already be decided in `docs/architecture.md` or `docs/adr/`. Follow it, or propose an ADR

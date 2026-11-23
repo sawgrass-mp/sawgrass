@@ -30,7 +30,8 @@ Settings → Branches → add a classic branch protection rule for `main`:
 - Require a pull request before merging, with **0 required approvals**. Every pull request is opened from a
   maintainer's account and GitHub does not count an author's own approval, so a required approval would block all
   merges. Review happens through the review agent's comment and the maintainer's decision to merge.
-- Require these status checks to pass: `fmt`, `clippy`, `test`, `deny`, `scripts`, `no-game-data`, `task-id`.
+- Require these status checks to pass: `fmt`, `clippy`, `test`, `deny`, `scripts`, `no-game-data`, `task-id`,
+  `pr-guard`.
 - Require linear history; block force pushes and deletion.
 - Do not allow bypassing the above, including for administrators ("Do not allow bypassing the above settings").
 
@@ -39,8 +40,38 @@ Raise the approval count and require Code Owner review once maintainers and cont
 ## Actions settings
 
 - Settings → Actions → General: "Require approval for all external contributors" for fork pull requests.
-- Workflow permissions: read repository contents by default; workflows ask for more themselves.
-- Never add a `pull_request_target` workflow that checks out pull request code.
+- Workflow permissions: read repository contents by default; workflows ask for more themselves. Untick "Allow
+  GitHub Actions to create and approve pull requests".
+- Fork pull request workflows: do not send secrets or write tokens to them (the defaults; leave them off).
+- Allow only actions from GitHub and pinned by full commit SHA ("Require actions to be pinned to a full-length
+  commit SHA" where offered).
+- Never add a `pull_request_target` workflow that checks out pull request code. `pr-guard` and the dormant review
+  workflow are the two allowed `pull_request_target` workflows, and both read the pull request only through the API.
+- Keep repository secrets to what a workflow on `main` needs. A workflow added on a branch of this repository runs
+  with them before any review, so put a secret that can write (a personal token, a deploy key) in an Actions
+  environment with a required reviewer instead.
+
+## Protected changes
+
+The `pr-guard` check (`scripts/pr_guard.py`, see [AGENTS.md](../AGENTS.md#protected-changes)) fails a pull request
+that touches a tier 3 path, adds a risky workflow construct, rewrites a prominent file or adds shell execution
+without the linked task granting it. To allow such a change, write the task yourself and list it in the task's
+`### Scope` section in backticks, for example:
+
+```markdown
+### Scope
+
+`.github/workflows/release.yml`, `scripts/release.py`. Allows: `secrets`, `write-permissions`.
+```
+
+Only an open `ready` task opened by an account with write access and claimed by the pull request's author counts,
+so an outside contributor can neither grant scope by editing their own issue nor borrow another task's scope. Your
+own changes to `.github/` and the rules need such a task too. The guard runs from `main`, so a pull request that
+changes it is checked by the old version; review guard changes by hand.
+
+Required status checks are matched by name. A pull request that adds a workflow with a job named `pr-guard` fails
+the real guard (a new workflow is a tier 3 path), but check the run's workflow name ("PR Guard") before merging
+anything that touches `.github/`.
 
 ## Review agent
 

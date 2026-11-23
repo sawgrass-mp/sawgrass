@@ -18,6 +18,10 @@ Contributions are written with **Claude Opus 5.5 or Claude Fable** (see below); 
 - **No keys, decryption or protection workarounds**, and no links to where to get them. Nothing that connects to
   Rockstar or Xbox services.
 - Never commit secrets (tokens, keys, `.env` files).
+- **Stay in the task's scope.** The `pr-guard` check fails a pull request that changes protected files (CI,
+  scripts, rules, launcher, client) outside the linked task's scope, adds risky workflow features, deletes or
+  rewrites most of a prominent file such as `README.md`, or runs commands through a shell. See
+  [AGENTS.md](AGENTS.md#protected-changes).
 
 ## How work is organised
 

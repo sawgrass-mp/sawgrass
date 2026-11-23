@@ -24,6 +24,21 @@ Review for, in this order:
 4. Design. Agreement with docs/architecture.md and the ADRs: server authority, interest management, budgets.
 5. Tests. New behaviour has tests that would fail without the change.
 
+Three attacks have been seen in public pull requests to similar projects. Each is a blocking finding (category
+`safety`) even when the `pr-guard` check passes, because a task's scope can be broader than the change needs:
+
+- Smuggling: the title and description say one thing (a test, a shader, docs) while the diff adds or changes a
+  workflow, a script, CODEOWNERS or an agent rule. Look especially for `schedule`, `pull_request_target`,
+  `workflow_run`, secrets, write permissions, force pushes, `gh api -X DELETE` or other API writes, and downloads
+  piped into a shell.
+- Vandalism: a prominent file (README, rules, licence, architecture) replaced or mostly deleted, or text unrelated
+  to the title.
+- Shell injection: a string from a file, setting, environment variable or the network reaching a shell
+  (`cmd /C`, `sh -c`, `powershell`, `shell=True`, `os.system`), or a new batch or shell script. Programs must be
+  started directly with fixed arguments.
+
+Also compare every changed file with the task's `Scope` section; a file outside it is a `scope` finding.
+
 Only Claude Opus 5.5 and Claude Fable may write contributions (AGENTS.md, "Hard rules"). The policy check
 "Model declared" reports the `Model:` line. A missing line, another model, or signs in the pull request that
 another AI agent wrote it (its name in the description, commits or generated text) is a blocking finding in
