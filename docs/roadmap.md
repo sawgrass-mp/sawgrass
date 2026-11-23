@@ -16,7 +16,8 @@ world with a controllable character.
 
 ## First tasks
 
-These become issues labelled `ready` once this foundation is merged.
+Each is an issue that starts in `triage`. A maintainer labels it `ready` when it may start; until then it cannot be
+claimed.
 
 | ID | Task | Size |
 |---|---|---|

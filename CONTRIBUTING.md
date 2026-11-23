@@ -37,9 +37,11 @@ Labels: `ready` (triaged, can be claimed), `claimed`, `triage` (new, not yet rev
 ### Taking a task
 
 1. Pick an open issue labelled `ready` and not `claimed`.
-2. Comment `/claim`. The bot labels it and assigns you. You can hold two claims at a time.
+2. Comment `/claim` (the first line of the comment). The bot labels it and assigns you. You can hold two
+   claims at a time.
 3. Open a draft pull request with `Closes #N` within 72 hours, or the claim is released automatically.
    `/unclaim` releases it yourself.
+4. Mark the pull request ready for review when the work is done and CI is green. Drafts are not reviewed.
 
 ### Reporting something you won't fix
 
@@ -63,7 +65,7 @@ request, before the code that depends on it.
 ## Pull requests
 
 - Title starts with the task ID (`IM-3: Add hysteresis to the visible set`).
-- One task per pull request, ideally under 400 changed lines.
+- One task per pull request, ideally under 400 changed lines (added plus deleted).
 - Say whether it was AI-assisted, and what you ran.
 - Review: CI first, then a maintainer listed in `.github/CODEOWNERS`. Squash merge only.
 

@@ -76,5 +76,20 @@ class Checks(unittest.TestCase):
         self.assertTrue(self.rows(paths=["crates/sawgrass-server/src/x.rs"], changed_lines=5000)["Size"])
 
 
+class Report(unittest.TestCase):
+    def test_report(self):
+        pr = {"title": "DOC-1: Fix typo", "body": "Closes #1"}
+        files = [{"filename": "docs/b.md", "previous_filename": "docs/a.md", "additions": 3, "deletions": 2}]
+        lines = policy.report(pr, files, {"labels": [{"name": "ready"}]})
+        self.assertEqual(lines[0], "Tier 1")
+        self.assertTrue(all(line.startswith("- ✅") for line in lines[1:]), lines)
+        self.assertIn("5 changed lines", lines[-1])
+
+    def test_report_without_task(self):
+        lines = policy.report({"title": "x", "body": None}, [], None)
+        self.assertEqual(lines[0], "Tier 3")
+        self.assertEqual(sum(line.startswith("- ❌") for line in lines), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
