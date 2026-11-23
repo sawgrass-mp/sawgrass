@@ -52,7 +52,7 @@ class LinkedIssue(unittest.TestCase):
 
 class Checks(unittest.TestCase):
     def rows(self, **kw):
-        args = dict(title="DOC-1: Fix typo", body="Closes #1", paths=["docs/a.md"], changed_lines=10,
+        args = dict(title="DOC-1: Fix typo", body="Closes #1\n\nModel: Claude Opus 5.5", paths=["docs/a.md"], changed_lines=10,
                     issue={"labels": [{"name": "ready"}]})
         args.update(kw)
         return {name: ok for name, ok, _ in policy.checks(**args)}
@@ -70,6 +70,14 @@ class Checks(unittest.TestCase):
         self.assertFalse(rows["Task is `ready`"])
         self.assertFalse(self.rows(issue={"labels": [{"name": "triage"}]})["Task is `ready`"])
 
+    def test_model(self):
+        for model in ("Claude Opus 5.5", "claude fable", "Claude Fable 5.2"):
+            self.assertTrue(self.rows(body=f"Closes #1\nModel: {model}")["Model declared"], model)
+        for body in ("Closes #1", "Closes #1\nModel: <!-- Claude Opus 5.5 or Claude Fable -->",
+                     "Closes #1\nModel: Claude Opus 5", "Closes #1\nModel: GPT", "Closes #1\nModel: Claude Sonnet 5.5",
+                     "Closes #1\nWe did not use Model: Claude Fable"):
+            self.assertFalse(self.rows(body=body)["Model declared"], body)
+
     def test_size_limit_only_for_tier1(self):
         self.assertFalse(self.rows(changed_lines=policy.TIER1_MAX_LINES + 1)["Size"])
         self.assertTrue(self.rows(changed_lines=policy.TIER1_MAX_LINES)["Size"])
@@ -78,7 +86,7 @@ class Checks(unittest.TestCase):
 
 class Report(unittest.TestCase):
     def test_report(self):
-        pr = {"title": "DOC-1: Fix typo", "body": "Closes #1"}
+        pr = {"title": "DOC-1: Fix typo", "body": "Closes #1\nModel: Claude Fable"}
         files = [{"filename": "docs/b.md", "previous_filename": "docs/a.md", "additions": 3, "deletions": 2}]
         lines = policy.report(pr, files, {"labels": [{"name": "ready"}]})
         self.assertEqual(lines[0], "Tier 1")
@@ -88,7 +96,7 @@ class Report(unittest.TestCase):
     def test_report_without_task(self):
         lines = policy.report({"title": "x", "body": None}, [], None)
         self.assertEqual(lines[0], "Tier 3")
-        self.assertEqual(sum(line.startswith("- ❌") for line in lines), 3)
+        self.assertEqual(sum(line.startswith("- ❌") for line in lines), 4)
 
 
 if __name__ == "__main__":

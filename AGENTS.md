@@ -26,6 +26,11 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
 
 ## Hard rules
 
+- **Claude Opus 5.5 or Claude Fable only.** Every contribution is written with Claude Opus 5.5 or Claude Fable
+  (any Fable version). Contributions made with other AI agents or models are not accepted, for the sake of code
+  quality and performance. Declare the model on the `Model:` line of the pull request template. GitHub cannot
+  verify it, so it is a declaration: a false one gets the pull request closed, and the CI and review gates apply
+  either way.
 - **English only** in everything committed: code, comments, docs, commit messages, issue and pull request text.
 - **No game data, ever**: no archives, executables, shaders, textures, models, audio, or logs and reports that
   quote them. No byte patterns or signatures copied out of the game executable. `scripts/check_no_game_data.py`
@@ -85,6 +90,6 @@ CI also runs `cargo deny check` (licences, advisories, allowed sources).
 - Title starts with the task ID: `NET-12: Quantize positions to 1 cm`. CI rejects a title without one.
 - One task per pull request, ideally under 400 changed lines (added plus deleted, as GitHub counts them). Split
   larger work into several tasks. For docs, tests and `resources/` the review flags anything over 400.
-- Fill in the template: `Closes #N`, `Depends on: #M` if any, what and why, what you ran with results, and
-  `AI-assisted: yes`.
+- Fill in the template: `Closes #N`, `Depends on: #M` if any, what and why, what you ran with results, and the
+  `Model:` line (`Model: Claude Opus 5.5` or `Model: Claude Fable`).
 - Only maintainers merge. Do not ask for a merge in comments; answer review comments with code or a reason.

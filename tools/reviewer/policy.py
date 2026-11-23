@@ -44,6 +44,8 @@ TIER1 = (
 TASK_ID = re.compile(r"^(NET|SRV|IM|DB|SCRIPT|RP|BOT|CLIENT|LAUNCH|OPS|DOC)-[0-9]+: \S")
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#([0-9]+)\b", re.IGNORECASE)
 TIER1_MAX_LINES = 400
+# Declared, not verified: GitHub cannot tell which model wrote a pull request. See AGENTS.md, "Hard rules".
+MODEL = re.compile(r"^Model:[ \t]*Claude (?:Opus 5\.5|Fable)\b", re.IGNORECASE | re.MULTILINE)
 
 
 def _matches(path, patterns):
@@ -77,6 +79,8 @@ def checks(title, body, paths, changed_lines, issue):
         ("Task ID in title", bool(TASK_ID.match(title or "")), "titles start with `AREA-N: `"),
         ("Linked task", issue is not None, "`Closes #N` in the description, pointing at an issue"),
         ("Task is `ready`", "ready" in labels, "a maintainer labelled the task `ready`"),
+        ("Model declared", bool(MODEL.search(body or "")),
+         "`Model: Claude Opus 5.5` or `Model: Claude Fable` in the description (declared, not verified)"),
         ("Size", tier != 1 or changed_lines <= TIER1_MAX_LINES,
          f"{changed_lines} changed lines, added plus deleted (tier 1 limit {TIER1_MAX_LINES})"),
     ]

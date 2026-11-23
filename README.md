@@ -134,7 +134,8 @@ copy of the game. Nothing here decrypts or works around any protection.
 
 ## Contributing
 
-People and their agents are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md); agents start with
+Contributors working with **Claude Opus 5.5 or Claude Fable** are welcome; work from other AI agents is not
+accepted. Read [CONTRIBUTING.md](CONTRIBUTING.md); agents start with
 [AGENTS.md](AGENTS.md). Pick an issue labelled
 [`ready`](https://github.com/sawgrass-mp/sawgrass/issues?q=is%3Aissue+is%3Aopen+label%3Aready+-label%3Aclaimed),
 comment `/claim`, and open a draft pull request. Security issues go through [SECURITY.md](SECURITY.md).

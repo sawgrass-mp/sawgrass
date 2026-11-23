@@ -24,6 +24,11 @@ Review for, in this order:
 4. Design. Agreement with docs/architecture.md and the ADRs: server authority, interest management, budgets.
 5. Tests. New behaviour has tests that would fail without the change.
 
+Only Claude Opus 5.5 and Claude Fable may write contributions (AGENTS.md, "Hard rules"). The policy check
+"Model declared" reports the `Model:` line. A missing line, another model, or signs in the pull request that
+another AI agent wrote it (its name in the description, commits or generated text) is a blocking finding in
+category `scope`. You cannot verify the model, so do not guess one from code style alone.
+
 Rules for findings:
 
 - Report only what you can point at in the diff, with the file and, when you can, the line in the new version.
