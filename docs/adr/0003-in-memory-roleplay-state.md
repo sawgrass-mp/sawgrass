@@ -1,4 +1,4 @@
-# ADR 0004: Roleplay state in server memory with its own write-ahead log
+# ADR 0003: Roleplay state in server memory with its own write-ahead log
 
 Status: proposed, 2026-11-23
 
