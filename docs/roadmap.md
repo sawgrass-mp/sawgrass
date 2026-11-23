@@ -31,6 +31,26 @@ These become issues labelled `ready` once this foundation is merged.
 | OPS-2 | Markdown link check in CI | S |
 | OPS-3 | Fail CI when `sawgrass-protocol` changes without a `PROTOCOL_VERSION` bump | S |
 | DOC-1 | Wire format section in `architecture.md` once NET-1 lands | S |
+| OPS-4 | Review agent in comment-only mode (first task after this foundation is merged; see below) | L |
+
+## Review agent
+
+A separate agent reviews pull requests and, in time, merges the low-risk ones. It runs under its own bot account,
+so the author of a pull request and its reviewer are never the same identity.
+
+| Tier | Covers | Who merges |
+|---|---|---|
+| 1 | Docs, tests, roleplay scripts in `resources/`, small changes to non-critical code | The agent, when CI is green, the pull request closes a task a maintainer labelled `ready`, it changes only files in the task's scope, and the diff is small |
+| 2 | Server core, protocol, dependencies | The agent posts a review and a verdict; a maintainer merges |
+| 3 | Launcher and auto-update, client module, CI and repository settings, agent rules, the reviewer itself | Maintainers only |
+
+Safeguards:
+
+- The reviewer runs from `main` and only reads pull request code; it never builds or runs it.
+- Author and reviewer are different agents with different instructions and different accounts.
+- Anyone with triage rights stops an automatic merge with a label; agent merges are squash commits, easy to revert.
+- It starts in comment-only mode. After about a month of comparing its verdicts with the maintainer's decisions,
+  automatic merging is enabled tier by tier, tier 1 first.
 
 ## Open decisions
 
