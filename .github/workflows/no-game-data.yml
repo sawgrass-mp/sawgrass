@@ -1,3 +1,5 @@
+# Rejects tracked files whose extension marks game data or a binary (AGENTS.md, "No game data, ever"), then runs
+# scripts/check_no_game_data.py, which matches file contents and catches renamed files.
 name: No Game Data
 on:
   push:
@@ -5,11 +7,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-concurrency:
-  group: no-game-data-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   no-game-data:
@@ -17,18 +19,21 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    env:
+      FORBIDDEN: rpf ttpf xvd msixvc dxbc fssm spv spvasm dds bk2 awc r9modeldata obj glb ogg wav exe dll
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: No game or binary files tracked
+      - name: Forbidden file extensions
         run: |
-          bad=$(git ls-files | grep -iE '\.(rpf|ttpf|xvd|msixvc|dxbc|fssm|spv|spvasm|dds|bk2|awc|r9modeldata|obj|glb|ogg|wav|exe|dll)$' || true)
-          if [ -n "$bad" ]; then
-            echo "Game or binary files tracked:"
-            echo "$bad"
+          specs=()
+          for ext in $FORBIDDEN; do specs+=(":(glob,icase)**/*.$ext"); done
+          found=$(git ls-files -- "${specs[@]}")
+          if [ -n "$found" ]; then
+            printf '::error file=%s::forbidden file type (game data or binary)\n' $found
             exit 1
           fi
-      - name: No game data under another name
+      - name: Game data by content
         run: python3 -I scripts/check_no_game_data.py

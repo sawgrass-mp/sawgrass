@@ -144,7 +144,7 @@ comment `/claim`, and open a draft pull request. Security issues go through [SEC
 
 MIT or Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)); see
 [ADR 0003](docs/adr/0003-licence-mit-or-apache.md). One CI script copied from Leonida,
-`scripts/check_no_game_data.py`, stays GPL-3.0.
+`scripts/check_no_game_data.py`, stays GPL-3.0 ([LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt)).
 
 Grand Theft Auto and Grand Theft Auto VI are trademarks of Take-Two Interactive Software. This project is not
 affiliated with or endorsed by Take-Two Interactive or Rockstar Games.
