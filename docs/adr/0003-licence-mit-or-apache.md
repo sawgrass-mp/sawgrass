@@ -1,6 +1,6 @@
 # ADR 0003: License the project under MIT OR Apache-2.0
 
-Status: proposed, 2026-11-23. Supersedes the licence point of ADR 0001.
+Status: accepted, 2026-11-23 (the maintainer chose this option). Supersedes the licence point of ADR 0001.
 
 This records a licensing decision; it is not legal advice.
 
