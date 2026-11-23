@@ -85,7 +85,10 @@ million ledger entries in tables.
   PostgreSQL stays near 2,000 transfers per second on one row, so the limit there is the lock and the MVCC row
   versions, not the disk.
 - **Where PostgreSQL stands.** Our code spends most of its time on round trips: one function call instead of five
-  statements gives 1.4 to 1.6 times more throughput. Throughput falls past 64 connections on 4 cores, so a pool of
+  statements gives 1.4 to 1.6 times more throughput. Part of the remaining cost is ours, not the engine's: the
+  triggers that make the ledger tamper-proof (applying each entry, guarding balances, checking at commit that an
+  operation sums to zero) run on every transfer. The SpacetimeDB module enforces the same rules in its reducer, but
+  only for callers that go through it, so a plain PostgreSQL table without triggers would be faster than measured. Throughput falls past 64 connections on 4 cores, so a pool of
   about 16 to 32 connections is the right size here.
 - **What we need.** We have not measured our load yet (BOT-2). Our assumption for 4096 players: one money operation
   per player every 10 seconds and one inventory write every 5 seconds is about 1,200 writes per second at peak.
@@ -148,19 +151,17 @@ the client SDK keeps the server away from a clean AGPL build until then.
 An append-only ledger in RAM grows for the life of a server: here 1.7 million transfers took about 1 GB. On
 PostgreSQL old history costs disk space only.
 
-## Corrections to the first answer
+## Common claims, checked
 
-Before this measurement the project chat had an answer written from memory. Checked against the docs and licence
-files:
+Claims often made about SpacetimeDB, checked against its docs and licence files:
 
-- WebSocket only: **confirmed**, apart from an HTTP API.
-- "BSL with restrictions on production use": **partly wrong.** Production use is allowed with one instance and
-  outside a database service. The restriction that matters is the one-instance limit, plus the client SDK licence,
-  which the answer did not mention.
-- "Better for slow RP state": **confirmed on speed**, by a wide margin. That speed is not needed at our expected
+- "Clients connect over WebSocket only": **true**, apart from an HTTP API.
+- "The BSL forbids production use": **not quite.** Production use is allowed with one instance and outside a
+  database service. The limits that matter are the one-instance rule and the licence of the client SDK.
+- "It is faster for slow roleplay state": **true**, by a wide margin. That speed is not needed at our expected
   load.
-- "Already built code would have to be rewritten": true only for moving the core. For the slow state, only the
-  wallet code (`sawgrass-db`) would move into a module.
+- "Adopting it means rewriting the server": true only for moving the core. For the slow state, only the wallet code
+  (`sawgrass-db`) would move into a module.
 
 ## When to revisit
 
