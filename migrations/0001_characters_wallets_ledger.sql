@@ -4,8 +4,8 @@
 -- which applies itself to its wallet; the entries of one operation sum to zero, and the ledger cannot be edited or
 -- deleted. The triggers below enforce this for any role that does not own the tables, so a bug or a hand-written
 -- query run by the server cannot create or lose money. The owner (the role that runs the migrations) can still
--- disable or drop triggers: run the server under a separate role with SELECT and INSERT, plus UPDATE (balance) on
--- wallets, which row locks need; the triggers still refuse a direct balance change from that role.
+-- disable or drop triggers: run the server under a separate role with SELECT and INSERT on these tables, USAGE on
+-- their sequences and EXECUTE on wallets_lock, and nothing else (no UPDATE, no ownership).
 
 CREATE TABLE characters (
     id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -84,9 +84,12 @@ CREATE CONSTRAINT TRIGGER ledger_entries_balanced AFTER INSERT ON ledger_entries
     FOR EACH ROW EXECUTE FUNCTION ledger_operation_balanced();
 
 -- The ledger drives the balances. Inserting an entry locks its wallet, checks that `balance_after` is the current
--- balance plus `delta`, and applies it. That is the only way a balance changes: a direct UPDATE is refused, so an
+-- balance plus `delta`, and applies it. That is the only way a balance changes: any other UPDATE is refused, so an
 -- entry cannot be written without moving its wallet, and a wallet cannot move without an entry.
-CREATE FUNCTION ledger_entry_apply() RETURNS trigger LANGUAGE plpgsql AS $$
+--
+-- The functions that touch balances run as the owner of the tables (SECURITY DEFINER), so the server role needs
+-- no UPDATE right at all, and `wallet_guard` accepts a balance change only from the owner inside a trigger.
+CREATE FUNCTION ledger_entry_apply() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE
     current BIGINT;
 BEGIN
@@ -107,8 +110,28 @@ $$;
 CREATE TRIGGER ledger_entries_apply BEFORE INSERT ON ledger_entries
     FOR EACH ROW EXECUTE FUNCTION ledger_entry_apply();
 
--- A wallet is created empty, never changes owner or kind, and changes balance only from `ledger_entry_apply`
--- (a trigger depth above 1 means the update comes from a trigger; no other trigger updates wallets).
+-- Locks wallets in id order and returns their balances, so a caller can check funds before writing entries.
+-- Row locks otherwise need UPDATE rights, which the server role does not get.
+CREATE FUNCTION wallets_lock(ids BIGINT[]) RETURNS TABLE (id BIGINT, balance BIGINT, is_system BOOLEAN)
+    LANGUAGE sql SECURITY DEFINER AS $$
+    SELECT w.id, w.balance, w.character_id IS NULL FROM wallets w WHERE w.id = ANY (ids) ORDER BY w.id FOR UPDATE
+$$;
+
+REVOKE EXECUTE ON FUNCTION wallets_lock(BIGINT[]) FROM PUBLIC;
+
+-- A SECURITY DEFINER function must not resolve names through a schema another role can write to, and pg_temp
+-- must come last (otherwise it is searched first). Pin each one to pg_catalog, this schema, then pg_temp.
+DO $$
+BEGIN
+    EXECUTE format('ALTER FUNCTION ledger_entry_apply() SET search_path = pg_catalog, %I, pg_temp', current_schema());
+    EXECUTE format('ALTER FUNCTION wallets_lock(BIGINT[]) SET search_path = pg_catalog, %I, pg_temp',
+        current_schema());
+END
+$$;
+
+-- A wallet is created empty, never changes owner or kind, and changes balance only from `ledger_entry_apply`:
+-- inside a trigger and as the owner of the table. A trigger the server role writes itself (on a temporary table,
+-- say) runs as the server role and is refused.
 CREATE FUNCTION wallet_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
@@ -120,7 +143,11 @@ BEGIN
     IF NEW.id <> OLD.id OR NEW.character_id IS DISTINCT FROM OLD.character_id OR NEW.kind <> OLD.kind THEN
         RAISE EXCEPTION 'wallet % cannot change owner or kind', OLD.id USING ERRCODE = 'restrict_violation';
     END IF;
-    IF NEW.balance <> OLD.balance AND pg_trigger_depth() < 2 THEN
+    IF NEW.balance <> OLD.balance AND (
+        pg_catalog.pg_trigger_depth() < 2
+        OR current_user <> (SELECT pg_catalog.pg_get_userbyid(c.relowner) FROM pg_catalog.pg_class c
+                            WHERE c.oid = TG_RELID)
+    ) THEN
         RAISE EXCEPTION 'wallet % balance changes only through a ledger entry', OLD.id
             USING ERRCODE = 'check_violation';
     END IF;

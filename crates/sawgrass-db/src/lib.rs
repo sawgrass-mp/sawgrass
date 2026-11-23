@@ -8,8 +8,8 @@
 //!
 //! These triggers bind every role except the owner of the tables, which can disable or drop them. Run the
 //! migrations as an owner role and the server as a separate role with `SELECT` and `INSERT` on the tables, `USAGE`
-//! on their sequences, and `UPDATE (balance)` on `wallets`, which `FOR UPDATE` row locks require. The triggers still
-//! refuse a balance change from that role that does not come from a ledger entry.
+//! on their sequences and `EXECUTE` on `wallets_lock`, and no `UPDATE` right. Balances change only inside the
+//! owner's `SECURITY DEFINER` trigger, so that role cannot change a balance outside the ledger.
 //!
 //! Amounts are whole minor units (cents) in `i64`. Money enters and leaves the economy through system wallets
 //! (see [`system_wallet`]), the only wallets allowed to go negative, so the sum of all balances is always zero.
@@ -161,13 +161,10 @@ pub async fn transfer(pool: &PgPool, request: &Transfer<'_>) -> Result<TransferO
         return previous_outcome(pool, request).await;
     };
 
-    let rows: Vec<(i64, i64, bool)> = sqlx::query_as(
-        "SELECT id, balance, character_id IS NULL FROM wallets \
-         WHERE id = ANY($1) ORDER BY id FOR UPDATE",
-    )
-    .bind(vec![request.from.0, request.to.0])
-    .fetch_all(&mut *tx)
-    .await?;
+    let rows: Vec<(i64, i64, bool)> = sqlx::query_as("SELECT id, balance, is_system FROM wallets_lock($1)")
+        .bind(vec![request.from.0, request.to.0])
+        .fetch_all(&mut *tx)
+        .await?;
     let find = |wallet: WalletId| {
         rows.iter()
             .find(|(id, _, _)| *id == wallet.0)

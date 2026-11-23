@@ -443,7 +443,7 @@ async fn a_least_privilege_role_can_transfer_but_not_edit_balances() {
         format!("CREATE ROLE {role} LOGIN PASSWORD 'test'"),
         format!("GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO {role}"),
         format!("GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO {role}"),
-        format!("GRANT UPDATE (balance) ON wallets TO {role}"),
+        format!("GRANT EXECUTE ON FUNCTION wallets_lock(BIGINT[]) TO {role}"),
     ] {
         sqlx::query(AssertSqlSafe(statement))
             .execute(&db.pool)
@@ -476,13 +476,43 @@ async fn a_least_privilege_role_can_transfer_but_not_edit_balances() {
     .expect("transfer as the server role");
     assert!(matches!(outcome, TransferOutcome::Applied(_)));
     assert_eq!(balance(&server, c.bank).await.expect("balance"), 250);
-    let update = sqlx::query("UPDATE wallets SET balance = 0")
-        .execute(&server)
-        .await;
-    assert!(
-        update.is_err(),
-        "the server role must not update wallets directly"
-    );
+    for statement in [
+        "UPDATE wallets SET balance = 1000000",
+        "UPDATE wallets SET kind = 'bank'",
+        "SELECT id FROM wallets FOR UPDATE",
+        "DELETE FROM ledger_entries",
+    ] {
+        let result = sqlx::query(statement).execute(&server).await;
+        assert!(result.is_err(), "the server role could run: {statement}");
+    }
+
+    // The trick from review: a trigger of the role's own raises the trigger depth. Even with an UPDATE right on
+    // the balance, which the role is not meant to have, the guard refuses it because it does not run as the owner.
+    sqlx::query(AssertSqlSafe(format!(
+        "GRANT UPDATE (balance) ON wallets TO {role}"
+    )))
+    .execute(&db.pool)
+    .await
+    .expect("grant UPDATE for the trick");
+    let mut conn = server.acquire().await.expect("connection");
+    let wallet = c.bank.0;
+    for statement in [
+        "CREATE TEMP TABLE t (x int)".to_owned(),
+        format!(
+            "CREATE FUNCTION pg_temp.f() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN UPDATE public.wallets SET balance = 1000000 WHERE id = {wallet}; RETURN NEW; END $$"
+        ),
+        "CREATE TRIGGER t_f AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION pg_temp.f()".to_owned(),
+    ] {
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(&mut *conn)
+            .await
+            .expect("set up the trick");
+    }
+    let trick = sqlx::query("INSERT INTO t VALUES (1)").execute(&mut *conn).await;
+    assert!(trick.is_err(), "a trigger of the server role changed a balance");
+    drop(conn);
+    assert_eq!(balance(&server, c.bank).await.expect("balance"), 250);
 
     server.close().await;
     assert_ledger_consistent(&db.pool).await;
