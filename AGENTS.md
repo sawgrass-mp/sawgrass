@@ -64,6 +64,11 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
 5. Found work you won't do yourself (a bug, missing test, stale doc)? Open an issue with the **Finding**
    template. A maintainer triages it; never label your own findings `ready`.
 
+Only a maintainer or the dispatcher adds `ready`. The dispatcher (`scripts/dispatch.py`) labels a task the moment
+it is opened if the maintainer approved its ID in `.github/approved-tasks.txt` and its scope touches no protected
+path; otherwise it says why on the issue and the task waits for a maintainer. Never add `ready` yourself, and never
+edit a task's scope or title after it is `ready`: the dispatcher takes its label back.
+
 If two pull requests overlap, the one that lands first is merged and the other rebases or closes.
 
 ## Protected changes

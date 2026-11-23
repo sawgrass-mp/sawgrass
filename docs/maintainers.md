@@ -73,6 +73,23 @@ Required status checks are matched by name. A pull request that adds a workflow 
 the real guard (a new workflow is a tier 3 path), but check the run's workflow name ("PR Guard") before merging
 anything that touches `.github/`.
 
+## Task dispatcher
+
+`.github/workflows/dispatch.yml` runs `scripts/dispatch.py` when an issue is opened, edited or reopened, and on
+every open issue when `.github/approved-tasks.txt` changes on `main`. It labels a task `ready` and removes `triage`
+only when the title starts with an approved ID that no other issue uses, a maintainer opened it, and its scope has
+no protected (tier 3) path, no item that covers one (`crates/`, `*`) and no `Allows:`. Otherwise it leaves the task
+in `triage` and explains why in one comment, so you see what needs your decision.
+
+- **Approve tasks once** by listing their IDs in `.github/approved-tasks.txt`. The file is tier 3, so a change to it
+  needs your own task with that file in its scope, and your merge.
+- **Protected tasks** (CI, rules, the reviewer, client, launcher) are never dispatched. Label them `ready` by hand.
+- **Edits are re-checked.** If a task the dispatcher labelled stops qualifying, it removes `ready` and adds `triage`
+  back, even when claimed, so a widened scope cannot pass `pr-guard`. It never touches a `ready` you added.
+- **Labels come from `github-actions[bot]`.** The issue's events show who added each `ready`. While agents work
+  through a maintainer's account, they could still add `ready` by hand; the dispatcher only removes the reason to.
+  Moving agents to their own account without triage access closes that gap.
+
 ## Review agent
 
 Reviews are done by a Claude session that a maintainer runs, in the maintainers' Claude project or on their own
