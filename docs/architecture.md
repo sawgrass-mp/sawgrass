@@ -18,7 +18,7 @@ player by more than 5% says so with numbers.
 ## Components
 
 ```text
- launcher ──starts──▶ game (Leonida) + sawgrass client module ─┐
+ launcher ──starts──▶ game (Leonida or XCL) + client module ───┐
                                                                 │ QUIC
  load-test bots (same protocol, no game) ──────────────────────┤
                                                                 ▼
@@ -72,11 +72,17 @@ players' machines, so they run in a sandbox with no file, network or process acc
 
 ## Client and launcher
 
-- The client module is a Rust library with a C ABI loaded by Leonida's runtime (`gta6rt`). Game functions are
-  found at run time by pattern, per game version; no bytes from the executable are stored in this repository.
-- All game access goes through a `GameApi` trait with two implementations: the real one over hooks, and a fake
-  one used by bots and tests.
-- The launcher (Rust and Tauri) checks the player's Leonida build against a hash manifest, installs the signed
+- The game runs on PC through one of two **runtimes** ([ADR 0002](adr/0002-two-client-runtimes.md)):
+  [Leonida](https://github.com/ItsNotRexed/Leonida) (a static recompilation, runtime `gta6rt`) or
+  [XCL](https://github.com/ivall/xcl) (a compatibility layer that runs the console code natively). In-game testing
+  starts on whichever boots the game first.
+- The client module is a Rust library with a C ABI. A `Runtime` adapter per runtime loads it into the game, installs
+  hooks and locates game functions. Functions are found at run time by pattern, per runtime and game version; no
+  bytes from the executable are stored in this repository.
+- All game access goes through a `GameApi` trait with two implementations: the real one over a runtime adapter,
+  and a fake one used by bots and tests. Nothing above `GameApi` knows which runtime it runs on.
+- The launcher (Rust and Tauri) detects the player's runtime, checks its build against that runtime's hash
+  manifest, installs the signed
   client module, lists servers, downloads server resources and starts the game. It never downloads or unpacks the
   game.
 

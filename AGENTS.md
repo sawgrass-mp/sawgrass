@@ -8,9 +8,11 @@ to get wrong.
 
 Sawgrass is an open-source multiplayer roleplay platform for Grand Theft Auto VI, written in Rust. The target is
 **4096 players in one world** on a dedicated server. Players run the game on PC through
-[Leonida](https://github.com/ItsNotRexed/Leonida) (a static recompilation of the Xbox Series build); a Sawgrass
-module loaded by Leonida's runtime connects them to the server. The game does not boot under Leonida yet, so the
-server, protocol, storage, scripting and load-test bots are built and measured without the game.
+[Leonida](https://github.com/ItsNotRexed/Leonida) (a static recompilation of the Xbox Series build) or
+[XCL](https://github.com/ivall/xcl) (a compatibility layer that runs the console code natively), whichever boots
+it first ([ADR 0002](docs/adr/0002-two-client-runtimes.md)); a Sawgrass module loaded into the game connects them
+to the server. The game boots under neither yet, so the server, protocol, storage, scripting and load-test bots
+are built and measured without the game, and client code above the `GameApi` trait is tested with its fake.
 
 ## Where things are
 
