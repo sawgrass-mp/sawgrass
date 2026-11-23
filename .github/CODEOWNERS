@@ -1,0 +1,15 @@
+# Every change needs a maintainer's review. The lines below name the paths that matter most, so that they keep a
+# dedicated owner when more maintainers join.
+*                   @spaceosint
+
+/.github/           @spaceosint
+/AGENTS.md          @spaceosint
+/CLAUDE.md          @spaceosint
+/CONTRIBUTING.md    @spaceosint
+/SECURITY.md        @spaceosint
+/deny.toml          @spaceosint
+/rust-toolchain.toml @spaceosint
+/Cargo.lock         @spaceosint
+/scripts/           @spaceosint
+/docs/adr/          @spaceosint
+build.rs            @spaceosint

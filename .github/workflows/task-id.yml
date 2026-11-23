@@ -1,0 +1,27 @@
+name: Task ID
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  task-id:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      # The title is untrusted text: it reaches the script only through the environment, never the shell line.
+      - name: Title starts with a task ID
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 -I -c '
+          import os, re, sys
+          title = os.environ["TITLE"]
+          if re.match(r"^(NET|SRV|IM|DB|SCRIPT|RP|BOT|CLIENT|LAUNCH|OPS|DOC)-[0-9]+: \S", title):
+              sys.exit(0)
+          print("The pull request title must start with a task ID, for example \"NET-12: Quantize positions\".")
+          print("See CONTRIBUTING.md for the prefixes.")
+          sys.exit(1)
+          '

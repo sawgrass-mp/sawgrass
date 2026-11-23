@@ -1,0 +1,58 @@
+# Roadmap
+
+Stages 0–2 do not need the game and run in parallel with Leonida's work. Stage 3 starts when Leonida boots to a
+world with a controllable character.
+
+1. **Stage 0: repository foundation.** Workspace, rules, CI, claim bot, first tasks. Done by maintainers before
+   the repository opens to the swarm.
+2. **Stage 1: server without the game.** Protocol, gateway, simulation, interest management, bots, web map.
+   Gates: 1000 bots on one machine, then 4096.
+3. **Stage 2: roleplay base.** PostgreSQL, scripting runtime, base resources (characters, money, inventory, jobs),
+   admin tools. Everything tested with bots.
+4. **Stage 3: client in the game.** A plugin API in Leonida's runtime (proposed upstream), hooks, sync of
+   players, vehicles and damage, in-game UI.
+5. **Stage 4: launcher and releases.** Signing, auto-update, server list.
+6. **Stage 5: scale.** Real players, zones only if measurements call for them.
+
+## First tasks
+
+These become issues labelled `ready` once this foundation is merged.
+
+| ID | Task | Size |
+|---|---|---|
+| NET-1 | Packet format and quantization of positions and rotations, with precision tests | S |
+| NET-2 | Client-to-gateway connection over `quinn`: handshake, protocol version, datagrams | M |
+| IM-1 | Spatial grid and visible set with hysteresis, plus a benchmark with 4096 points | M |
+| SRV-1 | Tick loop on an ECS with tick-duration metrics | M |
+| BOT-1 | Headless bot that walks between waypoints and speaks the protocol | M |
+| BOT-2 | Run N bots and report tick p50/p99 and bytes per player | S |
+| DB-1 | Character and wallet schema with a transaction ledger | S |
+| OPS-1 | Benchmark job in CI that fails on a regression over 5% | M |
+| OPS-2 | Markdown link check in CI | S |
+| OPS-3 | Fail CI when `sawgrass-protocol` changes without a `PROTOCOL_VERSION` bump | S |
+| DOC-1 | Wire format section in `architecture.md` once NET-1 lands | S |
+| OPS-4 | Review agent in comment-only mode (first task after this foundation is merged; see below) | L |
+
+## Review agent
+
+A separate agent reviews pull requests and, in time, merges the low-risk ones. It runs under its own bot account,
+so the author of a pull request and its reviewer are never the same identity.
+
+| Tier | Covers | Who merges |
+|---|---|---|
+| 1 | Docs, tests, roleplay scripts in `resources/`, small changes to non-critical code | The agent, when CI is green, the pull request closes a task a maintainer labelled `ready`, it changes only files in the task's scope, and the diff is small |
+| 2 | Server core, protocol, dependencies | The agent posts a review and a verdict; a maintainer merges |
+| 3 | Launcher and auto-update, client module, CI and repository settings, agent rules, the reviewer itself | Maintainers only |
+
+Safeguards:
+
+- The reviewer runs from `main` and only reads pull request code; it never builds or runs it.
+- Author and reviewer are different agents with different instructions and different accounts.
+- Anyone with triage rights stops an automatic merge with a label; agent merges are squash commits, easy to revert.
+- It starts in comment-only mode. After about a month of comparing its verdicts with the maintainer's decisions,
+  automatic merging is enabled tier by tier, tier 1 first.
+
+## Open decisions
+
+- Scripting language: Luau (proposed), WASM or JavaScript.
+- Where the community talks (Discord or GitHub only).
