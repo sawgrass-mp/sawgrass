@@ -7,7 +7,7 @@ whichever comes first, boots the game to a world with a controllable character (
    the repository opens to the swarm.
 2. **Stage 1: server without the game.** Protocol, gateway, simulation, interest management, bots, web map.
    Gates: 1000 bots on one machine, then 4096.
-3. **Stage 2: roleplay base.** Roleplay state in server memory with its own log and a PostgreSQL archive
+3. **Stage 2: roleplay base.** Roleplay state in server memory, stored in RocksDB, with a PostgreSQL archive
    (ADR 0003), scripting runtime, base resources (characters, money, inventory, jobs), admin tools. Everything
    tested with bots.
 4. **Stage 3: client in the game.** A runtime adapter for the first runtime that boots the game, a module-loading

@@ -32,10 +32,9 @@ player by more than 5% says so with numbers.
   They scale horizontally because outgoing traffic, not simulation, is the bottleneck.
 - **World simulation** is one multithreaded process holding every entity in an ECS. It owns authority decisions,
   runs the game-mode scripts and decides who sees what.
-- **Roleplay state** (characters, money, inventory, property) is owned by the world server in memory and made
-  durable by its own write-ahead log with group commit and snapshots
-  ([ADR 0003](adr/0003-in-memory-roleplay-state.md)). A change is acknowledged only once it is on disk.
-- **PostgreSQL** is the archive, fed from that log asynchronously, for history, admin queries and backups. It never
+- **Roleplay state** (characters, money, inventory, property) is owned by one writer in the world server, held in
+  memory and stored in RocksDB with group commit ([ADR 0003](adr/0003-in-memory-roleplay-state.md)). A change is acknowledged only once it is on disk.
+- **PostgreSQL** is the archive, fed from the stored operations asynchronously, for history, admin queries and backups. It never
   decides a balance.
 - **Web map** shows live positions for debugging and administration.
 
