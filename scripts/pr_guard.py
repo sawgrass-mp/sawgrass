@@ -30,8 +30,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "reviewer"))
 import policy  # noqa: E402
 
-# Authors whose issues can grant scope. Only people with write access to the repository have these associations.
-MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 WORKFLOW_PATHS = (".github/workflows/*", ".github/actions/*")
 
@@ -145,7 +143,7 @@ def evaluate(pr, files, issue, base_lines):
     author = (pr.get("user") or {}).get("login")
     task_ok = (issue is not None
                and issue.get("state") == "open"
-               and issue.get("author_association") in MAINTAINER_ASSOCIATIONS
+               and policy.is_maintainer(issue.get("user"))
                and (policy.maintainer_pr(pr)
                     or ("ready" in {label["name"] for label in issue.get("labels", [])}
                         and author in {a["login"] for a in issue.get("assignees") or []})))

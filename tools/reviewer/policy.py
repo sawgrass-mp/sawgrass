@@ -65,7 +65,16 @@ def pr_tier(paths):
     return max((file_tier(p) for p in paths), default=3)
 
 
-MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+# GitHub logins of the maintainers: accounts with write access whose own issues and pull requests get the automatic
+# bookkeeping (docs/maintainers.md). An author association is not write access (`MEMBER` is any organization member,
+# `COLLABORATOR` includes read access), so they are listed here, in a tier 3 file that only a maintainer's task and
+# merge can change. Lower case.
+MAINTAINERS = {"spaceosint"}
+
+
+def is_maintainer(user):
+    """Whether a REST API user object (or None) is a listed maintainer."""
+    return ((user or {}).get("login") or "").lower() in MAINTAINERS
 
 
 def maintainer_pr(pr):
@@ -76,7 +85,7 @@ def maintainer_pr(pr):
     """
     head = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
     base = ((pr.get("base") or {}).get("repo") or {}).get("full_name")
-    return pr.get("author_association") in MAINTAINER_ASSOCIATIONS and head is not None and head == base
+    return is_maintainer(pr.get("user")) and head is not None and head == base
 
 
 def linked_issue(body):

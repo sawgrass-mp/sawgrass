@@ -75,25 +75,31 @@ anything that touches `.github/`.
 
 ## Automatic bookkeeping for the maintainer's agents
 
-The maintainer's agents work through the maintainer's account, so the bookkeeping for their work is automatic:
+The maintainer's agents work through the maintainer's account, so the bookkeeping for their work is automatic.
+"Maintainer" here means a login listed in `MAINTAINERS` in `tools/reviewer/policy.py` (tier 3), not a GitHub
+author association, which an organization member or a read-only collaborator also has.
 
 - **`ready`.** `.github/workflows/dispatch.yml` runs `scripts/dispatch.py` when an issue is opened, edited or
   reopened. It labels `ready` (and removes `triage`) every open issue a maintainer opened whose title starts with a
-  task ID that no other issue uses. Issues from other accounts stay in `triage`, with one comment saying why.
+  task ID no other maintainer's issue uses, unless its scope names a protected (tier 3) path, an item that covers
+  one, or `Allows:`. Protected tasks stay in `triage` so that nobody else can `/claim` them; the maintainer's own
+  pull request does not need `ready`. Label one by hand only to hand it to an outside contributor. Issues from
+  other accounts stay in `triage` too. Each task left there gets one comment saying why.
 - **Claims.** A pull request the maintainer's account opens from a branch of this repository claims the task it
   closes (`scripts/claims.py link`, in `.github/workflows/claims.yml`), with no `/claim` and no two-claim limit.
 - **`pr-guard`.** On such a pull request the linked task's scope counts without `ready` or a claim. The scope check
   itself stays: a protected path still fails unless the task's `### Scope` names it.
 - **Model.** Such a pull request needs no `Model:` line; AGENTS.md declares the model for the maintainer's account.
-- **`protected` label.** The same job labels the maintainer's pull request `protected` while it changes a tier 3
-  path (CI, rules, scripts, the reviewer, client, launcher), so the pull request list shows which ones to read
-  closely before merging.
+- **`protected` label.** The same job labels every open pull request, from any account, `protected` while it
+  changes a tier 3 path (CI, rules, scripts, the reviewer, client, launcher), so the pull request list shows which
+  ones to read closely before merging.
 
 Outside contributors keep every gate: a maintainer labels their task `ready`, they `/claim` it (two at a time),
 declare the model, and `pr-guard` requires the claim.
 
 What this gives up: any agent on the maintainer's account can open a task that names CI or rule files in its scope
-and have it labelled `ready` and passed by `pr-guard` with no human step. What remains is the required CI, the
+and have its own pull request passed by `pr-guard` with no human step. Trust follows the account that opens the
+pull request: code an agent copies into its branch from elsewhere takes the maintainer's path too. What remains is the required CI, the
 reviewer's comment, the `protected` label and the maintainer's merge. Read every `protected` pull request before
 merging it. Moving agents to their own account without write access restores the label and claim gates.
 

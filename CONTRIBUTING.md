@@ -44,7 +44,7 @@ Every task is a GitHub issue with an ID in its title. The prefix names the area:
 
 Labels: `ready` (triaged, can be claimed), `claimed`, `triage` (new, not yet reviewed), `good first task`, and
 `size: S` (an evening), `size: M` (a few days), `size: L` (several pull requests). Only maintainers add `ready`;
-the dispatcher adds it automatically to every task a maintainer opens.
+the dispatcher adds it automatically to tasks a maintainer opens that touch no protected path.
 
 ### Taking a task
 

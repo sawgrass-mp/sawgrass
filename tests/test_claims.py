@@ -6,6 +6,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import claims  # noqa: E402
+import policy  # noqa: E402
+
+policy.MAINTAINERS = {"stiv"}
 
 
 class ParseCommand(unittest.TestCase):
@@ -67,6 +70,7 @@ class MaintainerClaims(unittest.TestCase):
 
     def issue(self, labels=("ready",), association="MEMBER", state="open"):
         return {"number": 49, "state": state, "author_association": association,
+                "user": {"login": "stiv" if association == "MEMBER" else "outsider"},
                 "labels": [{"name": n} for n in labels], "assignees": []}
 
     def test_no_limit_for_maintainers(self):
@@ -79,7 +83,7 @@ class MaintainerClaims(unittest.TestCase):
         self.assertFalse(claims.decide_link(self.pr(), self.issue(association="NONE")))
         self.assertFalse(claims.decide_link(self.pr(), self.issue(state="closed")))
         self.assertFalse(claims.decide_link(self.pr(), None))
-        self.assertFalse(claims.decide_link(self.pr(author_association="CONTRIBUTOR"), self.issue()))
+        self.assertFalse(claims.decide_link(self.pr(user={"login": "member"}), self.issue()))
         self.assertFalse(claims.decide_link(self.pr(head={"repo": {"full_name": "x/fork"}}), self.issue()))
 
     def test_link_claims_and_marks_protected(self):
@@ -103,6 +107,11 @@ class MaintainerClaims(unittest.TestCase):
         self.assertIn(("POST", "/issues/50/labels", {"labels": ["protected"]}), gh.calls)
         self.assertIn(("POST", "/issues/49/labels", {"labels": ["claimed"]}), gh.calls)
         self.assertIn(("POST", "/issues/49/assignees", {"assignees": ["stiv"]}), gh.calls)
+
+        # A fork's pull request is labelled too, but claims nothing.
+        gh.calls.clear()
+        claims.link(gh, self.pr(user={"login": "outsider"}, head={"repo": {"full_name": "x/fork"}}))
+        self.assertEqual(gh.calls, [("POST", "/issues/50/labels", {"labels": ["protected"]})])
 
 
 class Expiry(unittest.TestCase):

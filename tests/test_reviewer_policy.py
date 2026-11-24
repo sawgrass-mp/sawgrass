@@ -6,6 +6,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "reviewer"))
 import policy  # noqa: E402
 
+policy.MAINTAINERS = {"maint"}
+
 
 class Tiers(unittest.TestCase):
     def test_file_tiers(self):
@@ -86,10 +88,11 @@ class Checks(unittest.TestCase):
 
     def test_maintainer_pr(self):
         repo = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
-        pr = {"author_association": "MEMBER", "head": repo, "base": repo}
+        pr = {"user": {"login": "Maint"}, "author_association": "MEMBER", "head": repo, "base": repo}
         self.assertTrue(policy.maintainer_pr(pr))
-        self.assertTrue(policy.maintainer_pr({**pr, "author_association": "OWNER"}))
-        self.assertFalse(policy.maintainer_pr({**pr, "author_association": "CONTRIBUTOR"}))
+        # An association is not write access: only listed logins count.
+        self.assertFalse(policy.maintainer_pr({**pr, "user": {"login": "member"}}))
+        self.assertFalse(policy.maintainer_pr({**pr, "user": None}))
         self.assertFalse(policy.maintainer_pr({**pr, "head": {"repo": {"full_name": "fork/sawgrass"}}}))
         self.assertFalse(policy.maintainer_pr({**pr, "head": {"repo": None}}))
 

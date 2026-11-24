@@ -8,12 +8,13 @@ Needs GITHUB_TOKEN and GITHUB_REPOSITORY (both set by GitHub Actions).
 The maintainer's own agents work through the maintainer's account, so their tasks need no hand labelling. The
 dispatcher labels an issue `ready` (and removes `triage`) when all of these hold:
 
-- the issue is open and was opened by a maintainer (an account with write access);
-- its title starts with a task ID (`AREA-N: `) that no other issue uses.
+- the issue is open and was opened by a maintainer (listed in `MAINTAINERS` in `tools/reviewer/policy.py`);
+- its title starts with a task ID (`AREA-N: `) that no other maintainer's issue uses;
+- its `### Scope` lists no protected (tier 3) path, no item that could cover one, and no `Allows:`.
 
-That includes tasks whose scope lists protected (tier 3) paths: `pr-guard` still limits a pull request to the
-paths its task names, and the maintainer's merge is the gate for those. Issues from anyone else stay in `triage`
-for the maintainer; when such an issue has a task ID, one comment says so (edited, never repeated).
+A protected task stays in `triage`, so nobody else can `/claim` it; the maintainer's own pull request needs no
+`ready` and claims it anyway. Issues from anyone else stay in `triage` too. When a task-ID issue is left there,
+one comment says why (edited, never repeated).
 
 When a task the dispatcher labelled is edited so that it no longer qualifies, the dispatcher removes `ready`
 again. It never removes a `ready` that someone else added.
@@ -27,7 +28,10 @@ import sys
 import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "reviewer"))
 import claims  # noqa: E402
+import policy  # noqa: E402
+import pr_guard  # noqa: E402
 
 READY = "ready"
 TRIAGE = "triage"
@@ -35,11 +39,32 @@ BOT = "github-actions[bot]"
 MARKER = "<!-- sawgrass-dispatcher -->"
 TITLE_ID = re.compile(r"^([A-Z]+-[0-9]+): \S")
 
+# One concrete path inside each tier 3 pattern. A scope item that covers any of them is protected, so a broad item
+# such as `crates/` or `*` cannot reach the client crate or a workflow.
+PROBES = (
+    ".github/workflows/x.yml", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md", "deny.toml",
+    "rust-toolchain.toml", "scripts/x.py", "tools/reviewer/x.py", "docs/adr/0002-x.md",
+    "crates/sawgrass-client/src/lib.rs", "crates/sawgrass-launcher/src/main.rs", "build.rs",
+    "crates/sawgrass-server/build.rs", ".claude/settings.json",
+)
+
 # ---- pure logic (tested in tests/test_dispatch.py) ----
 
 def task_id(title):
     m = TITLE_ID.match(title or "")
     return m.group(1) if m else None
+
+
+def protected_scope(body):
+    """Why the task's scope is protected: tier 3 items, items that cover one, or any `Allows:`."""
+    paths, allows = pr_guard.scope_of(body)
+    reasons = []
+    if allows:
+        reasons.append("it allows " + ", ".join(f"`{a}`" for a in sorted(allows)))
+    for item in sorted(paths):
+        if policy.file_tier(item) == 3 or any(pr_guard.in_scope(p, {item}) for p in PROBES):
+            reasons.append(f"`{item}` is or covers a protected path")
+    return reasons
 
 
 def decide(issue, other_titles):
@@ -50,16 +75,18 @@ def decide(issue, other_titles):
     reasons = []
     if issue.get("state") != "open":
         reasons.append("the issue is not open")
-    if issue.get("author_association") not in claims.MAINTAINER_ASSOCIATIONS:
+    if not policy.is_maintainer(issue.get("user")):
         reasons.append("a maintainer did not open it")
     if any(task_id(t) == tid for t in other_titles):
-        reasons.append(f"another issue already uses `{tid}`")
+        reasons.append(f"another maintainer's issue already uses `{tid}`")
+    reasons.extend(protected_scope(issue.get("body")))
     return tid, reasons
 
 
 def comment_text(tid, reasons):
     lines = [MARKER, f"Not labelled `{READY}` automatically: " + "; ".join(reasons) + ".", "",
-             f"This task stays in `{TRIAGE}` until a maintainer labels it `{READY}` by hand."]
+             f"This task stays in `{TRIAGE}` until a maintainer labels it `{READY}` by hand. A maintainer's own "
+             "pull request does not need the label."]
     return "\n".join(lines)
 
 
@@ -99,7 +126,8 @@ def dispatch(gh, issue, all_issues):
     if "pull_request" in issue:
         return
     number = issue["number"]
-    others = [i.get("title") for i in all_issues if i["number"] != number and "pull_request" not in i]
+    others = [i.get("title") for i in all_issues
+              if i["number"] != number and "pull_request" not in i and policy.is_maintainer(i.get("user"))]
     tid, reasons = decide(issue, others)
     labels = labels_of(issue)
     if not reasons:

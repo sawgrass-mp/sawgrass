@@ -69,8 +69,9 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
    template. A maintainer triages it; never label your own findings `ready`.
 
 Only a maintainer or the dispatcher adds `ready`. The dispatcher (`scripts/dispatch.py`) labels every task a
-maintainer's account opens the moment it is opened, if its title starts with a task ID no other issue uses. Tasks
-from other accounts wait in `triage` for a maintainer. Never add `ready` yourself.
+maintainer's account opens the moment it is opened, if its title starts with a task ID no other issue uses and
+its scope touches no protected path. Protected tasks and tasks from other accounts wait in `triage`; a pull request
+from the maintainer's account does not need `ready`. Never add `ready` yourself.
 
 If two pull requests overlap, the one that lands first is merged and the other rebases or closes.
 

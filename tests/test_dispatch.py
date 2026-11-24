@@ -5,12 +5,16 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import dispatch  # noqa: E402
+import policy  # noqa: E402
+
+policy.MAINTAINERS = {"maint"}
 
 
 def issue(title="NET-2: Client-to-gateway connection", scope="New crate `crates/sawgrass-gateway`, `Cargo.toml`.",
           association="MEMBER", state="open"):
     body = f"### What\n\nSomething.\n\n### Scope\n\n{scope}\n\n### Depends on\n\n#2\n"
-    return {"number": 3, "title": title, "body": body, "author_association": association, "state": state}
+    return {"number": 3, "title": title, "body": body, "author_association": association, "state": state,
+            "user": {"login": "maint" if association == "MEMBER" else "outsider"}}
 
 
 class TaskId(unittest.TestCase):
@@ -34,12 +38,22 @@ class Decide(unittest.TestCase):
 
     def test_duplicate_id(self):
         reasons = dispatch.decide(issue(), ["NET-2: an older copy"])[1]
-        self.assertTrue(any("another issue" in r for r in reasons))
+        self.assertTrue(any("already uses" in r for r in reasons))
 
-    def test_protected_scope_still_dispatched(self):
-        # The maintainer's merge, not a label, is the gate for protected paths; pr-guard keeps the scope check.
-        for scope in ("`.github/workflows/ci.yml`", "`scripts/`. Allows: `secrets`", "`crates/sawgrass-client`"):
+    def test_protected_scope_stays_in_triage(self):
+        # Nobody else may /claim a protected task; the maintainer's own pull request needs no `ready`.
+        for scope in ("`.github/workflows/ci.yml`", "`scripts/`", "`crates/sawgrass-client`", "`AGENTS.md`",
+                      "`crates/`", "`*`", "`crates/*`", "`crates/sawgrass-server/build.rs`", "`docs/adr/`",
+                      "`crates/sawgrass-server`. Allows: `shell`", "`tools/`", "`.github`"):
+            self.assertTrue(dispatch.decide(issue(scope=scope), [])[1], scope)
+
+    def test_ordinary_scope(self):
+        for scope in ("`crates/sawgrass-bots`", "`docs/architecture.md`", "`Cargo.toml`, `Cargo.lock`",
+                      "`tests/test_x.py`", "`resources/jobs/`", "`crates/sawgrass-server/src/`"):
             self.assertEqual(dispatch.decide(issue(scope=scope), [])[1], [], scope)
+
+    def test_member_without_listed_login(self):
+        self.assertTrue(dispatch.decide({**issue(), "user": {"login": "member"}}, [])[1])
 
     def test_comment(self):
         text = dispatch.comment_text("NET-9", ["a maintainer did not open it"])
@@ -85,13 +99,19 @@ class Dispatch(unittest.TestCase):
 
     def test_removes_own_ready_when_no_longer_eligible(self):
         gh = FakeGitHub(ready_actor=dispatch.BOT)
-        dispatch.dispatch(gh, with_labels(issue(), "ready", "claimed"), [{"number": 9, "title": "NET-2: dup"}])
+        dispatch.dispatch(gh, with_labels(issue(), "ready", "claimed"), [{"number": 9, "title": "NET-2: dup", "user": {"login": "maint"}}])
         self.assertIn(("DELETE", "/issues/3/labels/ready", None), gh.calls)
 
     def test_keeps_maintainers_ready(self):
         gh = FakeGitHub(ready_actor="spaceosint")
         dispatch.dispatch(gh, with_labels(issue(association="NONE"), "ready"), [])
         self.assertEqual(gh.calls, [])
+
+    def test_outsider_cannot_squat_an_id(self):
+        gh = FakeGitHub()
+        squatter = {"number": 9, "title": "NET-2: x", "user": {"login": "outsider"}}
+        dispatch.dispatch(gh, with_labels(issue(), "triage"), [squatter])
+        self.assertIn(("POST", "/issues/3/labels", {"labels": ["ready"]}), gh.calls)
 
     def test_ignores_pull_requests(self):
         gh = FakeGitHub()

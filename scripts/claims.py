@@ -39,7 +39,7 @@ CLAIMED = "claimed"
 MAX_CLAIMS = 2
 CLAIM_HOURS = 72
 PROTECTED = "protected"
-MAINTAINER_ASSOCIATIONS = policy.MAINTAINER_ASSOCIATIONS
+MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
 # ---- pure logic (tested in tests/test_claims.py) ----
@@ -136,7 +136,7 @@ def handle_command(gh, event):
     if command == "claim":
         open_claims = sum(1 for i in gh.pages("/issues", {"state": "open", "labels": CLAIMED, "assignee": user})
                           if "pull_request" not in i)
-        maintainer = comment.get("author_association") in MAINTAINER_ASSOCIATIONS
+        maintainer = policy.is_maintainer(comment.get("user"))
         ok, reply = decide_claim(labels, assignees, user, open_claims, maintainer)
         if ok:
             gh.call("POST", f"/issues/{number}/labels", {"labels": [CLAIMED]})
@@ -166,12 +166,12 @@ def decide_link(pr, issue):
     if not policy.maintainer_pr(pr) or issue is None or "pull_request" in issue:
         return False
     labels = {label["name"] for label in issue.get("labels", [])}
-    return (issue.get("state") == "open" and issue.get("author_association") in MAINTAINER_ASSOCIATIONS
-            and CLAIMED not in labels)
+    return issue.get("state") == "open" and policy.is_maintainer(issue.get("user")) and CLAIMED not in labels
 
 
 def link(gh, pr):
-    if pr.get("state") != "open" or not policy.maintainer_pr(pr):
+    """Label any open pull request `protected` while it changes tier 3 paths; claim the task of a maintainer's."""
+    if pr.get("state") != "open":
         return
     files = list(gh.pages(f"/pulls/{pr['number']}/files", {}))
     paths = [p for f in files for p in (f["filename"], f.get("previous_filename")) if p]
@@ -184,8 +184,13 @@ def link(gh, pr):
         except urllib.error.HTTPError as err:
             if err.code != 404:
                 raise
+    if not policy.maintainer_pr(pr):
+        return
     number = policy.linked_issue(pr.get("body"))
     issue = gh.call("GET", f"/issues/{number}") if number is not None else None
+    if decide_link(pr, issue):
+        # A `/claim` may have landed since: it runs in another concurrency group, so read the issue again.
+        issue = gh.call("GET", f"/issues/{number}")
     if decide_link(pr, issue):
         user = pr["user"]["login"]
         gh.call("POST", f"/issues/{number}/labels", {"labels": [CLAIMED]})
