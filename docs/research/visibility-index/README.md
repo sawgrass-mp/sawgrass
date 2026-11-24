@@ -16,6 +16,11 @@ as one bit per entity instead of sorted lists.** In the worst crowd measured (2,
 and to 7.5 ms (p99 16 ms) on four. With everyone spread over 3 km it fell from 9.4 to 4.6 ms. See
 [What we chose and why](#what-we-chose-and-why).
 
+**The bitsets need dense, recycled entity slots.** They were measured over ids 0 to 4095. The server today hands out
+ids from a counter that never reuses them, so a bitset over those ids would grow without bound; and reusing a slot
+naively would hide a player swap from every viewer. The precondition is spelled out in
+[What we chose and why](#the-precondition-dense-slots-cleared-before-reuse).
+
 <p align="center"><img src="../../assets/visibility.svg" alt="Tick p99 at 4096 players, one thread. Worst crowd, 2,048 players in 60 m: server today 95.5 ms; today's grid with bitset sets 25.2; dense grid 50 m with bitset sets 23.5; kiddo 31.1; quadtree 33.0; BVH 33.0; rstar 93.5. Spread over 3 km: 13.4, 8.7, 6.5, 8.4, 10.9, 9.9 and 13.2 ms" width="100%"></p>
 
 Tick for all 4096 visible sets (index update plus every player's set), one thread, median of three runs:
@@ -87,8 +92,9 @@ within a radius.
 - **Sorted** (today's layout): the members as a sorted list of ids. Each candidate is looked up with a binary
   search, the next list is sorted, and the two are merged to find what entered and left.
 - **Bits**: one bit per entity id. Membership is a bit test, the next set is built by setting bits, and what
-  entered and left is the XOR of the two, word by word; the ids are still listed, as a server must hand them to
-  the gateway.
+  changed is the XOR of the two, word by word. The harness lists the changed ids in one list; a server needs
+  entered and left apart, which is one more bit test per changed id (0.03 to 1.4 changes per player per tick
+  here), so it would not move the figures.
 
 **The queries:**
 
@@ -137,6 +143,16 @@ per index (11,720 in each scenario, each checked with a radius query and a neare
 |---|---|
 | kiddo `MutableKdTree` | Refused `spawn-512` on the first tick: `add` returned `UnsplittableBucket`. Its buckets hold 32 entities, and it cannot split a bucket whose entities share the coordinate it would split on. kiddo documents this limit. |
 | All others | None. The quadtree caps its depth, so the 512 stacked players end in one leaf; the BVH halves by count, so stacking does not deepen it; the dense grid puts them in one cell. |
+
+`verify` checks the index queries only. The visible sets are checked by agreement: for every index and scenario,
+the server's own `VisibleSet`, the harness's sorted sets and the bitset sets gave the same average set size and
+the same entered-plus-left count per player and tick (for example 1,077.7 and 0.121 in the 2,048 crowd), so the
+bitset layout computes the same sets as today's code, at least in aggregate.
+
+One exception, with the nearest-128 cut at the spawn point: kiddo's rebuilt tree returns an arbitrary 128 of the
+512 players tied at distance zero, and a different 128 every tick. Its viewers there saw 9.9 entities enter or
+leave per tick instead of 0.14. Our indexes and brute force break ties by entity id, so the choice is stable. A
+nearest-k cut needs a stable tie-break, or players on one spot flicker in and out of view.
 
 ### The index alone
 
@@ -257,16 +273,21 @@ cells, 400 KB.
 
 - Real movement: players in this simulation move independently. Real crowds move together, cluster in
   interiors, and the game's entity count includes vehicles, NPCs and objects, not only players.
-- More entity ids than players. A bitset needs a bit per id: at 32,768 ids it is 4 KB per set, 32 MB for 4096
-  players, and the per-player scan reads 512 words instead of 64 (about 1 ms per tick at four threads, estimated,
-  not measured). If ids grow that far, a set can keep its sorted list for listing and a per-thread scratch bitset
-  for the membership test.
+- Entity ids as the server issues them. The harness used ids 0 to 4095; the server's `net.rs` gives each
+  connection the next value of a counter and never reuses one, so ids pass 4096 within hours of reconnects. See
+  the precondition below. With dense slots, the size is set by how many entities exist at once: at 32,768 slots a
+  bitset is 4 KB per set, 32 MB for 4096 players, and the per-player scan reads 512 words instead of 64 (about
+  1 ms per tick at four threads, estimated, not measured). If slots grow that far, a set can keep its sorted list
+  for listing and a per-thread scratch bitset for the membership test.
 - Height and routing buckets (interiors, floors), ranking by speed and importance, and lower update rates for far
   entities: all planned (architecture.md, finding #18) and all change what a query must return.
 - The whole server tick: this measures interest management alone, not the ECS, the gateways or scripts that share
   the 35 ms.
 - A thread pool: the harness starts four threads every tick; a server would keep them.
-- Other machines and the real map size (GTA VI's map bounds are not known; 8,192 m is a placeholder).
+- Other machines and the real map size (GTA VI's map bounds are not known; 8,192 m is a placeholder). Positions
+  outside the bounds are clamped into the edge cells: queries stay correct, since distances use the real
+  positions, but everything beyond the edge piles into one row of cells that every query near that edge scans.
+  The bounds must cover the real map with a margin, so that a plane or a bad client position does not do that.
 
 ## What we chose and why
 
@@ -287,6 +308,23 @@ The bitset is the larger half of the gain: on its own, with today's grid, it bro
 16 ms. The dense grid adds the rest (1.3 to 1.9 times when players spread, and it scales better under the
 nearest-128 cut).
 
+### The precondition: dense slots, cleared before reuse
+
+The bitsets were measured over ids 0 to 4095, and they only work over a dense id space. The task that moves this
+choice into `interest.rs` depends on it:
+
+- **Index sets by a dense slot, not by today's connection id.** `net.rs` gives every connection
+  `next_id.fetch_add(1)` and never reuses an id; a bitset indexed by those ids grows with every reconnect (12.5 KB
+  per set at 100,000 ids, two sets per player, and the scan with it). The server maps each live entity to a slot
+  below the number of entities alive at once, and frees the slot when the entity goes.
+- **A freed slot must not look like the same entity when it is reused.** If viewer A sees slot 17, its entity
+  leaves the server, and a new entity takes slot 17 within the hysteresis window, A's bitset shows no change: A gets
+  neither "left" for the old entity nor "entered" for the new one, and its client keeps showing the old entity's
+  state. So either a freed slot is cleared from every visible set in the tick it is freed (reported as "left" to
+  each viewer that had it) before it is handed out again, or each slot carries a generation that the set compares,
+  and a changed generation counts as left plus entered.
+- The bounds of the dense grid must cover the real map with a margin (see above).
+
 ### Why not the others
 
 | Option | Measured, one thread | Why not |
@@ -294,7 +332,7 @@ nearest-128 cut).
 | Today's hashed grid, sorted sets | 72 ms in the 2,048 crowd, p99 96 | Over the whole tick's budget twice; the sorted sets are most of it. |
 | Today's grid with bitset sets | 15.8 ms in the crowd, 6.7 spread over 3 km | Ties the dense grid in the crowd, but 1.3 to 1.9 times slower spread out and twice as slow for the nearest-128 cut in the 1 km crowd; hashes every cell. |
 | Dense grid, 25 m | 10.2 ms for nearest 128 in the crowd | Best for the nearest-128 cut in big crowds, slower everywhere else. Worth re-measuring when the cut is built. |
-| kiddo `ImmutableKdTree` | 20 ms in the crowd, 2.3 ms spread over 8 km | Close spread out, 25 to 30% slower in crowds and up to 2.3 times slower for nearest-k. A large dependency (23 crates without default features, about 970 `unsafe` in its source) for no gain. |
+| kiddo `ImmutableKdTree` | 20 ms in the crowd, 2.3 ms spread over 8 km | Close spread out, 25 to 30% slower in crowds and up to 2.3 times slower for nearest-k. Its nearest-k picks an unstable 128 of players tied on one spot, so they flicker at a spawn point. A large dependency (23 crates without default features, about 970 `unsafe` in its source) for no gain. |
 | kiddo `MutableKdTree` | refused | Fails on 33 or more entities at one coordinate: every spawn point. |
 | Quadtree | 22 ms in the crowd | Slower than the grid in every scenario; needs a depth cap against stacking. |
 | BVH | 24 ms in the crowd | Slower than the grid in every scenario. |
@@ -302,8 +340,11 @@ nearest-128 cut).
 
 ### What would change the answer
 
-- Far more entities than players (vehicles, NPCs, objects): bitsets grow with the id space, so the set layout may
-  need the hybrid described above.
+- Far more entities than players (vehicles, NPCs, objects): bitsets grow with the number of slots, so the set
+  layout may need the hybrid described above.
+- If dense, safely recycled slots turn out to be impractical for the server, the bitset layout is off, and the next
+  best measured option is the dense grid with sorted sets (71 ms in the 2,048 crowd, against 72 today): the grid
+  alone does not fix the crowd.
 - A much larger or unbounded map: the dense grid's memory grows with area; a hashed grid of the same cells, or a
   two-level grid, would bound it.
 - Real crowds from the bots (BOT-2) being denser than 2,048 in 60 m, or the ranking cut becoming the main path:

@@ -279,8 +279,9 @@ players inside 60 m, and 512 standing on one spawn point.
 - On four threads the dense grid took 7.5 ms (p99 16) in the 2,048 crowd, against 38 ms (p99 54) for today's code.
 - Every index matched brute force exactly on 70,320 viewer positions; only kiddo's `MutableKdTree` failed, on 33
   or more players at one coordinate.
-- Caveats: simulated movement, players only (bitsets grow with the number of entity ids), one shared 4-core VM,
-  interest management alone, not the whole tick.
+- The bitsets need dense entity slots that are cleared from every set before reuse; the server's ids today come
+  from a counter that never reuses them, so the follow-up task adds slots first.
+- Caveats: simulated movement, players only, one shared 4-core VM, interest management alone, not the whole tick.
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/visibility-index](docs/research/visibility-index/).
