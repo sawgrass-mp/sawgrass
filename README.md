@@ -357,6 +357,38 @@ deciding who hears each frame and sending each listener one datagram every 20 ms
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/voice-chat](docs/research/voice-chat/).
 
+## Tick model, measured
+
+The world server runs every player's movement checks, visible set, roleplay logic and snapshot once per tick. We
+measured how to schedule that work: the current loop on one thread, plain arrays without an ECS, zones in
+parallel, every player in parallel (on arrays and on hecs) and bevy_ecs, at 30 and 60 Hz, with players spread out,
+in a city, and with a quarter of them at one event.
+
+<p align="center"><img src="docs/assets/tick.svg" alt="Tick p99 at 4,096 players, 30 Hz, a quarter of them at one event: current loop 46.3 ms, plain arrays 42.4, zones 32.5, players in parallel on arrays 12.1, players in parallel on hecs 12.6, bevy_ecs 21.7; budget 23.3 ms. Players within budget in that crowd: 2,048, 2,048, 3,072, 5,120, 5,120 and 4,096" width="100%"></p>
+
+**We chose to keep hecs and run each system's per-player work in parallel with rayon**, applying effects on other
+players in one serial, ordered phase, at 30 Hz.
+
+| 4096 players, 30 Hz, 4 cores | City p99 | Crowd p99 | Players within budget, crowd (one run per count) | Why or why not |
+|---|---:|---:|---:|---|
+| Current loop (hecs, one thread) | 18.7 ms | 46.3 ms | 2,048 | Every crowd tick over the 23.3 ms budget. |
+| Plain arrays, one thread | 15.7 ms | 42.4 ms | 2,048 | Up to 7% faster than hecs: not worth a rewrite. |
+| Zones in parallel | 5.6 ms | 32.5 ms | 3,072 | A crowd in one zone runs on one thread. |
+| **Players in parallel, hecs** | **5.4 ms** | **12.6 ms** | **5,120** | **Chosen**: half the budget in the crowd, same world as one thread, adds only rayon. |
+| Players in parallel, plain arrays | 6.0 ms | 12.1 ms | 5,120 | Equal to hecs within noise. |
+| bevy_ecs | 15.5 ms | 21.7 ms | 4,096 | 30 to 40% slower, wider tail, 61 crates with proc macros. |
+
+- With 4 threads the median tick was 2.7 times shorter in the city and 3.2 times in the crowd, for 10 to 20% more CPU.
+  Every model ended in the same world, bit for bit, on 1, 2 and 4 threads.
+- At 60 Hz players in parallel held the city (p99 6.1 of 11.7 ms) but missed 4% of crowd ticks: plan for 30 Hz.
+- Visible sets were 70 to 77% of the one-thread tick. IM-2's bitset sets, chosen while this ran, cut that work and
+  were not measured here; they make every model faster and leave zones' crowd problem as it is.
+- Caveats: one shared 4-core VM with a noisy tail (p99 varied up to 50% between rounds); a synthetic tick without
+  scripts, gateways or storage; scaling past 4 cores not measured.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/tick-model](docs/research/tick-model/).
+
 ## Allocators and runtimes, measured
 
 The allocator and the async runtime sit under every path of the server, so we measured them on three of ours: the

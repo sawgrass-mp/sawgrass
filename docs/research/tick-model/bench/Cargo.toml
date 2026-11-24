@@ -1,0 +1,19 @@
+[package]
+name = "tick-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+# Standalone: not part of the Sawgrass workspace, so its dependencies never reach the project's graph.
+[workspace]
+
+[dependencies]
+# The project's own tick loop, hecs version and interest management.
+sawgrass-server = { path = "../../../../crates/sawgrass-server" }
+rayon = "1.12"
+bevy_ecs = { version = "0.20", default-features = false, features = ["std", "multi_threaded", "async_executor"] }
+bevy_tasks = { version = "0.20", default-features = false, features = ["multi_threaded", "async_executor"] }
+
+[profile.release]
+debug = "line-tables-only"
