@@ -4,7 +4,7 @@
 //!     visibility-index-bench verify <scenario> <ticks>
 //!     visibility-index-bench list
 //!
-//! `run` moves 4096 players at 20 Hz and every tick brings the index up to date, then recomputes every
+//! `run` moves 4096 players (or `PLAYERS`) at 20 Hz and every tick brings the index up to date, then recomputes every
 //! player's visible set (enter 200 m, leave 230 m, as the server's `VisibilityConfig::default`). It prints one
 //! JSON line. `verify` checks every index's query results against brute force.
 
@@ -19,12 +19,24 @@ use cap::Cap;
 use sawgrass_server::interest::{EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
 
 use index::{Brute, CurrentGrid, DenseGrid, SpatialIndex, keep_nearest};
-use world::{SCENARIOS, World};
+use world::{BOT_SCENARIOS, SCENARIOS, World};
 
 #[global_allocator]
 static ALLOC: Cap<std::alloc::System> = Cap::new(std::alloc::System, usize::MAX);
 
-const PLAYERS: usize = 4096;
+/// Players in a run: 4096, or the `PLAYERS` environment variable (the load-test bot comparisons use it to match a
+/// bot run's size).
+static PLAYERS_CELL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+fn players() -> usize {
+    *PLAYERS_CELL.get_or_init(|| {
+        std::env::var("PLAYERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(4096)
+    })
+}
 const ENTER: f32 = 200.0;
 const LEAVE: f32 = 230.0;
 /// The map the dense grid covers. The scenarios stay inside it.
@@ -92,7 +104,7 @@ enum Viewer {
 impl Viewer {
     fn new(bits: bool) -> Self {
         if bits {
-            let words = PLAYERS.div_ceil(64);
+            let words = players().div_ceil(64);
             Self::Bits {
                 members: vec![0; words],
                 next: vec![0; words],
@@ -235,18 +247,19 @@ fn run(name: &str, scenario: &str, mode: Mode, threads: usize, ticks: usize, bit
         Mode::Nearest(k) => format!("nearest-{k}"),
     };
     let head = format!(
-        r#"{{"index":"{name}","scenario":"{scenario}","mode":"{mode_name}","sets":"{}","threads":{threads},"players":{PLAYERS},"ticks":{ticks}"#,
-        if bits { "bits" } else { "sorted" }
+        r#"{{"index":"{name}","scenario":"{scenario}","mode":"{mode_name}","sets":"{}","threads":{threads},"players":{},"ticks":{ticks}"#,
+        if bits { "bits" } else { "sorted" },
+        players()
     );
-    let mut world = World::new(scenario, PLAYERS);
+    let mut world = World::new(scenario, players());
     let before = ALLOC.allocated();
     // "current" is the server's own code end to end: SpatialGrid plus its VisibleSet, radius mode only.
     let current = name == "current";
     let mut index = if current { None } else { make(name) };
     let mut grid = current.then(|| CurrentGrid::new(100.0));
-    let mut viewers: Vec<Viewer> = (0..PLAYERS).map(|_| Viewer::new(bits)).collect();
+    let mut viewers: Vec<Viewer> = (0..players()).map(|_| Viewer::new(bits)).collect();
     let mut sets: Vec<(VisibleSet, VisibilityChanges)> = if current {
-        (0..PLAYERS).map(|_| Default::default()).collect()
+        (0..players()).map(|_| Default::default()).collect()
     } else {
         Vec::new()
     };
@@ -254,7 +267,7 @@ fn run(name: &str, scenario: &str, mode: Mode, threads: usize, ticks: usize, bit
     let (mut update_t, mut query_t, mut tick_t) = (Vec::new(), Vec::new(), Vec::new());
     let (mut visible, mut changes, mut candidates) = (0u64, 0u64, 0u64);
 
-    let mut ids: Vec<u32> = (0..PLAYERS as u32).collect();
+    let mut ids: Vec<u32> = (0..players() as u32).collect();
     for t in 0..WARMUP + ticks {
         world.step();
         let points = world.points();
@@ -351,7 +364,7 @@ fn run(name: &str, scenario: &str, mode: Mode, threads: usize, ticks: usize, bit
     drop(sets);
     let sets_bytes = held - ALLOC.allocated();
     let _ = before;
-    let per = (PLAYERS * ticks) as f64;
+    let per = (players() * ticks) as f64;
     let mut out = head;
     out += &format!(",{}", Stats(update_t).json("update"));
     if !current {
@@ -370,7 +383,7 @@ fn run(name: &str, scenario: &str, mode: Mode, threads: usize, ticks: usize, bit
 /// Every index against brute force: `within` must return exactly the same entities, `nearest` the same
 /// distances (which of several tied entities it picks may differ).
 fn verify(scenario: &str, ticks: usize) -> Vec<String> {
-    let mut world = World::new(scenario, PLAYERS);
+    let mut world = World::new(scenario, players());
     let names: Vec<&str> = INDEXES
         .iter()
         .copied()
@@ -478,7 +491,12 @@ fn main() {
             println!("indexes: {}", INDEXES.join(" "));
             println!(
                 "scenarios: {}",
-                SCENARIOS.iter().map(|s| s.name).collect::<Vec<_>>().join(" ")
+                SCENARIOS
+                    .iter()
+                    .map(|s| s.name)
+                    .chain(BOT_SCENARIOS.iter().map(|s| s.0))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
         }
     }

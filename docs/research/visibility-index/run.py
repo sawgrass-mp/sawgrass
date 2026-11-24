@@ -1,6 +1,6 @@
 """Runs the IM-2 visibility index measurements and writes results/<suite>.jsonl.
 
-Usage: python3 -I run.py [verify] [single] [threads] [repeat]   (all when none is named)
+Usage: python3 -I run.py [verify] [single] [threads] [repeat] [bots]   (all but bots when none is named)
 
 Runs bench/target/release/visibility-index-bench with fixed arguments (no shell), one process per run so each
 starts with a fresh heap. Single-thread runs are pinned to one CPU; the threads suite gets all four.
@@ -9,6 +9,8 @@ starts with a fresh heap. Single-thread runs are pinned to one CPU; the threads 
 - single: every index, scenario, mode (radius, nearest 128) and visible-set layout (sorted, bits), one thread.
 - threads: the main candidates with four threads.
 - repeat: the headline rows twice more, to show how much a run varies.
+- bots: the server's code and the chosen dense grid with bit sets, with players moved by the load-test bots'
+  walker at the bot counts the real server was loaded with (load-test-bots/README.md), one thread.
 """
 
 import json
@@ -35,9 +37,10 @@ HEADLINE = [
 ]
 
 
-def run(args, cpus):
+def run(args, cpus, players=None):
+    env = dict(os.environ, PLAYERS=str(players)) if players else None
     p = subprocess.run(
-        [str(BIN), *args], capture_output=True, text=True, timeout=3600,
+        [str(BIN), *args], capture_output=True, text=True, timeout=3600, env=env,
         preexec_fn=lambda: os.sched_setaffinity(0, cpus),
     )
     if p.returncode != 0:
@@ -88,6 +91,12 @@ def main():
                             if i == "current" and m != "radius":
                                 continue
                             rows += run(["run", i, s, m, "1", TICKS, sets], one)
+        elif suite == "bots":
+            for players in [1000, 2000, 3000, 4096]:
+                for s in ["bots-4km", "bots-1500m"]:
+                    for i, sets in [("current", "sorted"), ("grid-dense-50", "bits")]:
+                        rows += run(["run", i, s, "radius", "1", TICKS, sets], one, players)
+                        print(json.dumps(rows[-1]), flush=True)
         else:
             sys.exit(f"unknown suite {suite}")
         if suite == "single":

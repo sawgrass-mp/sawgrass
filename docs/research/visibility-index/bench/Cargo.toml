@@ -10,6 +10,8 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 sawgrass-server = { path = "../../../../crates/sawgrass-server" }
+# The load-test bots' walker, for the bots-* scenarios.
+sawgrass-bots = { path = "../../../../crates/sawgrass-bots" }
 rstar = "0.14"
 # No rayon and no fixed-point types: the harness runs its own threads and uses f32.
 kiddo = { version = "6.3", default-features = false }
