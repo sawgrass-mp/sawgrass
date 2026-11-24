@@ -1,4 +1,4 @@
-"""Draws docs/assets/visibility.svg from results/single.jsonl and results/repeat.jsonl (median of the runs).
+"""Draws docs/assets/visibility.svg from results/single-*.jsonl and results/repeat.jsonl (median of the runs).
 
 Usage: python3 -I chart.py
 """
@@ -32,7 +32,7 @@ BUDGET = 35.0
 
 def main():
     runs = {}
-    for name in ("single", "repeat"):
+    for name in ("single-radius", "single-nearest", "repeat"):
         for line in open(HERE / "results" / f"{name}.jsonl"):
             r = json.loads(line)
             if "tick_p99_us" in r and r["threads"] == 1:

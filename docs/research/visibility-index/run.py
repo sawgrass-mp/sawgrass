@@ -49,7 +49,7 @@ def run(args, cpus):
 def write(suite, rows, stamp):
     with open(RESULTS / f"{suite}.jsonl", "w") as out:
         for r in rows:
-            r["at"] = stamp
+            r.setdefault("at", stamp)
             out.write(json.dumps(r) + "\n")
 
 
@@ -90,7 +90,12 @@ def main():
                             rows += run(["run", i, s, m, "1", TICKS, sets], one)
         else:
             sys.exit(f"unknown suite {suite}")
-        write(suite, rows, stamp)
+        if suite == "single":
+            # Two files, one per query, so that each stays small enough for a pull request diff.
+            write("single-radius", [r for r in rows if r.get("mode") == "radius"], stamp)
+            write("single-nearest", [r for r in rows if r.get("mode") != "radius"], stamp)
+        else:
+            write(suite, rows, stamp)
 
 
 if __name__ == "__main__":
