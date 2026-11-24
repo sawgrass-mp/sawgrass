@@ -1,4 +1,4 @@
-// Command livekit-load is the VOICE-1 load generator for LiveKit: rooms of one speaker and N-1 listeners, the
+// Command livekit-load is the NET-7 load generator for LiveKit: rooms of one speaker and N-1 listeners, the
 // speaker sending one Opus-sized frame every 20 ms whose payload carries its send time, and every listener
 // counting what arrives and how late. It reports the same fields as voice-bench's own generator.
 package main

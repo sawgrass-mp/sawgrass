@@ -1,4 +1,4 @@
-# LiveKit server settings for the VOICE-1 runs: one node, loopback only, one UDP port for all media.
+# LiveKit server settings for the NET-7 runs: one node, loopback only, one UDP port for all media.
 port: 7880
 bind_addresses:
   - 127.0.0.1

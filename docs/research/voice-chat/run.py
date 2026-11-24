@@ -1,4 +1,4 @@
-"""Runs the VOICE-1 measurements and appends one JSON line per run to results/<suite>.jsonl.
+"""Runs the NET-7 measurements and appends one JSON line per run to results/<suite>.jsonl.
 
 Usage: python3 -I run.py codec | world | relay | rooms [--quick]
 

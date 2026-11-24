@@ -1,4 +1,4 @@
-//! Proximity voice chat harness for Sawgrass (VOICE-1). See ../README.md.
+//! Proximity voice chat harness for Sawgrass (NET-7). See ../README.md.
 
 mod codec;
 mod common;

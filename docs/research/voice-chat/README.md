@@ -1,7 +1,7 @@
 # Proximity voice chat: what we measured and what we chose
 
 Measured 2026-11-24 on top of the transport choice of [NET-3](../network-transport/README.md) (QUIC through quinn
-0.11.12), with libopus through the `opus` 0.3.1 crate and LiveKit server 1.13.11. Task: VOICE-1 (#68).
+0.11.12), with libopus through the `opus` 0.3.1 crate and LiveKit server 1.13.11. Task: NET-7 (#68).
 
 The question: how should voice reach players on a roleplay server of 4096, where a player hears the people near
 them, their radio channel and their phone call? What does it cost the server in CPU and traffic, how late does a
