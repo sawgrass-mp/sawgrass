@@ -2,9 +2,10 @@
 //!
 //! Every packet starts with a [`PacketHeader`]. Entity state uses the quantized encodings in [`quant`]: positions
 //! to 1 cm, velocities to 1 cm/s and rotations in 32 bits; the table in that module lists the wire size, range and
-//! worst-case error of each. All integers are little-endian. Delta encoding and the connection handshake are task
-//! NET-2 (see `docs/roadmap.md`).
+//! worst-case error of each. [`game`] defines what follows the header for each packet kind. All integers are
+//! little-endian. The connection handshake lives in the gateway crate.
 
+pub mod game;
 pub mod quant;
 
 use std::fmt;
@@ -14,8 +15,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// Bumped on every change that an older peer cannot read. CI compares it with the base branch when the
 /// protocol crate changes (task OPS-3).
 ///
-/// Version 1 is the first wire format: the packet header and the quantized encodings.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Version 1 is the first wire format: the packet header and the quantized encodings. Version 2 adds the
+/// payloads in [`game`].
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///
@@ -43,6 +45,12 @@ pub enum DecodeError {
     Truncated,
     /// The packet kind byte is not a known [`PacketKind`].
     UnknownKind(u8),
+    /// The event code byte is not a known event.
+    UnknownEvent(u8),
+    /// A whole payload is followed by more bytes.
+    TrailingBytes,
+    /// A count or value lies outside what the format allows.
+    OutOfRange,
 }
 
 impl fmt::Display for EncodeError {
@@ -60,6 +68,9 @@ impl fmt::Display for DecodeError {
         match self {
             Self::Truncated => f.write_str("input is truncated"),
             Self::UnknownKind(kind) => write!(f, "unknown packet kind {kind}"),
+            Self::UnknownEvent(code) => write!(f, "unknown event code {code}"),
+            Self::TrailingBytes => f.write_str("bytes after the end of the payload"),
+            Self::OutOfRange => f.write_str("value is out of range"),
         }
     }
 }
@@ -197,6 +208,15 @@ pub(crate) struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    /// Fails if any input is left: a whole payload must end where its encoding does.
+    pub(crate) fn finish(&self) -> Result<(), DecodeError> {
+        if self.input.is_empty() {
+            Ok(())
+        } else {
+            Err(DecodeError::TrailingBytes)
+        }
+    }
+
     pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
         let (head, rest) = self
             .input

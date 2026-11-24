@@ -276,3 +276,101 @@ fn arbitrary_wire_bytes_decode_to_valid_values() {
     assert_eq!(p.cm(), [-(1 << 23), (1 << 23) - 1, 0]);
     assert_eq!(Position::from_cm(p.cm()), Ok(p));
 }
+
+mod game_payloads {
+    use crate::game::*;
+    use crate::*;
+
+    fn state(id: u32) -> EntityState {
+        EntityState {
+            id,
+            position: Position::from_cm([id as i32, -(id as i32), 3500]).unwrap_or_else(|e| panic!("{e}")),
+            velocity: Velocity::from_metres_per_second([1.5, 0.0, -0.25]).unwrap_or_else(|e| panic!("{e}")),
+            rotation: Rotation::from_quaternion([0.0, 0.0, 0.6, 0.8]).unwrap_or_else(|e| panic!("{e}")),
+        }
+    }
+
+    #[test]
+    fn client_state_round_trips() {
+        let s = state(1);
+        let client = ClientState {
+            position: s.position,
+            velocity: s.velocity,
+            rotation: s.rotation,
+        };
+        let mut buf = [0; ClientState::SIZE + 1];
+        assert_eq!(client.encode(&mut buf), Ok(19));
+        assert_eq!(ClientState::decode(&buf[..19]), Ok(client));
+        assert_eq!(ClientState::decode(&buf), Err(DecodeError::TrailingBytes));
+        assert_eq!(ClientState::decode(&buf[..18]), Err(DecodeError::Truncated));
+        assert_eq!(client.encode(&mut [0; 18]), Err(EncodeError::BufferTooSmall));
+    }
+
+    #[test]
+    fn full_snapshot_fits_in_one_datagram() {
+        let states: Vec<_> = (0..SNAPSHOT_MAX_ENTITIES as u32).map(state).collect();
+        let mut out = vec![0; PacketHeader::SIZE];
+        encode_snapshot(&states, &mut out).unwrap_or_else(|e| panic!("{e}"));
+        assert!(out.len() <= MAX_DATAGRAM, "{} bytes", out.len());
+        let mut decoded = Vec::new();
+        assert_eq!(
+            decode_snapshot(&out[PacketHeader::SIZE..], |s| decoded.push(s)),
+            Ok(states.len())
+        );
+        assert_eq!(decoded, states);
+
+        let too_many: Vec<_> = (0..=SNAPSHOT_MAX_ENTITIES as u32).map(state).collect();
+        assert_eq!(
+            encode_snapshot(&too_many, &mut Vec::new()),
+            Err(EncodeError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn truncated_snapshot_is_rejected() {
+        let mut out = Vec::new();
+        encode_snapshot(&[state(1), state(2)], &mut out).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            decode_snapshot(&out[..out.len() - 1], |_| {}),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(decode_snapshot(&[], |_| {}), Err(DecodeError::Truncated));
+    }
+
+    #[test]
+    fn events_round_trip() {
+        let stats = ServerStats {
+            tick_p50_us: 1,
+            tick_p99_us: 2,
+            tick_max_us: 3,
+            tick_interval_us: 50_000,
+            overruns: 5,
+            players: 4096,
+            cpu_millicores: 1_750,
+            tick_thread_millicores: 400,
+            sent_bytes_per_sec: u64::MAX,
+            received_bytes_per_sec: 9,
+        };
+        for event in [
+            ServerEvent::Joined {
+                entity: 77,
+                tick_hz: 20,
+            },
+            ServerEvent::Stats(stats),
+        ] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(ServerEvent::decode(&out), Ok(event));
+            assert_eq!(
+                ServerEvent::decode(&out[..out.len() - 1]),
+                Err(DecodeError::Truncated)
+            );
+        }
+        let mut out = Vec::new();
+        ClientEvent::RequestStats.encode(&mut out);
+        assert_eq!(ClientEvent::decode(&out), Ok(ClientEvent::RequestStats));
+        assert_eq!(ClientEvent::decode(&[128, 0]), Err(DecodeError::TrailingBytes));
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::UnknownEvent(128)));
+        assert_eq!(ClientEvent::decode(&[1]), Err(DecodeError::UnknownEvent(1)));
+    }
+}
