@@ -1,0 +1,58 @@
+// The NET-4 game messages as a FlatBuffers schema. Same quantized values as src/model.rs.
+namespace wire;
+
+struct Entity {
+  id: uint;
+  px: int;   // centimetres, 24-bit range
+  py: int;
+  pz: int;
+  vx: short; // centimetres per second
+  vy: short;
+  vz: short;
+  rot: uint; // smallest-three bits
+}
+
+table Snapshot {
+  seq: ushort;
+  tick: uint;
+  entities: [Entity];
+}
+
+table ClientState {
+  seq: ushort;
+  tick: uint;
+  me: Entity;
+  buttons: uint;
+  aim_x: short;
+  aim_y: short;
+}
+
+table Chat {
+  seq: ushort;
+  tick: uint;
+  from: uint;
+  channel: ubyte;
+  text: string;
+}
+
+table BoolArg { value: bool; }
+table IntArg { value: long; }
+table FloatArg { value: float; }
+table StrArg { value: string; }
+union Arg { BoolArg, IntArg, FloatArg, StrArg }
+table ArgBox { arg: Arg; }
+
+table ScriptEvent {
+  seq: ushort;
+  tick: uint;
+  name: string;
+  args: [ArgBox];
+}
+
+union Message { Snapshot, ClientState, Chat, ScriptEvent }
+
+table Packet {
+  message: Message;
+}
+
+root_type Packet;

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="606" viewBox="0 0 880 606" role="img" aria-label="Snapshot of 100 entities. postcard: 1985 bytes, 8.0 microseconds; Current hand-written: 2309 bytes, 2.8 microseconds; bitcode: 2413 bytes, 0.8 microseconds; rkyv: 2848 bytes, 0.5 microseconds; FlatBuffers: 2856 bytes, 0.6 microseconds">
+<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#14e1f0"/><stop offset="1" stop-color="#7cf000"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:13px;fill:#8fb3a6}.l{font-size:15px;font-weight:600;fill:#e8fff4}.n{font-size:12px;fill:#7d9a90}.p{font-size:14px;font-weight:700;fill:#a6ff4d}.v{font-size:14px;font-weight:600;fill:#cfe9df}</style>
+<rect width="880" height="606" rx="16" fill="#060a08"/>
+<rect x="1" y="1" width="878" height="604" rx="15" fill="none" stroke="#1d3b2f"/>
+<text x="28" y="44" class="h">Snapshot size</text>
+<text x="28" y="68" class="s">One snapshot with 100 visible entities, same quantized values in every format. Smaller is better.</text>
+<text x="28" y="114" class="l">postcard</text>
+<text x="28" y="131" class="n">chosen: smallest, stable wire format</text>
+<rect x="330" y="106" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="106" width="264.7" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="117" class="p" text-anchor="end">1,985 bytes</text>
+<text x="28" y="154" class="l">Current hand-written</text>
+<text x="28" y="171" class="n">sawgrass-protocol style, fixed width</text>
+<rect x="330" y="146" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="146" width="307.9" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="157" class="v" text-anchor="end">2,309 bytes</text>
+<text x="28" y="194" class="l">bitcode</text>
+<text x="28" y="211" class="n">format changes between major versions</text>
+<rect x="330" y="186" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="186" width="321.7" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="197" class="v" text-anchor="end">2,413 bytes</text>
+<text x="28" y="234" class="l">rkyv</text>
+<text x="28" y="251" class="n">fastest; zero-copy, validated</text>
+<rect x="330" y="226" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="226" width="379.7" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="237" class="v" text-anchor="end">2,848 bytes</text>
+<text x="28" y="274" class="l">FlatBuffers</text>
+<text x="28" y="291" class="n">zero-copy, verified; schema and codegen</text>
+<rect x="330" y="266" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="266" width="380.8" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="277" class="v" text-anchor="end">2,856 bytes</text>
+<text x="28" y="328" class="h">Snapshot encode + decode time</text>
+<text x="28" y="352" class="s">Median of three runs, one core, decoding untrusted bytes with every check on. Smaller is better.</text>
+<text x="28" y="398" class="l">postcard</text>
+<text x="28" y="415" class="n">chosen: smallest, stable wire format</text>
+<rect x="330" y="390" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="390" width="377.8" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="401" class="p" text-anchor="end">8.0 µs</text>
+<text x="28" y="438" class="l">Current hand-written</text>
+<text x="28" y="455" class="n">sawgrass-protocol style, fixed width</text>
+<rect x="330" y="430" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="430" width="129.9" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="441" class="v" text-anchor="end">2.8 µs</text>
+<text x="28" y="478" class="l">bitcode</text>
+<text x="28" y="495" class="n">format changes between major versions</text>
+<rect x="330" y="470" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="470" width="37.7" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="481" class="v" text-anchor="end">0.8 µs</text>
+<text x="28" y="518" class="l">rkyv</text>
+<text x="28" y="535" class="n">fastest; zero-copy, validated</text>
+<rect x="330" y="510" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="510" width="21.4" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="521" class="v" text-anchor="end">0.5 µs</text>
+<text x="28" y="558" class="l">FlatBuffers</text>
+<text x="28" y="575" class="n">zero-copy, verified; schema and codegen</text>
+<rect x="330" y="550" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="550" width="27.0" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="561" class="v" text-anchor="end">0.6 µs</text>
+</svg>
