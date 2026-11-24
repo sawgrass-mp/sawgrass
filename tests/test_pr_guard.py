@@ -100,6 +100,21 @@ class Smuggling(unittest.TestCase):
             self.assertEqual(len(failures), 1, issue)
             self.assertEqual(len(warnings), 1, issue)
 
+    def test_maintainer_pull_request_needs_no_label_or_claim(self):
+        files = [changed("scripts/claims.py", ["x = 1"])]
+        repo = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
+        pr = {"title": "OPS-9: x", "user": {"login": "dev"}, "author_association": "MEMBER",
+              "head": repo, "base": repo}
+        unclaimed = task("`scripts/`", labels=(), assignee=None)
+        self.assertEqual(pr_guard.evaluate(pr, files, unclaimed, {}), ([], []))
+        # Still fails outside the task's scope, on a task an outsider opened, and from a fork.
+        self.assertEqual(len(pr_guard.evaluate(pr, files, task("`docs/`", labels=()), {})[0]), 1)
+        self.assertEqual(len(pr_guard.evaluate(pr, files, task("`scripts/`", association="NONE"), {})[0]), 1)
+        fork = {**pr, "head": {"repo": {"full_name": "someone/sawgrass"}}}
+        self.assertEqual(len(pr_guard.evaluate(fork, files, unclaimed, {})[0]), 1)
+        outsider = {**pr, "author_association": "CONTRIBUTOR"}
+        self.assertEqual(len(pr_guard.evaluate(outsider, files, unclaimed, {})[0]), 1)
+
     def test_rename_out_of_protected_path_counts(self):
         files = [changed("docs/x.yml", previous=".github/workflows/ci.yml", status="renamed")]
         failures, _ = run(files, task("`docs/`"))

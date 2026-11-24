@@ -58,6 +58,53 @@ class LinksIssue(unittest.TestCase):
             self.assertFalse(claims.links_issue(body, 12), body)
 
 
+class MaintainerClaims(unittest.TestCase):
+    REPO = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
+
+    def pr(self, **kw):
+        return {"number": 50, "state": "open", "user": {"login": "stiv"}, "author_association": "MEMBER",
+                "head": self.REPO, "base": self.REPO, "body": "Closes #49", "labels": [], **kw}
+
+    def issue(self, labels=("ready",), association="MEMBER", state="open"):
+        return {"number": 49, "state": state, "author_association": association,
+                "labels": [{"name": n} for n in labels], "assignees": []}
+
+    def test_no_limit_for_maintainers(self):
+        self.assertTrue(claims.decide_claim({"ready"}, [], "stiv", claims.MAX_CLAIMS + 5, maintainer=True)[0])
+
+    def test_decide_link(self):
+        self.assertTrue(claims.decide_link(self.pr(), self.issue()))
+        self.assertTrue(claims.decide_link(self.pr(), self.issue(labels=("triage",))))
+        self.assertFalse(claims.decide_link(self.pr(), self.issue(labels=("ready", "claimed"))))
+        self.assertFalse(claims.decide_link(self.pr(), self.issue(association="NONE")))
+        self.assertFalse(claims.decide_link(self.pr(), self.issue(state="closed")))
+        self.assertFalse(claims.decide_link(self.pr(), None))
+        self.assertFalse(claims.decide_link(self.pr(author_association="CONTRIBUTOR"), self.issue()))
+        self.assertFalse(claims.decide_link(self.pr(head={"repo": {"full_name": "x/fork"}}), self.issue()))
+
+    def test_link_claims_and_marks_protected(self):
+        pr, issue = self.pr(), self.issue()
+
+        class Fake:
+            calls = []
+
+            def call(self, method, path, body=None, query=None):
+                self.calls.append((method, path, body))
+                return issue if method == "GET" else None
+
+            def pages(self, path, query):
+                return [{"filename": ".github/workflows/ci.yml"}]
+
+            def comment(self, number, text):
+                self.calls.append(("COMMENT", number, text))
+
+        gh = Fake()
+        claims.link(gh, pr)
+        self.assertIn(("POST", "/issues/50/labels", {"labels": ["protected"]}), gh.calls)
+        self.assertIn(("POST", "/issues/49/labels", {"labels": ["claimed"]}), gh.calls)
+        self.assertIn(("POST", "/issues/49/assignees", {"assignees": ["stiv"]}), gh.calls)
+
+
 class Expiry(unittest.TestCase):
     def test_boundary(self):
         start = claims.parse_time("2026-11-20T10:00:00Z")

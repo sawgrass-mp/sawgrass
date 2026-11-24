@@ -65,22 +65,41 @@ def pr_tier(paths):
     return max((file_tier(p) for p in paths), default=3)
 
 
+MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
+def maintainer_pr(pr):
+    """A pull request a maintainer opened from a branch of this repository, not from a fork.
+
+    The maintainer's own agents work through the maintainer's account: their task needs no `ready` label or claim,
+    and their model is declared once in AGENTS.md instead of on each pull request.
+    """
+    head = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+    base = ((pr.get("base") or {}).get("repo") or {}).get("full_name")
+    return pr.get("author_association") in MAINTAINER_ASSOCIATIONS and head is not None and head == base
+
+
 def linked_issue(body):
     """The first issue number a closing keyword links, or None."""
     m = CLOSES.search(body or "")
     return int(m.group(1)) if m else None
 
 
-def checks(title, body, paths, changed_lines, issue):
-    """Policy checks as a list of (name, passed, detail). `issue` is the linked issue's JSON or None."""
+def checks(title, body, paths, changed_lines, issue, maintainer=False):
+    """Policy checks as a list of (name, passed, detail). `issue` is the linked issue's JSON or None.
+
+    `maintainer` is True for a pull request from the maintainer's own account (see `maintainer_pr`).
+    """
     labels = {label["name"] for label in (issue or {}).get("labels", [])}
     tier = pr_tier(paths)
     return [
         ("Task ID in title", bool(TASK_ID.match(title or "")), "titles start with `AREA-N: `"),
         ("Linked task", issue is not None, "`Closes #N` in the description, pointing at an issue"),
-        ("Task is `ready`", "ready" in labels, "a maintainer labelled the task `ready`"),
-        ("Model declared", bool(MODEL.search(body or "")),
-         "`Model: Claude Opus 5.5` or `Model: Claude Fable` in the description (declared, not verified)"),
+        ("Task is `ready`", maintainer or "ready" in labels,
+         "the maintainer's own pull request, or a task labelled `ready`"),
+        ("Model declared", maintainer or bool(MODEL.search(body or "")),
+         "the maintainer's own pull request (declared once in AGENTS.md), or `Model: Claude Opus 5.5` or "
+         "`Model: Claude Fable` in the description (declared, not verified)"),
         ("Size", tier != 1 or changed_lines <= TIER1_MAX_LINES,
          f"{changed_lines} changed lines, added plus deleted (tier 1 limit {TIER1_MAX_LINES})"),
     ]
@@ -91,7 +110,7 @@ def report(pr, files, issue):
     paths = [p for f in files for p in (f["filename"], f.get("previous_filename")) if p]
     changed = sum(f["additions"] + f["deletions"] for f in files)
     lines = [f"Tier {pr_tier(paths)}"]
-    for name, ok, detail in checks(pr["title"], pr.get("body"), paths, changed, issue):
+    for name, ok, detail in checks(pr["title"], pr.get("body"), paths, changed, issue, maintainer_pr(pr)):
         lines.append(f"- {'✅' if ok else '❌'} {name}: {detail}")
     return lines
 

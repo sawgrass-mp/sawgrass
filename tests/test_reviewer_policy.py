@@ -78,6 +78,21 @@ class Checks(unittest.TestCase):
                      "Closes #1\nWe did not use Model: Claude Fable"):
             self.assertFalse(self.rows(body=body)["Model declared"], body)
 
+    def test_maintainer_pull_request(self):
+        rows = self.rows(body="Closes #1", issue={"labels": [{"name": "triage"}]}, maintainer=True)
+        self.assertTrue(rows["Model declared"])
+        self.assertTrue(rows["Task is `ready`"])
+        self.assertFalse(self.rows(issue=None, maintainer=True)["Linked task"])
+
+    def test_maintainer_pr(self):
+        repo = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
+        pr = {"author_association": "MEMBER", "head": repo, "base": repo}
+        self.assertTrue(policy.maintainer_pr(pr))
+        self.assertTrue(policy.maintainer_pr({**pr, "author_association": "OWNER"}))
+        self.assertFalse(policy.maintainer_pr({**pr, "author_association": "CONTRIBUTOR"}))
+        self.assertFalse(policy.maintainer_pr({**pr, "head": {"repo": {"full_name": "fork/sawgrass"}}}))
+        self.assertFalse(policy.maintainer_pr({**pr, "head": {"repo": None}}))
+
     def test_size_limit_only_for_tier1(self):
         self.assertFalse(self.rows(changed_lines=policy.TIER1_MAX_LINES + 1)["Size"])
         self.assertTrue(self.rows(changed_lines=policy.TIER1_MAX_LINES)["Size"])

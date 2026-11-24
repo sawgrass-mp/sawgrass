@@ -32,7 +32,8 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
   (any Fable version). Contributions made with other AI agents or models are not accepted, for the sake of code
   quality and performance. Declare the model on the `Model:` line of the pull request template. GitHub cannot
   verify it, so it is a declaration: a false one gets the pull request closed, and the CI and review gates apply
-  either way.
+  either way. Pull requests from the maintainer's own account need no `Model:` line: the maintainer runs only
+  Claude Opus 5.5 or Claude Fable agents on it, and this sentence is the declaration for all of them.
 - **English only** in everything committed: code, comments, docs, commit messages, issue and pull request text.
 - **No game data, ever**: no archives, executables, shaders, textures, models, audio, or logs and reports that
   quote them. No byte patterns or signatures copied out of the game executable. `scripts/check_no_game_data.py`
@@ -59,17 +60,17 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
    ```
 
 2. Comment `/claim` on it, as the first line of the comment. The claim bot labels it `claimed` and assigns you.
-   If it refuses, pick another task. One account holds at most two claims.
+   If it refuses, pick another task. One account holds at most two claims. Working through the maintainer's
+   account, skip this step: opening the draft pull request with `Closes #N` claims the task, with no limit.
 3. Open a **draft** pull request within 72 hours with `Closes #N` in its description, or the claim is released.
 4. Mark it **ready for review** when the task is done, the checks below pass locally and CI is green. Reviews
    skip drafts, so a pull request left in draft is never reviewed or merged.
 5. Found work you won't do yourself (a bug, missing test, stale doc)? Open an issue with the **Finding**
    template. A maintainer triages it; never label your own findings `ready`.
 
-Only a maintainer or the dispatcher adds `ready`. The dispatcher (`scripts/dispatch.py`) labels a task the moment
-it is opened if the maintainer approved its ID in `.github/approved-tasks.txt` and its scope touches no protected
-path; otherwise it says why on the issue and the task waits for a maintainer. Never add `ready` yourself, and never
-edit a task's scope or title after it is `ready`: the dispatcher takes its label back.
+Only a maintainer or the dispatcher adds `ready`. The dispatcher (`scripts/dispatch.py`) labels every task a
+maintainer's account opens the moment it is opened, if its title starts with a task ID no other issue uses. Tasks
+from other accounts wait in `triage` for a maintainer. Never add `ready` yourself.
 
 If two pull requests overlap, the one that lands first is merged and the other rebases or closes.
 
@@ -93,8 +94,9 @@ If two pull requests overlap, the one that lands first is merged and the other r
 Scope is granted only by the task's `### Scope` section, in backticks: paths, then `Allows:` and construct names
 (`schedule`, `pull_request_target`, `workflow_run`, `secrets`, `write-permissions`, `force-push`, `api-write`,
 `pipe-to-shell`, `build`, `shell`). It counts only on an open `ready` task that a maintainer opened and you
-claimed. If the guard fails, ask in the issue; never edit the guard or a task to get green. The guard is an alarm,
-not a proof: passing it does not make a change safe, and the review still reads every line.
+claimed, or on any open task a maintainer opened when the pull request is the maintainer's own (from a branch of
+this repository). If the guard fails, ask in the issue; never edit the guard or a task to get green. The guard is
+an alarm, not a proof: passing it does not make a change safe, and the review still reads every line.
 
 ## Before you guess, look
 
@@ -121,5 +123,5 @@ CI also runs `cargo deny check` (licences, advisories, allowed sources).
 - One task per pull request, ideally under 400 changed lines (added plus deleted, as GitHub counts them). Split
   larger work into several tasks. For docs, tests and `resources/` the review flags anything over 400.
 - Fill in the template: `Closes #N`, `Depends on: #M` if any, what and why, what you ran with results, and the
-  `Model:` line (`Model: Claude Opus 5.5` or `Model: Claude Fable`).
+  `Model:` line (`Model: Claude Opus 5.5` or `Model: Claude Fable`; not needed from the maintainer's account).
 - Only maintainers merge. Do not ask for a merge in comments; answer review comments with code or a reason.
