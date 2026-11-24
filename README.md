@@ -64,18 +64,20 @@ So the work is split in two:
 |---|---|---|---|---|
 | ✅ | **1. Foundation**<br><sub>Stage 0</sub> | Workspace, rules, CI, claim bot, review agent | — | done |
 | ✅ | **2. Prototype and measurements**<br><sub>Stage 1</sub> | First server, protocol and load-test bots; the storage, transport, serialization, compression, visibility, scripting, voice, tick and allocator comparisons, checked on the real server | — | 25 of 25 done |
-| 📍 | **3. Make the tick fit**<br><sub>Stage 1, plan phase 1</sub> | jemalloc, one hand-off of datagrams per tick, dense entity slots, dense grid with bitset visible sets, per-player work in parallel | 3,000 bots in a crowd on one machine, no dropped bots, tick p99 under 70% of the interval | 1 of 5 done: ✅ [SRV-6](https://github.com/sawgrass-mp/sawgrass/issues/94) · 🔍 [NET-9](https://github.com/sawgrass-mp/sawgrass/issues/95) · 🛠️ [IM-4](https://github.com/sawgrass-mp/sawgrass/issues/96) · 🛠️ [IM-5](https://github.com/sawgrass-mp/sawgrass/issues/97) · ⚪ [SRV-7](https://github.com/sawgrass-mp/sawgrass/issues/98) |
-| ⚪ | **4. Fewer bytes, then 30 Hz**<br><sub>Stage 1, plan phase 2</sub> | postcard payloads, delta snapshots, visible sets cut to a byte budget, 30 Hz by default | 4,096 bots from a second machine: the roadmap's stage 1 gate | 0 of 4 done: ⚪ NET-10 · ⚪ NET-11 · ⚪ IM-6 · ⚪ SRV-8 |
+| 📍 | **3. Make the tick fit**<br><sub>Stage 1, plan phase 1</sub> | jemalloc, one hand-off of datagrams per tick, dense entity slots, dense grid with bitset visible sets, per-player work in parallel | 3,000 bots in the 1.5 km square on one machine, no dropped bots, tick p99 under 35 ms (70% of the 20 Hz interval) | 1 of 5 done: ✅ [SRV-6](https://github.com/sawgrass-mp/sawgrass/issues/94) · 🔍 [NET-9](https://github.com/sawgrass-mp/sawgrass/issues/95) · 🛠️ [IM-4](https://github.com/sawgrass-mp/sawgrass/issues/96) · 🛠️ [IM-5](https://github.com/sawgrass-mp/sawgrass/issues/97) · 🛠️ [SRV-7](https://github.com/sawgrass-mp/sawgrass/issues/98) |
+| ⚪ | **4. Fewer bytes, then 30 Hz**<br><sub>Stage 1, plan phase 2</sub> | postcard payloads, delta snapshots, visible sets cut to a byte budget, 30 Hz by default | 4,096 bots from a second machine: the roadmap's stage 1 gate | 0 of 4 done: ⚪ NET-10 · 🔍 [NET-11](https://github.com/sawgrass-mp/sawgrass/issues/107) · ⚪ IM-6 · ⚪ SRV-8 |
 | ⚪ | **5. Reliability of the realtime core**<br><sub>Stage 1, plan phase 3</sub> | Movement validation, per-connection limits, overload policy, misbehaving bots as a load test | — | 0 of 4 done: ⚪ SRV-9 · ⚪ NET-12 · ⚪ SRV-10 · ⚪ BOT-4 |
 | ⚪ | **6. Roleplay base**<br><sub>Stage 2, plan phase 4</sub> | One writer with RocksDB, WAL copy to a second machine, PostgreSQL archive, Luau runtime, voice relay, then characters, money, inventory and jobs | — | 0 of 5 done: ⚪ DB-5 · ⚪ DB-6 · ⚪ DB-7 · ⚪ SCRIPT-3 · ⚪ NET-13 |
 | ⏸️ | **7. Client in the game**<br><sub>Stage 3</sub> | Runtime adapter, hooks, sync of players, vehicles and damage, in-game UI | Starts when the game runs on PC through VIctory or XCL | waiting for the game |
 | ⚪ | **8. Launcher and releases**<br><sub>Stage 4</sub> | Signing, auto-update, server list | — | not started |
 | ⚪ | **9. Scale**<br><sub>Stage 5</sub> | Real players; zones only if measurements call for them | — | not started |
 
-Tooling and docs run alongside every step: 13 of 19 tasks done.
+Tooling and docs run alongside every step: 13 of 20 tasks done.
+
+Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: ⚪ [NET-14](https://github.com/sawgrass-mp/sawgrass/issues/108).
 
 <details>
-<summary><b>All tasks</b>: 39 done, 1 in review, 3 in progress, 2 ready, 17 planned</summary>
+<summary><b>All tasks</b>: 39 done, 3 in review, 4 in progress, 2 ready, 16 planned</summary>
 
 | | Task | Step | Size | Status |
 |---|---|---|---|---|
@@ -108,9 +110,9 @@ Tooling and docs run alongside every step: 13 of 19 tasks done.
 | 🔍 | [NET-9](https://github.com/sawgrass-mp/sawgrass/issues/95): Hand snapshot datagrams to the gateway once per tick from reused buffers | 3. Tick fits | M | in review |
 | 🛠️ | [IM-4](https://github.com/sawgrass-mp/sawgrass/issues/96): Dense entity slots with generations and slot\-indexed network state | 3. Tick fits | M | in progress |
 | 🛠️ | [IM-5](https://github.com/sawgrass-mp/sawgrass/issues/97): Dense grid and bitset visible sets in the server | 3. Tick fits | M | in progress |
-| ⚪ | [SRV-7](https://github.com/sawgrass-mp/sawgrass/issues/98): Visible sets and snapshots per player in parallel on rayon | 3. Tick fits | M | planned |
+| 🛠️ | [SRV-7](https://github.com/sawgrass-mp/sawgrass/issues/98): Visible sets and snapshots per player in parallel on rayon | 3. Tick fits | M | in progress |
 | ⚪ | NET-10: postcard for every payload; `PROTOCOL_VERSION` bump; bots follow | 4. 30 Hz | M | planned |
-| ⚪ | NET-11: Delta snapshots against the last acknowledged one; client states carry the acknowledgement | 4. 30 Hz | M | planned |
+| 🔍 | [NET-11](https://github.com/sawgrass-mp/sawgrass/issues/107): Delta\-encoded snapshots and fragments in the protocol | 4. 30 Hz | M | in review |
 | ⚪ | IM-6: Rank the visible set and cut it to the per-player byte budget (issue #18) | 4. 30 Hz | M | planned |
 | ⚪ | SRV-8: 30 Hz by default | 4. 30 Hz | M | planned |
 | ⚪ | SRV-9: Movement validation from architecture.md's Authority: speed, teleport, map bounds; counted per player for admins | 5. Reliability | M | planned |
@@ -122,6 +124,7 @@ Tooling and docs run alongside every step: 13 of 19 tasks done.
 | ⚪ | DB-7: PostgreSQL archive fed from the operation records; `sawgrass-db`'s ledger becomes the archive's schema | 6. Roleplay | M | planned |
 | ⚪ | SCRIPT-3: Luau runtime in the server: resources, events, deadlines and memory caps (ADR 0005) | 6. Roleplay | M | planned |
 | ⚪ | NET-13: Voice relay over the same QUIC connection, Opus frames routed by the visible sets (NET-7) | 6. Roleplay | M | planned |
+| ⚪ | [NET-14](https://github.com/sawgrass-mp/sawgrass/issues/108): Server and bots speak delta snapshots | Outside the plan | M | planned |
 | ⚪ | [OPS-1](https://github.com/sawgrass-mp/sawgrass/issues/9): Benchmark regression gate | Tooling and docs | M | planned |
 | ⚪ | [OPS-2](https://github.com/sawgrass-mp/sawgrass/issues/10): Markdown link check | Tooling and docs | S | planned |
 | ⚪ | [OPS-3](https://github.com/sawgrass-mp/sawgrass/issues/11): Protocol version gate | Tooling and docs | S | planned |
@@ -141,6 +144,7 @@ Tooling and docs run alongside every step: 13 of 19 tasks done.
 | ✅ | [DOC-6](https://github.com/sawgrass-mp/sawgrass/issues/57): Transparent background for the README logo | Tooling and docs | M | done |
 | ✅ | [DOC-7](https://github.com/sawgrass-mp/sawgrass/issues/85): Official Telegram and X links in the README | Tooling and docs | M | done |
 | ✅ | [DOC-8](https://github.com/sawgrass-mp/sawgrass/issues/93): Implementation plan from the measured choices to the server | Tooling and docs | M | done |
+| 🔍 | [DOC-9](https://github.com/sawgrass-mp/sawgrass/issues/104): One project progress bar with the development steps and where the project is | Tooling and docs | M | in review |
 
 </details>
 

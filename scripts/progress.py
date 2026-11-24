@@ -53,18 +53,22 @@ ICON = {"done": "✅", "in review": "🔍", "in progress": "🛠️", "ready": "
 
 # The development steps, in order, on one bar. Each step belongs to a roadmap stage (docs/roadmap.md). A task
 # belongs to the step of its phase in docs/implementation-plan.md (`phase`); a task the plan does not list belongs to
-# the step whose `areas` hold its prefix. A step with a fixed `state` shows that text instead of its tasks.
+# the step whose `areas` hold its prefix. A step with a fixed `state` shows that text instead of its tasks, and a
+# step whose `state` is `done` is closed: a task outside the plan that is not done yet never reopens it, it goes to
+# the "outside the plan" line instead, so it cannot move the marker back. The `covers` and `gate` texts of the plan's
+# phases are copied from docs/implementation-plan.md and are edited together with it.
 STEPS = (
     {"name": "Foundation", "short": "Foundation", "stage": 0, "state": "done",
      "covers": "Workspace, rules, CI, claim bot, review agent"},
-    {"name": "Prototype and measurements", "short": "Prototype", "stage": 1,
+    {"name": "Prototype and measurements", "short": "Prototype", "stage": 1, "state": "done",
      "areas": ("NET", "SRV", "IM", "BOT", "DB", "SCRIPT"),
      "covers": "First server, protocol and load-test bots; the storage, transport, serialization, compression, "
                "visibility, scripting, voice, tick and allocator comparisons, checked on the real server"},
     {"name": "Make the tick fit", "short": "Tick fits", "stage": 1, "phase": 1,
      "covers": "jemalloc, one hand-off of datagrams per tick, dense entity slots, dense grid with bitset visible "
                "sets, per-player work in parallel",
-     "gate": "3,000 bots in a crowd on one machine, no dropped bots, tick p99 under 70% of the interval"},
+     "gate": "3,000 bots in the 1.5 km square on one machine, no dropped bots, tick p99 under 35 ms (70% of "
+             "the 20 Hz interval)"},
     {"name": "Fewer bytes, then 30 Hz", "short": "30 Hz", "stage": 1, "phase": 2,
      "covers": "postcard payloads, delta snapshots, visible sets cut to a byte budget, 30 Hz by default",
      "gate": "4,096 bots from a second machine: the roadmap's stage 1 gate"},
@@ -84,6 +88,7 @@ STEPS = (
 STAGE_NAMES = {0: "repository foundation", 1: "server without the game", 2: "roleplay base",
                3: "client in the game", 4: "launcher and releases", 5: "scale"}
 TRACK = {"name": "Tooling and docs", "areas": ("OPS", "DOC")}
+OUTSIDE = "Outside the plan"
 MARKER = "📍"
 LIST_LIMIT = 8  # a step with more tasks than this shows a count instead of the task IDs
 
@@ -139,14 +144,20 @@ def steps_for(plan):
     return steps
 
 
-def step_index(task_id, plan, steps):
-    """Index of the task's step in `steps`, or None for the tooling track."""
+def step_index(task_id, plan, steps, status="done"):
+    """Index of the task's step in `steps`, or None for the tooling track and for unfinished tasks outside the plan
+    whose step is closed (see STEPS)."""
     if task_id in plan:
         return next(i for i, s in enumerate(steps) if s.get("phase") == plan[task_id][0])
     for i, s in enumerate(steps):
         if area(task_id) in s.get("areas", ()):
-            return i
+            return None if s.get("state") == "done" and status != "done" else i
     return None
+
+
+def track_of(task):
+    """The line under the steps table that holds a task without a step."""
+    return TRACK["name"] if area(task["id"]) in TRACK["areas"] else OUTSIDE
 
 
 def labels_of(item):
@@ -230,7 +241,7 @@ def collect(items, roadmap, plan=None):
 
     steps = steps_for(plan)
     for t in tasks.values():
-        t["step"] = step_index(t["id"], plan, steps)
+        t["step"] = step_index(t["id"], plan, steps, t["status"])
     areas = [a for s in steps for a in s.get("areas", ())] + list(TRACK["areas"])
     for a in AREAS.split("|"):
         if a not in areas:
@@ -273,7 +284,7 @@ def step_rows(tasks, plan=None):
         else:
             key = "waiting" if s.get("state") == "waiting" else "todo"
         if s.get("state") == "done":
-            text = "done"
+            text = f"{done} of {len(own)} done" if own else "done"
         elif s.get("state") == "waiting":
             text, pct = "waiting for the game", 0
         elif not own:
@@ -336,11 +347,21 @@ def render_markdown(tasks, repo, plan=None):
         name = f"**{i + 1}. {s['name']}**"
         lines.append(f"| {icons[key]} | {name}<br><sub>{stage_label(s)}</sub> | {s['covers']} | "
                      f"{s.get('gate', '—')} | {detail} |")
-    track = [t for t in tasks if t["step"] is None]
+    track = [t for t in tasks if t["step"] is None and track_of(t) == TRACK["name"]]
+    outside = [t for t in tasks if t["step"] is None and track_of(t) == OUTSIDE]
     lines += [
         "",
         f"{TRACK['name']} run alongside every step: {sum(t['status'] == 'done' for t in track)} of {len(track)} "
         "tasks done.",
+    ]
+    if outside:
+        lines += [
+            "",
+            f"{OUTSIDE}, not counted in any step until a phase of "
+            "[docs/implementation-plan.md](docs/implementation-plan.md) lists them: "
+            + " · ".join(f"{ICON[t['status']]} {task_link(t, repo)}" for t in outside) + ".",
+        ]
+    lines += [
         "",
         "<details>",
         f"<summary><b>All tasks</b>: {counts['done']} done, {counts['in review']} in review, "
@@ -352,7 +373,7 @@ def render_markdown(tasks, repo, plan=None):
     for t in tasks:
         # Roadmap and plan titles are maintainer-written Markdown; issue titles are anyone's text.
         title = t["title"] if t.get("trusted") else escape_markdown(t["title"])
-        where = TRACK["name"] if t["step"] is None else f"{t['step'] + 1}. {rows[t['step']][0]['short']}"
+        where = track_of(t) if t["step"] is None else f"{t['step'] + 1}. {rows[t['step']][0]['short']}"
         lines.append(f"| {ICON[t['status']]} | {task_link(t, repo)}: {title} | {where} | {t['size']} | "
                      f"{t['status']} |")
     lines += [

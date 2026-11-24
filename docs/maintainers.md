@@ -164,7 +164,10 @@ task issues, the open pull requests, the phase tables in `docs/implementation-pl
 `docs/roadmap.md`. Nobody edits them by hand. They show one bar with every development step and a marker on the
 current step, the first one whose tasks are not all merged. A task listed in a phase table of the implementation plan
 counts towards that phase's step; any other task counts towards the step that holds its prefix (`STEPS` in the
-script), so a new task for the plan's work is added to the plan's table, and a new phase there gets a step of its own. At the end
+script), so a new task for the plan's work is added to the plan's table, and a new phase there gets a step of its own.
+A finished step is closed: an unfinished task outside the plan whose prefix points at it is shown on an "outside the
+plan" line and never moves the marker back. The `covers` and `gate` texts of the plan's steps in `STEPS` are copies of
+the plan's phases, so a pull request that changes one changes the other. At the end
 of every reviewer session, after the reviews, the reviewer refreshes them:
 
 1. In its own clone, on an up-to-date `main` (never a pull request branch), it runs

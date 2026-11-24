@@ -143,6 +143,7 @@ class Numbers(unittest.TestCase):
         items = [issue(n, t, labels=("ready",)) for n, t in
                  ((1, "NET-2: Two"), (2, "NET-9: Nine"), (3, "RP-1: Characters"), (4, "OPS-1: Gate"),
                   (5, "LAUNCH-1: Signing"), (6, "SRV-6: jemalloc"))]
+        items[0] = issue(1, "NET-2: Two", state="closed", reason="completed")  # finished work outside the plan
         tasks = by_id(progress.collect(items, {}, plan))
         steps = progress.steps_for(plan)
         name = {t: (steps[tasks[t]["step"]]["name"] if tasks[t]["step"] is not None else None) for t in tasks}
@@ -175,7 +176,8 @@ class Marker(unittest.TestCase):
         return progress.collect(items, {}, self.plan)
 
     def test_marker_follows_merged_work(self):
-        self.assertEqual(keys(self.tasks(), self.plan)[:4], ["done", "current", "todo", "todo"])
+        # Step 2 is closed, so an open task outside the plan (NET-1 here) does not hold the marker there.
+        self.assertEqual(keys(self.tasks(), self.plan)[:4], ["done", "done", "current", "todo"])
         self.assertEqual(keys(self.tasks("NET-1", "SRV-6"), self.plan)[:4], ["done", "done", "current", "todo"])
         # A task in review or in progress does not move the marker.
         self.assertEqual(keys(self.tasks("NET-1", "SRV-6", "NET-9"), self.plan)[:4],
@@ -184,6 +186,20 @@ class Marker(unittest.TestCase):
     def test_exactly_one_current_step(self):
         for done in ((), ("NET-1",), ("NET-1", "SRV-6", "NET-9")):
             self.assertEqual(keys(self.tasks(*done), self.plan).count("current"), 1)
+
+    def test_task_outside_the_plan_does_not_reopen_a_finished_step(self):
+        items = [issue(1, "NET-1: x", state="closed", reason="completed"),
+                 issue(2, "SRV-6: x", labels=("claimed",)),
+                 issue(3, "NET-14: Outside the plan, opened later", labels=("ready",))]
+        tasks = by_id(progress.collect(items, {}, self.plan))
+        self.assertIsNone(tasks["NET-14"]["step"])
+        self.assertEqual(progress.track_of(tasks["NET-14"]), progress.OUTSIDE)
+        self.assertEqual(tasks["NET-1"]["step"], 1)  # finished work stays in its step
+        self.assertEqual(keys(list(tasks.values()), self.plan)[:3], ["done", "done", "current"])
+        block = progress.render_markdown(list(tasks.values()), "o/r", self.plan)
+        self.assertIn("We are here: step 3 of 9", block)
+        self.assertIn("🟢 [NET-14](https://github.com/o/r/issues/3).", block)
+        self.assertIn("| Outside the plan |", block)
 
     def test_waiting_step(self):
         rows = progress.step_rows(self.tasks(), self.plan)
