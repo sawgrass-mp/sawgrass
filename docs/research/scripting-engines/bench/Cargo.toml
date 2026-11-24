@@ -1,0 +1,33 @@
+[package]
+name = "scripting-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+# Standalone: not part of the Sawgrass workspace, so its dependencies never reach the project's graph.
+[workspace]
+
+# One engine per build: mlua's Lua flavours exclude each other. run.py builds each into its own target directory.
+[features]
+luau = ["mlua/luau"]
+# Luau with native code generation (x64 and arm64).
+luau-jit = ["luau", "mlua/luau-jit"]
+lua54 = ["mlua/lua54"]
+luajit = ["mlua/luajit"]
+# LuaJIT with its compiler turned off (jit.off()), the interpreter alone.
+luajit-interp = ["luajit"]
+wasm = ["dep:wasmtime"]
+quickjs = ["dep:rquickjs"]
+v8 = ["dep:v8"]
+rhai = ["dep:rhai"]
+
+[dependencies]
+mlua = { version = "0.12", features = ["vendored"], optional = true }
+wasmtime = { version = "51", default-features = false, features = ["cranelift", "runtime", "std"], optional = true }
+rquickjs = { version = "0.14", optional = true }
+v8 = { version = "152", optional = true }
+rhai = { version = "1.27", optional = true }
+
+[profile.release]
+debug = "line-tables-only"
