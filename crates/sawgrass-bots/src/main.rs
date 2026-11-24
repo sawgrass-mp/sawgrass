@@ -17,6 +17,11 @@ use sawgrass_gateway::RootCertStore;
 use sawgrass_gateway::pki_types::CertificateDer;
 use tokio::time::Instant;
 
+/// jemalloc for every allocation in the process (SRV-5; BOT-3 halved the crowd's tick p99 with it).
+#[cfg(unix)]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const USAGE: &str = "usage:
   sawgrass-bots gen-cert --out DIR [--name NAME]
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
