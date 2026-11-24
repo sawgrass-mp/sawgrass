@@ -20,10 +20,24 @@ pub const PING_BYTES: usize = 64;
 pub const STATE_BYTES: usize = 64;
 /// Size of a reliable event, in bytes.
 pub const EVENT_BYTES: usize = 100;
-/// Size of one snapshot datagram, in bytes.
-pub const SNAPSHOT_BYTES: usize = 1000;
+/// Size of one snapshot datagram, in bytes: 1000 unless `SNAPSHOT_BYTES` says otherwise (NET-5 sets it to the
+/// compressed sizes it measures).
+pub fn snapshot_bytes() -> usize {
+    env_usize("SNAPSHOT_BYTES", 1000)
+}
+
 /// Snapshot datagrams per client per tick: 2 x 1000 bytes at 20 Hz is the 40 KB/s budget in architecture.md.
-pub const SNAPSHOTS_PER_TICK: usize = 2;
+/// `SNAPSHOTS_PER_TICK` overrides it.
+pub fn snapshots_per_tick() -> usize {
+    env_usize("SNAPSHOTS_PER_TICK", 2)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 /// Game tick rate.
 pub const TICK_HZ: u32 = 20;
 /// Network update rate of poll-driven servers and clients under load.
@@ -325,7 +339,7 @@ impl LoadTotals {
             .busiest(started.elapsed())
             .max(self.thread_cpu.as_secs_f64() / started.elapsed().as_secs_f64().max(1e-9));
         let secs = measured.as_secs_f64();
-        let expected = clients as f64 * f64::from(TICK_HZ) * SNAPSHOTS_PER_TICK as f64 * secs;
+        let expected = clients as f64 * f64::from(TICK_HZ) * snapshots_per_tick() as f64 * secs;
         let cpu = (process_cpu() - cpu0).as_secs_f64() / started.elapsed().as_secs_f64();
         println!(
             "load clients={clients} connected={} snapshots_per_client_s={:.1} snapshot_delivery_pct={:.1} events_sent={} events_back={} client_cpu_cores={cpu:.2} client_busiest_thread_cores={busiest:.2}",

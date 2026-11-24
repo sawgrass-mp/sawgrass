@@ -1,0 +1,12 @@
+{"suite": "speed", "encoding": "full", "codec": "none", "encode_ns": 5699, "decode_ns": 3441, "encode_ns_range": [5170, 5860], "decode_ns_range": [3365, 3692], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "full", "codec": "lz4", "encode_ns": 7534, "decode_ns": 4306, "encode_ns_range": [7494, 8034], "decode_ns_range": [3954, 4802], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-1", "encode_ns": 13356, "decode_ns": 7669, "encode_ns_range": [11760, 15893], "decode_ns_range": [6869, 9030], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-3", "encode_ns": 24953, "decode_ns": 7590, "encode_ns_range": [16844, 27164], "decode_ns_range": [7256, 8457], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-1-dict16k", "encode_ns": 16161, "decode_ns": 5963, "encode_ns_range": [15452, 18356], "decode_ns_range": [5259, 6203], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-3-dict16k", "encode_ns": 31802, "decode_ns": 6381, "encode_ns_range": [31366, 33343], "decode_ns_range": [6304, 7189], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "delta", "codec": "none", "encode_ns": 3983, "decode_ns": 5619, "encode_ns_range": [3926, 4029], "decode_ns_range": [5454, 6299], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "delta", "codec": "lz4", "encode_ns": 4371, "decode_ns": 6277, "encode_ns_range": [4263, 4848], "decode_ns_range": [6247, 6753], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-1", "encode_ns": 12135, "decode_ns": 8705, "encode_ns_range": [9931, 12747], "decode_ns_range": [8624, 8728], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-3", "encode_ns": 12036, "decode_ns": 10252, "encode_ns_range": [11829, 16560], "decode_ns_range": [8408, 10595], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-1-dict16k", "encode_ns": 7175, "decode_ns": 10427, "encode_ns_range": [6616, 7333], "decode_ns_range": [9663, 10488], "at": "2026-11-24T14:45:42"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-3-dict16k", "encode_ns": 12214, "decode_ns": 9166, "encode_ns_range": [11513, 13680], "decode_ns_range": [8816, 10344], "at": "2026-11-24T14:45:42"}

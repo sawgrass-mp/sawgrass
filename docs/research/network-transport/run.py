@@ -1,6 +1,10 @@
 """Runs the NET-3 transport measurements and appends one JSON line per run to results/<suite>.jsonl.
 
 Usage: python3 -I run.py latency|loss|load [transport ...] [--sizes 1000,4096]
+       python3 -I run.py load quinn --sizes 4096 --snapshot 993x2 --label full --results PATH
+
+`--snapshot BYTESxCOUNT` sends COUNT snapshot datagrams of BYTES each per client per tick instead of 2 x 1000;
+NET-5 uses it with `--results` (a JSON-lines file to append to) and `--label` to measure compressed sizes.
 
 Starts the server, the lossy relay and the client from bench/target*/release/transport-bench with fixed
 arguments (no shell), pins them to CPUs so the server never shares a core with the load generator, and parses
@@ -79,10 +83,15 @@ def fields(line):
     return out
 
 
+# Where `save` writes, and what it adds to each record; `--results` and `--label` change them.
+OUTPUT = {"path": None, "extra": {}}
+
+
 def save(suite, record):
     RESULTS.mkdir(exist_ok=True)
+    record.update(OUTPUT["extra"])
     record["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    with open(RESULTS / f"{suite}.jsonl", "a") as f:
+    with open(OUTPUT["path"] or RESULTS / f"{suite}.jsonl", "a") as f:
         f.write(json.dumps(record) + "\n")
     print(json.dumps(record), flush=True)
 
@@ -139,11 +148,15 @@ def loss(kinds):
                     )
 
 
+# Snapshot size and count per tick for the load suite, as environment variables for server and clients.
+SNAPSHOT_ENV = {}
+
+
 def load(kinds, sizes=(1000, 4096), secs=30):
     for kind in kinds:
         for n in sizes:
             shards = {"renet": -(-n // 1024), "enet": -(-n // 4095)}.get(kind, 1)
-            env = {"SHARDS": str(shards)}
+            env = {"SHARDS": str(shards), **SNAPSHOT_ENV}
             server_args = [binary(kind), "server", kind, "127.0.0.1:7300", "load"]
             if kind == "quinn":
                 server_args.append(str(len(SERVER_CPUS)))
@@ -233,6 +246,20 @@ def main():
     if "--sizes" in args:
         i = args.index("--sizes")
         sizes = tuple(int(x) for x in args[i + 1].split(","))
+        args = args[:i] + args[i + 2:]
+    if "--snapshot" in args:
+        i = args.index("--snapshot")
+        size, count = (int(x) for x in args[i + 1].split("x"))
+        SNAPSHOT_ENV.update({"SNAPSHOT_BYTES": str(size), "SNAPSHOTS_PER_TICK": str(count)})
+        OUTPUT["extra"].update({"snapshot_bytes": size, "snapshots_per_tick": count})
+        args = args[:i] + args[i + 2:]
+    if "--results" in args:
+        i = args.index("--results")
+        OUTPUT["path"] = Path(args[i + 1])
+        args = args[:i] + args[i + 2:]
+    if "--label" in args:
+        i = args.index("--label")
+        OUTPUT["extra"]["label"] = args[i + 1]
         args = args[:i] + args[i + 2:]
     kinds = args or TRANSPORTS
     if sys.argv[1] == "load" and sizes:

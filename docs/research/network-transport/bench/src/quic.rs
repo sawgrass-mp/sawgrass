@@ -116,13 +116,14 @@ pub fn serve(addr: SocketAddr, load: bool, threads: usize) {
             let conns = Arc::clone(&conns);
             let counters = Arc::clone(&counters);
             tokio::spawn(async move {
-                let snapshot = Bytes::from(message(KIND_SNAPSHOT, 0, 0, SNAPSHOT_BYTES));
+                let snapshot = Bytes::from(message(KIND_SNAPSHOT, 0, 0, snapshot_bytes()));
+                let per_tick = snapshots_per_tick();
                 let mut tick = tokio::time::interval(Duration::from_secs(1) / TICK_HZ);
                 loop {
                     tick.tick().await;
                     let list = conns.lock().expect("conns").clone();
                     for c in &list {
-                        for _ in 0..SNAPSHOTS_PER_TICK {
+                        for _ in 0..per_tick {
                             if c.send_datagram(snapshot.clone()).is_ok() {
                                 counters.sent.fetch_add(1, Relaxed);
                             }
@@ -162,6 +163,34 @@ pub fn serve(addr: SocketAddr, load: bool, threads: usize) {
                 }
             });
         }
+    });
+}
+
+/// Connects to a server and prints the largest datagram quinn will send, at once and after path MTU discovery
+/// has had time to probe.
+pub fn datagram_size(server: SocketAddr) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    rt.block_on(async move {
+        let endpoint = client_endpoint(server);
+        let conn = endpoint
+            .connect(server, "localhost")
+            .expect("connect")
+            .await
+            .expect("handshake");
+        let started = Instant::now();
+        for wait in [0u64, 1, 3, 6] {
+            tokio::time::sleep_until((started + Duration::from_secs(wait)).into()).await;
+            println!(
+                "datagram after_s={wait} max_datagram_bytes={}",
+                conn.max_datagram_size().unwrap_or(0)
+            );
+            flush();
+        }
+        conn.close(0u32.into(), b"done");
+        endpoint.wait_idle().await;
     });
 }
 

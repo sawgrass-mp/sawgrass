@@ -17,6 +17,7 @@ const USAGE: &str = "usage:
   transport-bench server KIND ADDR echo|load [THREADS]
   transport-bench ping   KIND ADDR unreliable|reliable HZ SECS
   transport-bench load   KIND ADDR CLIENTS THREADS SECS
+  transport-bench datagram-size quinn ADDR
 KIND: udp, quinn, enet, renet, gns (with --features gns)";
 
 fn arg<T: std::str::FromStr>(args: &[String], i: usize) -> T {
@@ -63,6 +64,7 @@ fn main() {
                 _ => eprintln!("{USAGE}"),
             }
         }
+        ("datagram-size", "quinn") => quic::datagram_size(addr),
         ("load", _) => {
             let (clients, threads, secs): (usize, usize, u64) = (arg(&args, 4), arg(&args, 5), arg(&args, 6));
             match kind.as_str() {

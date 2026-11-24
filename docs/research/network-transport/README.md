@@ -342,6 +342,11 @@ bench/target/release/transport-bench relay 127.0.0.1:7200 127.0.0.1:7100 20 5   
 bench/target/release/transport-bench ping quinn 127.0.0.1:7200 reliable 50 30   # rate, seconds
 ```
 
+`SNAPSHOT_BYTES` and `SNAPSHOTS_PER_TICK` in the environment of the server and the load clients change the
+snapshot datagrams (1,000 bytes, 2 per tick by default), and `run.py load ... --snapshot BYTESxCOUNT` sets both;
+[NET-5](../packet-compression/README.md) uses them. `transport-bench datagram-size quinn ADDR` prints the largest
+datagram quinn will send to a running server.
+
 ## Sources
 
 - QUIC loss detection: [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002); datagrams:

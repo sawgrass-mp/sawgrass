@@ -19,6 +19,7 @@
   <a href="#storage-measured">Storage</a> ·
   <a href="#network-transport-measured">Transport</a> ·
   <a href="#packet-serialization-measured">Serialization</a> ·
+  <a href="#packet-compression-measured">Compression</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#contributing">Contributing</a>
 </p>
@@ -226,6 +227,34 @@ corrupted inputs.
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/packet-serialization](docs/research/packet-serialization/).
+
+## Packet compression, measured
+
+Snapshots are most of what a gateway sends, so we measured how to make them smaller: general compressors (LZ4,
+zstd with and without a trained dictionary) and delta encoding against the last snapshot each client acknowledged,
+on 38,400 snapshots from a simulated city block, with quinn sending them to 2,048 and 4,096 players.
+
+<p align="center"><img src="docs/assets/compression.svg" alt="Bytes on the wire per snapshot: whole snapshot 2,073 bytes in 2 datagrams; whole with zstd and a dictionary 1,910 in 2; delta 859 in 1; delta with zstd and a dictionary 710 in 1. Gateway CPU at 2,048 players: 1.63, 2.05, 1.40 and 1.51 cores" width="100%"></p>
+
+**We chose delta encoding**, with no general compressor for now.
+
+| Snapshot of 100 entities | Payload | Datagrams | Encode | Why or why not |
+|---|---:|---:|---:|---|
+| Whole, postcard (NET-4) | 1,935 B | 2 | 5.7 µs | Twice the packets of a delta. |
+| Whole + LZ4 or zstd | 1,757 to 1,927 B | 2 | 7.5 to 32 µs | Quantized values barely compress; still two datagrams. |
+| **Delta** | **793 B** | **1** | **4.0 µs** | **Chosen**: 59% fewer bytes, half the packets, cheapest to encode. |
+| Delta + zstd with dictionary | 644 B | 1 | 7.2 µs | Another 19%; waits for real traffic to train the dictionary on. |
+
+- One datagram instead of two cut quinn's CPU by 11% at 2,048 players; 9% fewer bytes in two datagrams saved
+  nothing measurable. With encoding included, delta was the cheapest pipeline in total.
+- Loss barely matters: each client state acknowledges the newest snapshot, so at 10% loss deltas grew by 1%.
+- Small messages (client state, chat, events) grew by 4 to 5 bytes with every compressor, so they stay
+  uncompressed. No decoder crashed on 1.6 million random and corrupted packets.
+- Caveats: simulated traffic, not the game's; one 4-core VM; at 4,096 players server and load generator were both
+  near their cores, so CPU is compared at 2,048.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/packet-compression](docs/research/packet-compression/).
 
 ## How it is built
 

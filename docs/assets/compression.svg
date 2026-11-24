@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="526" viewBox="0 0 880 526" role="img" aria-label="Snapshot compression. Whole snapshot (postcard): 2,073 bytes in 2 datagrams, 1.63 cores at 2048 players; Whole + zstd with dictionary: 1,910 bytes in 2 datagrams, 2.05 cores at 2048 players; Delta against acknowledged: 859 bytes in 1 datagrams, 1.40 cores at 2048 players; Delta + zstd with dictionary: 710 bytes in 1 datagrams, 1.51 cores at 2048 players">
+<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#14e1f0"/><stop offset="1" stop-color="#7cf000"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:13px;fill:#8fb3a6}.l{font-size:15px;font-weight:600;fill:#e8fff4}.n{font-size:12px;fill:#7d9a90}.p{font-size:14px;font-weight:700;fill:#a6ff4d}.v{font-size:14px;font-weight:600;fill:#cfe9df}</style>
+<rect width="880" height="526" rx="16" fill="#060a08"/>
+<rect x="1" y="1" width="878" height="524" rx="15" fill="none" stroke="#1d3b2f"/>
+<text x="28" y="44" class="h">Bytes on the wire per snapshot</text>
+<text x="28" y="68" class="s">100 visible entities, 20 Hz, 100 ms round trip; payload plus QUIC, UDP and IP headers per datagram.</text>
+<text x="28" y="114" class="l">Whole snapshot (postcard)</text>
+<text x="28" y="131" class="n">today's NET-4 choice</text>
+<rect x="300" y="106" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="106" width="376.9" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="117" class="v" text-anchor="end">2,073 B, 2 pkt</text>
+<text x="28" y="154" class="l">Whole + zstd with dictionary</text>
+<text x="28" y="171" class="n">still two datagrams</text>
+<rect x="300" y="146" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="146" width="347.3" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="157" class="v" text-anchor="end">1,910 B, 2 pkt</text>
+<text x="28" y="194" class="l">Delta against acknowledged</text>
+<text x="28" y="211" class="n">chosen: one datagram</text>
+<rect x="300" y="186" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="186" width="156.1" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="197" class="p" text-anchor="end">859 B, 1 pkt</text>
+<text x="28" y="234" class="l">Delta + zstd with dictionary</text>
+<text x="28" y="251" class="n">the next 19%, kept for BOT-2</text>
+<rect x="300" y="226" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="226" width="129.0" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="237" class="v" text-anchor="end">710 B, 1 pkt</text>
+<text x="28" y="288" class="h">Gateway CPU, 2,048 players</text>
+<text x="28" y="312" class="s">quinn sending them (measured; dictionary rows at zstd 3 sizes, within 1%) plus encoding at zstd 1 (one core).</text>
+<text x="28" y="358" class="l">Whole snapshot (postcard)</text>
+<text x="28" y="375" class="n">today's NET-4 choice</text>
+<rect x="300" y="350" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="350" width="296.6" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="361" class="v" text-anchor="end">1.63 cores</text>
+<text x="28" y="398" class="l">Whole + zstd with dictionary</text>
+<text x="28" y="415" class="n">still two datagrams</text>
+<rect x="300" y="390" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="390" width="372.7" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="401" class="v" text-anchor="end">2.05 cores</text>
+<text x="28" y="438" class="l">Delta against acknowledged</text>
+<text x="28" y="455" class="n">chosen: one datagram</text>
+<rect x="300" y="430" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="430" width="255.1" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="441" class="p" text-anchor="end">1.40 cores</text>
+<text x="28" y="478" class="l">Delta + zstd with dictionary</text>
+<text x="28" y="495" class="n">the next 19%, kept for BOT-2</text>
+<rect x="300" y="470" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="300" y="470" width="275.3" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="481" class="v" text-anchor="end">1.51 cores</text>
+</svg>
