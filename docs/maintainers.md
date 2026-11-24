@@ -92,6 +92,8 @@ author association, which an organization member or a read-only collaborator als
 - **`pr-guard`.** On such a pull request the linked task's scope counts without `ready` or a claim. The scope check
   itself stays: a protected path still fails unless the task's `### Scope` names it.
 - **Model.** Such a pull request needs no `Model:` line; AGENTS.md declares the model for the maintainer's account.
+- **Size.** Such a pull request has no tier 1 size limit in the `policy` check, so research write-ups and
+  measurement code under `docs/` can be merged in one piece. The review still reads every line.
 - **`protected` label.** The same job labels every open pull request, from any account, `protected` while it
   changes a tier 3 path (CI, rules, scripts, the reviewer, client, launcher), so the pull request list shows which
   ones to read closely before merging.

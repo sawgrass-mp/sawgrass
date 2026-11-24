@@ -98,7 +98,9 @@ def linked_issue(body):
 def checks(title, body, paths, changed_lines, issue, maintainer=False):
     """Policy checks as a list of (name, passed, detail). `issue` is the linked issue's JSON or None.
 
-    `maintainer` is True for a pull request from the maintainer's own account (see `maintainer_pr`).
+    `maintainer` is True for a pull request from the maintainer's own account (see `maintainer_pr`). It waives the
+    `ready` label, the `Model:` line and the tier 1 size limit (research write-ups run to thousands of lines); the
+    task ID and the linked task still apply.
     """
     labels = {label["name"] for label in (issue or {}).get("labels", [])}
     tier = pr_tier(paths)
@@ -110,8 +112,9 @@ def checks(title, body, paths, changed_lines, issue, maintainer=False):
         ("Model declared", maintainer or bool(MODEL.search(body or "")),
          "the maintainer's own pull request (declared once in AGENTS.md), or `Model: Claude Opus 5.5` or "
          "`Model: Claude Fable` in the description (declared, not verified)"),
-        ("Size", tier != 1 or changed_lines <= TIER1_MAX_LINES,
-         f"{changed_lines} changed lines, added plus deleted (tier 1 limit {TIER1_MAX_LINES})"),
+        ("Size", maintainer or tier != 1 or changed_lines <= TIER1_MAX_LINES,
+         f"{changed_lines} changed lines, added plus deleted (tier 1 limit {TIER1_MAX_LINES}, waived for the "
+         "maintainer's own pull request)"),
     ]
 
 

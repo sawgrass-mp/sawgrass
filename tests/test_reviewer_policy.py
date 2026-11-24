@@ -87,6 +87,12 @@ class Checks(unittest.TestCase):
         self.assertTrue(rows["Model declared"])
         self.assertTrue(rows["Task is `ready`"])
         self.assertFalse(self.rows(issue=None, maintainer=True)["Linked task"])
+        self.assertFalse(self.rows(title="Fix typo", maintainer=True)["Task ID in title"])
+
+    def test_maintainer_size_waived(self):
+        big = policy.TIER1_MAX_LINES * 10
+        self.assertFalse(self.rows(paths=["docs/research/r.md"], changed_lines=big)["Size"])
+        self.assertTrue(self.rows(paths=["docs/research/r.md"], changed_lines=big, maintainer=True)["Size"])
 
     def test_maintainer_pr(self):
         repo = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
