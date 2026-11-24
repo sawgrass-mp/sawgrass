@@ -1,0 +1,28 @@
+[package]
+name = "sawgrass-gateway"
+description = "Sawgrass gateway: terminates player connections over QUIC."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes = "1"
+# QUIC transport (docs/architecture.md, "Gateways"). Only the tokio runtime and the ring TLS provider: no
+# aws-lc-rs (C toolchain and an extra licence) and no platform verifier (peers pin the gateway certificate).
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+sawgrass-protocol = { path = "../sawgrass-protocol" }
+tokio = { version = "1.54.1", features = ["time"] }
+
+[dev-dependencies]
+# Self-signed certificates for the integration tests, generated at run time so no key is committed. rcgen pulls
+# in `time`, pinned in Cargo.lock at 0.3.47 or later for RUSTSEC-2026-0009. That version needs Rust 1.88, so
+# `cargo test` here needs 1.88 while the workspace declares 1.85 (#28); the gateway itself still builds on 1.85.
+# Do not let an update resolve `time` back to 0.3.45 or earlier.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
