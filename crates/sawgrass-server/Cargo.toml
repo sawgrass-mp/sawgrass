@@ -26,5 +26,9 @@ rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "
 name = "visibility"
 harness = false
 
+[[bench]]
+name = "snapshots"
+harness = false
+
 [lints]
 workspace = true
