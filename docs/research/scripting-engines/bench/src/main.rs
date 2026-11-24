@@ -1,4 +1,4 @@
-//! Scripting engine comparison for roleplay logic (task SCR-1). One engine per build, chosen by a cargo feature;
+//! Scripting engine comparison for roleplay logic (task SCRIPT-1). One engine per build, chosen by a cargo feature;
 //! `../run.py` builds each and runs the suites in fresh processes. Prints one JSON object per result line.
 //!
 //! Usage: scripting-bench verify | speed [--no-limits] | latency | memory | isolation <spin|bomb|recurse|fail>

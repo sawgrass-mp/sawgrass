@@ -1,4 +1,4 @@
-"""Runs the SCR-1 scripting engine measurements and writes results/<suite>.jsonl.
+"""Runs the SCRIPT-1 scripting engine measurements and writes results/<suite>.jsonl.
 
 Usage: python3 -I run.py [build] [verify] [speed] [latency] [memory] [isolation] [size]   (all when none is named)
 

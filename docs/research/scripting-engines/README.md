@@ -1,7 +1,7 @@
 # Scripting engines for roleplay logic: what we measured and what we recommend
 
 Measured 2026-11-24 with mlua 0.12.3 (Luau 0.748, Lua 5.4.9, LuaJIT 2.1 at 63c8f1a), wasmtime 51.0.0, rquickjs
-0.14.0 (QuickJS-ng 0.16.2), the `v8` crate 152.2.0 and Rhai 1.27.0, on Rust 1.97.0. Task: SCR-1 (#67).
+0.14.0 (QuickJS-ng 0.16.2), the `v8` crate 152.2.0 and Rhai 1.27.0, on Rust 1.97.0. Task: SCRIPT-1 (#67).
 
 The question: which engine runs the game modes in `resources/`, the code server owners and modders write
 (architecture.md, "Scripting")? The roadmap lists it as an open decision: "Luau (proposed), WASM or
