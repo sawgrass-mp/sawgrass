@@ -256,6 +256,33 @@ on 38,400 snapshots from a simulated city block, with quinn sending them to 2,04
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/packet-compression](docs/research/packet-compression/).
 
+## Interest management, measured
+
+Every tick the server finds what each of 4096 players can see. We measured the current grid against a dense grid,
+a quadtree, a BVH and ready-made trees (rstar, kiddo), with players spread out and in roleplay's worst case: 2,048
+players inside 60 m, and 512 standing on one spawn point.
+
+<p align="center"><img src="docs/assets/visibility.svg" alt="Tick p99 at 4096 players, one thread. Worst crowd, 2,048 players in 60 m: server today 95.5 ms; today's grid with bitset sets 25.2; dense grid 50 m with bitset sets 23.5; kiddo 31.1; quadtree 33.0; BVH 33.0; rstar 93.5. Spread over 3 km: 13.4, 8.7, 6.5, 8.4, 10.9, 9.9 and 13.2 ms" width="100%"></p>
+
+**We chose a dense 50 m grid rebuilt every tick, with visible sets stored as bitsets.**
+
+| All 4096 visible sets, one thread | 2,048 in 60 m | Spread over 3 km | Why or why not |
+|---|---:|---:|---|
+| Server today: hashed grid, sorted sets | 72.3 ms | 9.4 ms | Sorting and searching the sets is most of the crowd's cost. |
+| Today's grid + bitset sets | 15.8 ms | 6.7 ms | The bitsets alone fix the crowd; the grid is slower spread out. |
+| **Dense grid 50 m + bitset sets** | **16.0 ms** | **4.6 ms** | **Chosen**: fastest or tied everywhere, no failure path, no dependency. |
+| kiddo, quadtree, BVH + bitset sets | 20.0 to 23.8 ms | 6.4 to 8.3 ms | Slower in crowds; kiddo's mutable tree refused the spawn point. |
+| rstar + bitset sets | 52.3 ms | 11.2 ms | Built for rectangles and inserts, not points that all move. |
+
+- On four threads the dense grid took 7.5 ms (p99 16) in the 2,048 crowd, against 38 ms (p99 54) for today's code.
+- Every index matched brute force exactly on 70,320 viewer positions; only kiddo's `MutableKdTree` failed, on 33
+  or more players at one coordinate.
+- Caveats: simulated movement, players only (bitsets grow with the number of entity ids), one shared 4-core VM,
+  interest management alone, not the whole tick.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/visibility-index](docs/research/visibility-index/).
+
 ## How it is built
 
 Most of the code is written by AI coding agents working as a swarm, under rules that keep the work small,
