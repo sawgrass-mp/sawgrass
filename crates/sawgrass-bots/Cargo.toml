@@ -1,0 +1,24 @@
+[package]
+name = "sawgrass-bots"
+description = "Headless load-test bots that connect to a Sawgrass gateway like players."
+version.workspace = true
+edition.workspace = true
+# The tests' rcgen pulls in `time` 0.3.47, which needs Rust 1.88 (see the gateway's Cargo.toml).
+rust-version = "1.88"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes = "1"
+sawgrass-gateway = { path = "../sawgrass-gateway" }
+sawgrass-protocol = { path = "../sawgrass-protocol" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[dev-dependencies]
+# Self-signed certificates for the tests, as in the gateway's tests.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+sawgrass-server = { path = "../sawgrass-server" }
+
+[lints]
+workspace = true

@@ -2,9 +2,10 @@
 
 The language model never decides these; it only reviews the content. See docs/roadmap.md, "Review agent".
 
-    python3 -I tools/reviewer/policy.py PR_NUMBER [OWNER/REPO]
+    python3 -I tools/reviewer/policy.py [--check] PR_NUMBER [OWNER/REPO]
 
-prints the tier and the policy checks of a pull request, read through the `gh` command line tool.
+prints the tier and the policy checks of a pull request, read through the `gh` command line tool. With --check it
+exits 1 when any check fails (the `policy` CI job).
 """
 import fnmatch
 import json
@@ -97,7 +98,9 @@ def linked_issue(body):
 def checks(title, body, paths, changed_lines, issue, maintainer=False):
     """Policy checks as a list of (name, passed, detail). `issue` is the linked issue's JSON or None.
 
-    `maintainer` is True for a pull request from the maintainer's own account (see `maintainer_pr`).
+    `maintainer` is True for a pull request from the maintainer's own account (see `maintainer_pr`). It waives the
+    `ready` label, the `Model:` line and the tier 1 size limit (research write-ups run to thousands of lines); the
+    task ID and the linked task still apply.
     """
     labels = {label["name"] for label in (issue or {}).get("labels", [])}
     tier = pr_tier(paths)
@@ -109,8 +112,9 @@ def checks(title, body, paths, changed_lines, issue, maintainer=False):
         ("Model declared", maintainer or bool(MODEL.search(body or "")),
          "the maintainer's own pull request (declared once in AGENTS.md), or `Model: Claude Opus 5.5` or "
          "`Model: Claude Fable` in the description (declared, not verified)"),
-        ("Size", tier != 1 or changed_lines <= TIER1_MAX_LINES,
-         f"{changed_lines} changed lines, added plus deleted (tier 1 limit {TIER1_MAX_LINES})"),
+        ("Size", maintainer or tier != 1 or changed_lines <= TIER1_MAX_LINES,
+         f"{changed_lines} changed lines, added plus deleted (tier 1 limit {TIER1_MAX_LINES}, waived for the "
+         "maintainer's own pull request)"),
     ]
 
 
@@ -130,6 +134,8 @@ def _gh(path):
 
 
 def main(argv):
+    strict = argv[:1] == ["--check"]
+    argv = argv[1:] if strict else argv
     if len(argv) not in (1, 2) or not argv[0].isdigit():
         print(__doc__, file=sys.stderr)
         return 2
@@ -147,7 +153,13 @@ def main(argv):
     issue = _gh(f"{base}/issues/{number}") if number is not None else None
     if issue is not None and "pull_request" in issue:
         issue = None
-    print("\n".join(report(pr, files, issue)))
+    lines = report(pr, files, issue)
+    print("\n".join(lines))
+    if strict and any(line.startswith("- ❌") for line in lines):
+        for line in lines[1:]:
+            if line.startswith("- ❌"):
+                print(f"::error::{line[4:]}")
+        return 1
     return 0
 
 
