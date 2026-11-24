@@ -31,7 +31,9 @@ Settings → Branches → add a classic branch protection rule for `main`:
   maintainer's account and GitHub does not count an author's own approval, so a required approval would block all
   merges. Review happens through the review agent's comment and the maintainer's decision to merge.
 - Require these status checks to pass: `fmt`, `clippy`, `test`, `deny`, `scripts`, `no-game-data`, `task-id`,
-  `pr-guard`.
+  `pr-guard`, `policy`. The last two run on `pull_request_target` from the default branch, so they report on every
+  pull request, drafts included. `policy` does not re-run when the task is labelled `ready` later: edit the pull
+  request's description or re-run the job.
 - Require linear history; block force pushes and deletion.
 - Do not allow bypassing the above, including for administrators ("Do not allow bypassing the above settings").
 
@@ -90,6 +92,8 @@ author association, which an organization member or a read-only collaborator als
 - **`pr-guard`.** On such a pull request the linked task's scope counts without `ready` or a claim. The scope check
   itself stays: a protected path still fails unless the task's `### Scope` names it.
 - **Model.** Such a pull request needs no `Model:` line; AGENTS.md declares the model for the maintainer's account.
+- **Size.** Such a pull request has no tier 1 size limit in the `policy` check, so research write-ups and
+  measurement code under `docs/` can be merged in one piece. The review still reads every line.
 - **`protected` label.** The same job labels every open pull request, from any account, `protected` while it
   changes a tier 3 path (CI, rules, scripts, the reviewer, client, launcher), so the pull request list shows which
   ones to read closely before merging.

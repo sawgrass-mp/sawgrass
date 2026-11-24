@@ -1,4 +1,6 @@
 """Unit tests for tools/reviewer/policy.py. Standard library only: python3 -I tests/test_reviewer_policy.py"""
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -85,6 +87,12 @@ class Checks(unittest.TestCase):
         self.assertTrue(rows["Model declared"])
         self.assertTrue(rows["Task is `ready`"])
         self.assertFalse(self.rows(issue=None, maintainer=True)["Linked task"])
+        self.assertFalse(self.rows(title="Fix typo", maintainer=True)["Task ID in title"])
+
+    def test_maintainer_size_waived(self):
+        big = policy.TIER1_MAX_LINES * 10
+        self.assertFalse(self.rows(paths=["docs/research/r.md"], changed_lines=big)["Size"])
+        self.assertTrue(self.rows(paths=["docs/research/r.md"], changed_lines=big, maintainer=True)["Size"])
 
     def test_maintainer_pr(self):
         repo = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
@@ -115,6 +123,26 @@ class Report(unittest.TestCase):
         lines = policy.report({"title": "x", "body": None}, [], None)
         self.assertEqual(lines[0], "Tier 3")
         self.assertEqual(sum(line.startswith("- ❌") for line in lines), 4)
+
+
+class Check(unittest.TestCase):
+    def run_main(self, args, body):
+        pr = {"title": "DOC-1: Fix typo", "body": body}
+        files = [{"filename": "docs/a.md", "additions": 1, "deletions": 0}]
+        answers = {"repos/o/r/pulls/5": pr, "repos/o/r/pulls/5/files?per_page=100&page=1": files,
+                   "repos/o/r/issues/1": {"labels": [{"name": "ready"}]}}
+        real, policy._gh = policy._gh, answers.__getitem__
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return policy.main(args)
+        finally:
+            policy._gh = real
+
+    def test_exit_codes(self):
+        good, bad = "Closes #1\nModel: Claude Fable", "Closes #1"
+        self.assertEqual(self.run_main(["--check", "5", "o/r"], good), 0)
+        self.assertEqual(self.run_main(["--check", "5", "o/r"], bad), 1)
+        self.assertEqual(self.run_main(["5", "o/r"], bad), 0)
 
 
 if __name__ == "__main__":
