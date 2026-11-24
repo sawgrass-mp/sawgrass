@@ -16,6 +16,11 @@
 //! wake-ups) and allocates no buffer per datagram. At most [`OUTBOX_TICKS`] batches wait for the gateway; if it
 //! falls further behind, the tick's snapshots are dropped and counted rather than queued.
 //!
+//! Every player takes a dense [`Slot`] when the tick thread sees it join (task IM-4). The slot indexes the
+//! per-player arrays here (players, wire states) and the ids in the grid and the visible sets; its
+//! [`Slot::wire_id`] is the player's entity id in `Joined` and in snapshots. A freed slot is reused only after
+//! the tick that removed it has recomputed every visible set (see [`crate::slots`]).
+//!
 //! A player's entity is spawned with a [`NetId`] and a [`PlayerState`]; the state is the last one the client
 //! sent, applied as is. Validating movement (speed limits, teleports) belongs to the authority work and is not
 //! done here.
@@ -36,6 +41,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
 use crate::interest::{EntityId, Point, SpatialGrid, VisibilityChanges, VisibilityConfig, VisibleSet};
+use crate::slots::{Slot, Slots};
 
 /// The network id of a player's entity, the `id` in snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,11 +153,12 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         inbound: inbound_rx,
         traffic,
         players: Vec::new(),
-        slots: std::collections::HashMap::new(),
+        slots: Slots::new(),
+        by_connection: std::collections::HashMap::new(),
         grid: SpatialGrid::default(),
         visibility: VisibilityConfig::default(),
         changes: VisibilityChanges::default(),
-        states: std::collections::HashMap::new(),
+        states: Vec::new(),
         scratch: Vec::new(),
         packet: Vec::new(),
         arena: BytesMut::new(),
@@ -246,7 +253,7 @@ async fn serve(
 /// One connected player, as the tick thread sees it.
 #[derive(Debug)]
 struct Player {
-    id: u32,
+    slot: Slot,
     entity: Option<Entity>,
     sender: Datagrams,
     events: tokio_mpsc::Sender<Vec<u8>>,
@@ -260,14 +267,16 @@ struct Player {
 pub struct Players {
     inbound: mpsc::Receiver<Inbound>,
     traffic: Arc<Traffic>,
-    players: Vec<Player>,
-    /// Index into `players` by id.
-    slots: std::collections::HashMap<u32, usize>,
+    /// Connected players by slot index.
+    players: Vec<Option<Player>>,
+    slots: Slots,
+    /// Slot of each connection, by the connection's id; used only when a connection leaves.
+    by_connection: std::collections::HashMap<u32, Slot>,
     grid: SpatialGrid,
     visibility: VisibilityConfig,
     changes: VisibilityChanges,
-    /// This tick's wire state of every placed player, by id.
-    states: std::collections::HashMap<u32, EntityState>,
+    /// The wire state of every placed player, by slot index.
+    states: Vec<Option<EntityState>>,
     scratch: Vec<EntityState>,
     /// One datagram being encoded, before it is copied into `arena`.
     packet: Vec<u8>,
@@ -295,13 +304,13 @@ impl Players {
     /// Players connected.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.players.len()
+        self.by_connection.len()
     }
 
     /// Whether no player is connected.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.players.is_empty()
+        self.by_connection.is_empty()
     }
 
     /// Applies what arrived since the last tick, then sends every player its snapshot for `info.tick`.
@@ -309,6 +318,8 @@ impl Players {
         self.apply_inbound(world, info);
         self.apply_states(world);
         self.send_snapshots(info.tick as u32);
+        // Every visible set has been recomputed without the players who left: their slots may be reused.
+        self.slots.release();
         self.send_stats();
     }
 
@@ -321,15 +332,27 @@ impl Players {
                     events,
                     inbox,
                 } => {
+                    let Some(slot) = self.slots.alloc() else {
+                        sender.close();
+                        continue;
+                    };
                     let tick_hz =
                         (std::time::Duration::from_secs(1).as_nanos() / info.dt.as_nanos().max(1)) as u16;
                     let _ = events.try_send(event_packet(
-                        &ServerEvent::Joined { entity: id, tick_hz },
+                        &ServerEvent::Joined {
+                            entity: slot.wire_id(),
+                            tick_hz,
+                        },
                         info.tick,
                     ));
-                    self.slots.insert(id, self.players.len());
-                    self.players.push(Player {
-                        id,
+                    let index = slot.index as usize;
+                    if self.players.len() <= index {
+                        self.players.resize_with(index + 1, || None);
+                        self.states.resize(index + 1, None);
+                    }
+                    self.by_connection.insert(id, slot);
+                    self.players[index] = Some(Player {
+                        slot,
                         entity: None,
                         sender,
                         events,
@@ -339,18 +362,16 @@ impl Players {
                     });
                 }
                 Inbound::Leave { id } => {
-                    let Some(slot) = self.slots.remove(&id) else {
+                    let Some(slot) = self.by_connection.remove(&id) else {
                         continue;
                     };
-                    let player = self.players.swap_remove(slot);
-                    if let Some(moved) = self.players.get(slot) {
-                        self.slots.insert(moved.id, slot);
-                    }
-                    if let Some(entity) = player.entity {
+                    let index = slot.index as usize;
+                    if let Some(entity) = self.players[index].take().and_then(|p| p.entity) {
                         let _ = world.despawn(entity);
                     }
-                    self.grid.remove(EntityId(id));
-                    self.states.remove(&id);
+                    self.states[index] = None;
+                    self.grid.remove(EntityId(slot.index));
+                    self.slots.free(slot);
                 }
             }
         }
@@ -358,11 +379,11 @@ impl Players {
 
     /// Takes each player's latest state, if a new one arrived, into the world, the grid and the wire states.
     fn apply_states(&mut self, world: &mut World) {
-        for player in &mut self.players {
+        for player in self.players.iter_mut().flatten() {
             let Some(state) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
                 continue;
             };
-            let id = player.id;
+            let id = player.slot.wire_id();
             match player.entity {
                 Some(entity) => {
                     if let Ok(mut current) = world.get::<&mut PlayerState>(entity) {
@@ -372,29 +393,26 @@ impl Players {
                 None => player.entity = Some(world.spawn((NetId(id), PlayerState(state)))),
             }
             let [x, y, _] = state.position.to_metres();
-            self.grid.upsert(EntityId(id), Point::new(x, y));
-            self.states.insert(
+            self.grid.upsert(EntityId(player.slot.index), Point::new(x, y));
+            self.states[player.slot.index as usize] = Some(EntityState {
                 id,
-                EntityState {
-                    id,
-                    position: state.position,
-                    velocity: state.velocity,
-                    rotation: state.rotation,
-                },
-            );
+                position: state.position,
+                velocity: state.velocity,
+                rotation: state.rotation,
+            });
         }
     }
 
     fn send_snapshots(&mut self, tick: u32) {
         let mut batch = self.recycle.try_recv().unwrap_or_default();
-        for player in &mut self.players {
-            let Some(own) = self.states.get(&player.id) else {
+        for player in self.players.iter_mut().flatten() {
+            let Some(own) = &self.states[player.slot.index as usize] else {
                 continue;
             };
             let [x, y, _] = own.position.to_metres();
             player.visible.update(
                 &self.grid,
-                Some(EntityId(player.id)),
+                Some(EntityId(player.slot.index)),
                 Point::new(x, y),
                 &self.visibility,
                 &mut self.changes,
@@ -405,7 +423,7 @@ impl Players {
                     .visible
                     .members()
                     .iter()
-                    .filter_map(|id| self.states.get(&id.0)),
+                    .filter_map(|id| self.states[id.0 as usize].as_ref()),
             );
             let sender = batch.senders.len() as u32;
             batch.senders.push(player.sender.clone());
@@ -442,6 +460,7 @@ impl Players {
         for player in self
             .players
             .iter()
+            .flatten()
             .filter(|p| p.inbox.wants_stats.load(Ordering::Relaxed))
         {
             let _ = player.events.try_send(packet.clone());
