@@ -17,6 +17,7 @@
   <a href="#progress">Progress</a> ·
   <a href="#how-it-fits-together">Architecture</a> ·
   <a href="#storage-measured">Storage</a> ·
+  <a href="#network-transport-measured">Transport</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#contributing">Contributing</a>
 </p>
@@ -151,6 +152,36 @@ queries.
 
 Full results, crash tests, licences, the reasoning for each option and how to reproduce:
 [docs/research](docs/research/spacetimedb-vs-postgresql/).
+
+## Network transport, measured
+
+Players connect to gateways over the network, so the transport decides how fast an event arrives when packets are
+lost, and how much CPU 4096 connections cost. We ran the same server and clients over five transports, through the
+same lossy link, and with 1,000 and 4,096 players at 20 Hz.
+
+<p align="center"><img src="docs/assets/transport.svg" alt="Reliable event p99 at 1, 5 and 10 percent loss: quinn 102, 151 and 202 ms; GameNetworkingSockets 161, 221, 313; ENet 100, 151, 1096; renet 341, 643, 844. Server CPU with 4096 players: quinn 1.94 cores, GameNetworkingSockets 1.32 and fell behind, ENet 0.77, renet 0.98 and fell behind, plain UDP 0.46" width="100%"></p>
+
+**We keep QUIC through quinn**, as [docs/architecture.md](docs/architecture.md) planned: unreliable datagrams for
+movement and snapshots, streams for reliable events.
+
+| Transport | Encrypted | Reliable event p99, 1% / 5% / 10% loss | Server CPU, 4,096 players | Why or why not |
+|---|---|---:|---:|---|
+| **QUIC (quinn)** | **yes** | **102 / 151 / 202 ms** | **1.94 cores** | **Chosen**: best under loss, encrypted, uses several cores, no connection limit. |
+| GameNetworkingSockets | yes | 161 / 221 / 313 ms | 1.32, fell behind | Slower under loss; 1.2 GB and dropped connections near 4,096; C++ build. |
+| ENet | no | 100 / 151 / 1,096 ms | 0.77 | Cheap, but no encryption, 4,095 peers per host, slow at high loss. |
+| renet | yes | 341 / 643 / 844 ms | 0.98, fell behind | 300 ms resend by default; one thread was full at 1,000 players. |
+| Plain UDP | no | none | 0.46 | The floor: reliability and encryption would be ours to build. |
+
+- Every transport answered in under half a millisecond without loss, so latency does not separate them; behaviour
+  under loss and CPU do.
+- quinn's price is CPU, about four times plain UDP per player: about 2 cores of this VM for 4096 players, spread
+  over the 3 to 4 gateways the architecture plans.
+- Caveats: one 4-core VM with server and clients together; loss from our own relay (random, no bursts); single
+  runs; default settings for every library; renet and GNS fell behind at 4,096 while the load generator was also
+  near its limit.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/network-transport](docs/research/network-transport/).
 
 ## How it is built
 
