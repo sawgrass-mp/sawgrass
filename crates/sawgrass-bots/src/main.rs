@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sawgrass_bots::record::Recorder;
 use sawgrass_bots::report::{self, Context};
 use sawgrass_bots::stats::Counters;
 use sawgrass_bots::walker::Area;
@@ -20,7 +21,7 @@ const USAGE: &str = "usage:
   sawgrass-bots gen-cert --out DIR [--name NAME]
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
                     [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
-                    [--report-every SECS] [--name NAME]";
+                    [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]";
 
 struct RunArgs {
     server: SocketAddr,
@@ -33,6 +34,8 @@ struct RunArgs {
     area: Area,
     threads: Option<usize>,
     report_every: Duration,
+    record: Option<PathBuf>,
+    record_bots: u64,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, value: Option<String>) -> Result<T, String>
@@ -58,6 +61,8 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
         area: Area::default(),
         threads: None,
         report_every: Duration::from_secs(10),
+        record: None,
+        record_bots: 32,
     };
     while let Some(flag) = args.next() {
         let value = args.next();
@@ -74,6 +79,8 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--seed" => run.area.seed = parse(&flag, value)?,
             "--threads" => run.threads = Some(parse::<usize>(&flag, value)?.max(1)),
             "--report-every" => run.report_every = Duration::from_secs(parse::<u64>(&flag, value)?.max(1)),
+            "--record" => run.record = Some(PathBuf::from(value.ok_or("--record needs a value")?)),
+            "--record-bots" => run.record_bots = parse(&flag, value)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -114,12 +121,19 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
     roots
         .add(CertificateDer::from(der))
         .map_err(|e| format!("{}: {e}", args.cert.display()))?;
+    let record = match &args.record {
+        Some(path) => Some(Arc::new(
+            Recorder::create(path, args.record_bots).map_err(|e| format!("{}: {e}", path.display()))?,
+        )),
+        None => None,
+    };
     let config = Arc::new(BotConfig {
         server: args.server,
         server_name: args.name.clone(),
         roots,
         send_hz: args.send_hz,
         area: args.area,
+        record: record.clone(),
     });
     let counters = Arc::new(Counters::default());
     let ctx = Context {
@@ -186,6 +200,9 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         println!("first connection error: {error}");
     }
     let _ = tokio::time::timeout(Duration::from_secs(5), spawner).await;
+    if let (Some(recorder), Some(path)) = (&record, &args.record) {
+        recorder.flush().map_err(|e| format!("{}: {e}", path.display()))?;
+    }
     Ok(())
 }
 

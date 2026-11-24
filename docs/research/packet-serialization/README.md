@@ -241,6 +241,24 @@ The protocol version check at connection (`PROTOCOL_VERSION`) stays as it is.
   encoder, is the first thing to try.
 - Clients in another language need to read packets. Then FlatBuffers or Protocol Buffers.
 
+## Checked on the load-test bots
+
+The server still sends the current hand-written format, so postcard could not run in it. Instead the snapshots
+that 32 load-test bots received from the real server, 1,000 bots over a 1.5 km square, were recorded and
+re-encoded with postcard by the NET-5 harness (see
+[packet compression, Checked on the load-test bots](../packet-compression/README.md#checked-on-the-load-test-bots)
+and [load-test-bots](../load-test-bots/README.md)). 35,164 snapshots of 76 entities on average:
+
+| | Current hand-written, as received | postcard, whole snapshot |
+|---|---:|---:|
+| Bytes per snapshot | 1,772 | 1,466 (17% less) |
+| Encode / decode | not timed | 2.8 / 1.9 µs |
+
+**The choice holds.** postcard saved 17% of the bytes on the server's real visible sets and the bots' movement,
+against 14% on the simulated snapshot above. The hand-written figure counts the 7-byte header of each datagram, and
+a snapshot averaged 1.5 datagrams, so about 4 bytes of the difference are headers. Only the snapshot was checked:
+the bots send no chat or script events, and the client state is the same 19 bytes in either run.
+
 ## Licences
 
 Checked against the manifests and licence files of the versions used. Sawgrass is AGPL-3.0, and #44 proposes MIT
