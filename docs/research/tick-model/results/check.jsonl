@@ -1,0 +1,72 @@
+{"check": "current", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "spread", "threads": 1, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "spread", "threads": 2, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "spread", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1838, "checksum": "a4215f75dd99bfe3", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "spread", "threads": 4, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "city", "threads": 1, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "city", "threads": 2, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "city", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "1243566c47e2e756", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "city", "threads": 4, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 1, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "crowd", "threads": 1, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 2, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "crowd", "threads": 2, "at": "2026-11-24T18:00:44"}
+{"check": "current", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "soa", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "soa-rayon", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "zones", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "hecs-rayon", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check": "bevy-st", "scenario": "crowd", "players": 2048, "rate_hz": 30, "threads": 4, "ticks": 300, "transfers": 1870, "checksum": "be5016e3493147e3", "at": "2026-11-24T18:00:44"}
+{"check_exit": 0, "scenario": "crowd", "threads": 4, "at": "2026-11-24T18:00:44"}
