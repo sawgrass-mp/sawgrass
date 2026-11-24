@@ -1,0 +1,20 @@
+[package]
+name = "visibility-index-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+# Standalone: not part of the Sawgrass workspace, so its dependencies never reach the project's graph.
+[workspace]
+
+[dependencies]
+sawgrass-server = { path = "../../../../crates/sawgrass-server" }
+rstar = "0.14"
+# No rayon and no fixed-point types: the harness runs its own threads and uses f32.
+kiddo = { version = "6.3", default-features = false }
+# Counts heap bytes per structure (a wrapper around the system allocator).
+cap = "0.1"
+
+[profile.release]
+debug = "line-tables-only"
