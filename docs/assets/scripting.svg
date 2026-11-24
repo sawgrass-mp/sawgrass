@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="482" viewBox="0 0 900 482" role="img" aria-label="Scripting engines. WebAssembly (wasmtime): 0.8 ms, stops an endless loop, caps memory; JavaScript, V8: 1.0 ms, stops an endless loop, caps memory; LuaJIT: 1.2 ms, does not stop an endless loop, caps memory; Luau, native code: 6.5 ms, stops an endless loop, caps memory; Luau, interpreter: 15.8 ms, stops an endless loop, caps memory; LuaJIT, JIT off: 11.0 ms, stops an endless loop, caps memory; Lua 5.4: 26.3 ms, stops an endless loop, caps memory; JavaScript, QuickJS-ng: 37.7 ms, stops an endless loop, caps memory; Rhai: 282.5 ms, stops an endless loop, does not cap memory">
+<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#14e1f0"/><stop offset="1" stop-color="#7cf000"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:13px;fill:#8fb3a6}.l{font-size:15px;font-weight:600;fill:#e8fff4}.n{font-size:12px;fill:#7d9a90}.p{font-size:14px;font-weight:700;fill:#a6ff4d}.v{font-size:14px;font-weight:600;fill:#cfe9df}.ok{font-size:16px;font-weight:700;fill:#a6ff4d}.bad{font-size:16px;font-weight:700;fill:#ff6b6b}</style>
+<rect width="900" height="482" rx="16" fill="#060a08"/>
+<rect x="1" y="1" width="898" height="480" rx="15" fill="none" stroke="#1d3b2f"/>
+<text x="28" y="44" class="h">Script time per tick for 4,096 players</text>
+<text x="28" y="68" class="s">One zone check per player (64 zones) on one core, limits on; log scale, the dashed line is the whole 50 ms tick.</text>
+<text x="872" y="94" class="s" text-anchor="end">stops loop · caps memory</text>
+<text x="28" y="124" class="l">WebAssembly (wasmtime)</text>
+<text x="28" y="141" class="n">guest in Rust, compiled ahead of time</text>
+<rect x="330" y="116" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="116" width="19.4" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="127" class="v">0.8 ms</text>
+<text x="780" y="128" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="128" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="164" class="l">JavaScript, V8</text>
+<text x="28" y="181" class="n">JIT; 1.5 MB per isolate</text>
+<rect x="330" y="156" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="156" width="33.9" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="167" class="v">1.0 ms</text>
+<text x="780" y="168" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="168" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="204" class="l">LuaJIT</text>
+<text x="28" y="221" class="n">JIT on: an endless loop is never stopped</text>
+<rect x="330" y="196" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="196" width="43.6" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="207" class="v">1.2 ms</text>
+<text x="780" y="208" class="bad" text-anchor="middle">✗</text>
+<text x="842" y="208" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="244" class="l">Luau, native code</text>
+<text x="28" y="261" class="n">recommended: mlua with luau-jit</text>
+<rect x="330" y="236" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="236" width="122.7" height="12" rx="6" fill="url(#g)"/>
+<text x="672" y="247" class="p">6.5 ms</text>
+<text x="780" y="248" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="248" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="284" class="l">Luau, interpreter</text>
+<text x="28" y="301" class="n">mlua, the roadmap's proposal</text>
+<rect x="330" y="276" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="276" width="165.1" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="287" class="v">15.8 ms</text>
+<text x="780" y="288" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="288" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="324" class="l">LuaJIT, JIT off</text>
+<text x="28" y="341" class="n">what makes LuaJIT stoppable</text>
+<rect x="330" y="316" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="316" width="147.8" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="327" class="v">11.0 ms</text>
+<text x="780" y="328" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="328" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="364" class="l">Lua 5.4</text>
+<text x="28" y="381" class="n">mlua</text>
+<rect x="330" y="356" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="356" width="189.3" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="367" class="v">26.3 ms</text>
+<text x="780" y="368" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="368" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="404" class="l">JavaScript, QuickJS-ng</text>
+<text x="28" y="421" class="n">rquickjs</text>
+<rect x="330" y="396" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="396" width="206.5" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="407" class="v">37.7 ms</text>
+<text x="780" y="408" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="408" class="ok" text-anchor="middle">✓</text>
+<text x="28" y="444" class="l">Rhai</text>
+<text x="28" y="461" class="n">pure Rust; no total memory cap</text>
+<rect x="330" y="436" width="330" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="436" width="302.7" height="12" rx="6" fill="#3f8f7a"/>
+<text x="672" y="447" class="v">282.5 ms</text>
+<text x="780" y="448" class="ok" text-anchor="middle">✓</text>
+<text x="842" y="448" class="bad" text-anchor="middle">✗</text>
+<line x1="550.0" x2="550.0" y1="110" y2="454" stroke="#a6ff4d" stroke-dasharray="4 4" stroke-width="1.5"/>
+<text x="550.0" y="106" class="n" text-anchor="middle">50 ms tick</text>
+</svg>
