@@ -130,12 +130,67 @@ pub fn process_rss() -> u64 {
         .map_or(0, |kb| kb * 1024)
 }
 
+/// CPU time of each thread of this process, to find the busiest one: a thread near 1.0 core is saturated even
+/// when the process total looks moderate.
+#[derive(Debug, Default)]
+pub struct ThreadCpu {
+    last: std::collections::HashMap<String, Duration>,
+}
+
+impl ThreadCpu {
+    fn sample() -> std::collections::HashMap<String, Duration> {
+        let mut out = std::collections::HashMap::new();
+        let Ok(dir) = fs::read_dir("/proc/self/task") else {
+            return out;
+        };
+        for entry in dir.flatten() {
+            let stat = fs::read_to_string(entry.path().join("stat")).unwrap_or_default();
+            let rest = stat.rsplit_once(')').map(|(_, r)| r).unwrap_or("");
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            let ticks: u64 = f.get(11).and_then(|v| v.parse().ok()).unwrap_or(0)
+                + f.get(12).and_then(|v| v.parse().ok()).unwrap_or(0);
+            out.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                Duration::from_millis(ticks * 10),
+            );
+        }
+        out
+    }
+
+    /// CPU time the calling thread has used so far.
+    pub fn current() -> Duration {
+        let stat = fs::read_to_string("/proc/thread-self/stat").unwrap_or_default();
+        let rest = stat.rsplit_once(')').map(|(_, r)| r).unwrap_or("");
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        let ticks: u64 = f.get(11).and_then(|v| v.parse().ok()).unwrap_or(0)
+            + f.get(12).and_then(|v| v.parse().ok()).unwrap_or(0);
+        Duration::from_millis(ticks * 10)
+    }
+
+    pub fn new() -> Self {
+        Self { last: Self::sample() }
+    }
+
+    /// Cores used by the busiest thread since the last call, over `elapsed`.
+    pub fn busiest(&mut self, elapsed: Duration) -> f64 {
+        let now = Self::sample();
+        let max = now
+            .iter()
+            .map(|(tid, t)| t.saturating_sub(self.last.get(tid).copied().unwrap_or_default()))
+            .max()
+            .unwrap_or_default();
+        self.last = now;
+        max.as_secs_f64() / elapsed.as_secs_f64().max(1e-9)
+    }
+}
+
 /// Prints a server report line every `every`: connections, CPU, memory and message rates.
 #[derive(Debug)]
 pub struct Reporter {
     every: Duration,
     last: Instant,
     last_cpu: Duration,
+    threads: ThreadCpu,
     /// Messages received since the last report.
     pub received: u64,
     /// Messages sent since the last report.
@@ -148,6 +203,7 @@ impl Reporter {
             every,
             last: Instant::now(),
             last_cpu: process_cpu(),
+            threads: ThreadCpu::new(),
             received: 0,
             sent: 0,
         }
@@ -162,8 +218,9 @@ impl Reporter {
         let cpu = process_cpu();
         let used = (cpu - self.last_cpu).as_secs_f64() / elapsed.as_secs_f64();
         let secs = elapsed.as_secs_f64();
+        let busiest = self.threads.busiest(elapsed);
         println!(
-            "report conns={connections} cpu_cores={used:.3} rss_mb={:.1} recv_per_s={:.0} sent_per_s={:.0}",
+            "report conns={connections} cpu_cores={used:.3} busiest_thread_cores={busiest:.3} rss_mb={:.1} recv_per_s={:.0} sent_per_s={:.0}",
             process_rss() as f64 / 1048576.0,
             self.received as f64 / secs,
             self.sent as f64 / secs,
@@ -242,22 +299,36 @@ pub struct LoadTotals {
     pub snapshots: u64,
     pub events_back: u64,
     pub events_sent: u64,
+    /// CPU time of the busiest client thread, read by each thread itself before it exits.
+    pub thread_cpu: Duration,
 }
 
 impl LoadTotals {
     pub fn add(&mut self, o: Self) {
+        self.thread_cpu = self.thread_cpu.max(o.thread_cpu);
         self.connected += o.connected;
         self.snapshots += o.snapshots;
         self.events_back += o.events_back;
         self.events_sent += o.events_sent;
     }
 
-    pub fn report(&self, clients: usize, measured: Duration, started: Instant, cpu0: Duration) {
+    pub fn report(
+        &self,
+        clients: usize,
+        measured: Duration,
+        started: Instant,
+        cpu0: Duration,
+        threads: &mut ThreadCpu,
+    ) {
+        // Threads that already exited are gone from /proc, so also take what each one read about itself.
+        let busiest = threads
+            .busiest(started.elapsed())
+            .max(self.thread_cpu.as_secs_f64() / started.elapsed().as_secs_f64().max(1e-9));
         let secs = measured.as_secs_f64();
         let expected = clients as f64 * f64::from(TICK_HZ) * SNAPSHOTS_PER_TICK as f64 * secs;
         let cpu = (process_cpu() - cpu0).as_secs_f64() / started.elapsed().as_secs_f64();
         println!(
-            "load clients={clients} connected={} snapshots_per_client_s={:.1} snapshot_delivery_pct={:.1} events_sent={} events_back={} client_cpu_cores={cpu:.2}",
+            "load clients={clients} connected={} snapshots_per_client_s={:.1} snapshot_delivery_pct={:.1} events_sent={} events_back={} client_cpu_cores={cpu:.2} client_busiest_thread_cores={busiest:.2}",
             self.connected,
             self.snapshots as f64 / clients.max(1) as f64 / secs,
             100.0 * self.snapshots as f64 / expected.max(1.0),

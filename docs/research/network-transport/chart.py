@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 OUT = HERE.parents[2] / "docs" / "assets" / "transport.svg"
 
 ROWS = [
-    ("quinn", "QUIC (quinn)", "chosen: encrypted, uses every core"),
+    ("quinn", "QUIC (quinn)", "chosen: encrypted, multi-threaded"),
     ("gns", "GameNetworkingSockets", "encrypted; C++ library"),
     ("enet", "ENet (rusty_enet)", "no encryption; 4,095 per host"),
     ("renet", "renet (netcode)", "encrypted; 1,024 per server"),
@@ -61,19 +61,20 @@ def main():
         y += 48
 
     y += 18
-    parts += head("Server CPU with 4,096 players", "Cores used by the server at 20 Hz: 2 x 1,000-byte snapshots down, 64-byte state up, one event a second. Lower is better.")
+    parts += head("Server CPU with 1,000 players", "Cores used by the server at 20 Hz: 2 x 1,000-byte snapshots down, 64-byte state up, one event a second. Lower is better.")
     y += 62
-    top = 2.0
+    top = 1.2
     for key, label, _ in ROWS:
-        r = cpu[(key, 4096)]
+        r = cpu[(key, 1000)]
+        big = cpu[(key, 4096)]
         chosen = key == "quinn"
         v = r["server_cpu_cores"]
-        ok = r["snapshot_delivery_pct"] >= 99 and r["server_conns"] >= 4096
-        note = "kept up" if ok else f"fell behind: {r['snapshot_delivery_pct']:.0f}% of snapshots delivered"
+        held = big["all_connected"] and big["server_recv_per_s"] >= 0.98 * big["expected_recv_per_s"] and big["snapshot_delivery_pct"] >= 99
+        note = f"4,096 players: {big['server_cpu_cores']:.2f} cores, all delivered" if held else "4,096 players: not established on this 4-core VM"
         parts.append(f'<text x="28" y="{y + 8}" class="l">{esc(label)}</text>')
         parts.append(f'<text x="28" y="{y + 25}" class="n">{esc(note)}</text>')
         w = v / top * bar_w
-        fill = "url(#g)" if chosen else ("#3f8f7a" if ok else "#6b4f2a")
+        fill = "url(#g)" if chosen else "#3f8f7a"
         parts.append(f'<rect x="{x0}" y="{y}" width="{bar_w}" height="12" rx="6" fill="#13201b"/>')
         parts.append(f'<rect x="{x0}" y="{y}" width="{w:.1f}" height="12" rx="6" fill="{fill}"/>')
         cls = "p" if chosen else "v"
@@ -83,7 +84,7 @@ def main():
 
     label = "; ".join(
         f"{l}: p99 " + ("n/a" if k == "udp" else "/".join(f"{loss[(k, 'reliable', p)]['p99_ms']:.0f}" for p in [1, 5, 10]) + " ms")
-        + f", {cpu[(k, 4096)]['server_cpu_cores']:.2f} cores"
+        + f", {cpu[(k, 1000)]['server_cpu_cores']:.2f} cores at 1,000 players"
         for k, l, _ in ROWS
     )
     svg = [

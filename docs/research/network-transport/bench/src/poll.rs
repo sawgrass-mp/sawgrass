@@ -151,6 +151,7 @@ pub fn ping<C: PollClient>(server: SocketAddr, reliable: bool, hz: u32, secs: u6
 pub fn load<C: PollClient>(server: SocketAddr, clients: usize, threads: usize, secs: u64) {
     let started = Instant::now();
     let cpu0 = process_cpu();
+    let mut thread_cpu = ThreadCpu::new();
     let measure_from = std::sync::Arc::new(std::sync::OnceLock::<Instant>::new());
     let connected = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut handles = Vec::new();
@@ -213,6 +214,7 @@ pub fn load<C: PollClient>(server: SocketAddr, clients: usize, threads: usize, s
                 }
                 if end.is_some_and(|e| Instant::now() >= e) {
                     totals.connected = cs.iter().filter(|(c, _)| c.connected()).count() as u64;
+                    totals.thread_cpu = ThreadCpu::current();
                     return totals;
                 }
                 if measure_from.get().is_none()
@@ -242,5 +244,5 @@ pub fn load<C: PollClient>(server: SocketAddr, clients: usize, threads: usize, s
     for h in handles {
         totals.add(h.join().expect("client thread"));
     }
-    totals.report(clients, Duration::from_secs(secs), started, cpu0);
+    totals.report(clients, Duration::from_secs(secs), started, cpu0, &mut thread_cpu);
 }

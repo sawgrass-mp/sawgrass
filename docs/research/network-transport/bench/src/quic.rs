@@ -86,6 +86,7 @@ pub fn serve(addr: SocketAddr, load: bool, threads: usize) {
             tokio::spawn(async move {
                 let mut last = Instant::now();
                 let mut last_cpu = process_cpu();
+                let mut thread_cpu = ThreadCpu::new();
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     let secs = last.elapsed().as_secs_f64();
@@ -96,8 +97,9 @@ pub fn serve(addr: SocketAddr, load: bool, threads: usize) {
                         c.len()
                     };
                     println!(
-                        "report conns={n} cpu_cores={:.3} rss_mb={:.1} recv_per_s={:.0} sent_per_s={:.0}",
+                        "report conns={n} cpu_cores={:.3} busiest_thread_cores={:.3} rss_mb={:.1} recv_per_s={:.0} sent_per_s={:.0}",
                         (cpu - last_cpu).as_secs_f64() / secs,
+                        thread_cpu.busiest(last.elapsed()),
                         process_rss() as f64 / 1048576.0,
                         counters.received.swap(0, Relaxed) as f64 / secs,
                         counters.sent.swap(0, Relaxed) as f64 / secs,
@@ -216,6 +218,7 @@ pub fn ping(server: SocketAddr, reliable: bool, hz: u32, secs: u64, label: &str)
 pub fn load(server: SocketAddr, clients: usize, threads: usize, secs: u64) {
     let started = Instant::now();
     let cpu0 = process_cpu();
+    let mut thread_cpu = ThreadCpu::new();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()
@@ -312,7 +315,8 @@ pub fn load(server: SocketAddr, clients: usize, threads: usize, secs: u64) {
             snapshots: snapshots.load(Relaxed),
             events_back: events_back.load(Relaxed),
             events_sent: events_sent.load(Relaxed),
+            thread_cpu: Duration::ZERO,
         };
-        totals.report(clients, Duration::from_secs(secs), started, cpu0);
+        totals.report(clients, Duration::from_secs(secs), started, cpu0, &mut thread_cpu);
     });
 }

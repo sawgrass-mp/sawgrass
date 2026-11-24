@@ -1,6 +1,6 @@
 """Runs the NET-3 transport measurements and appends one JSON line per run to results/<suite>.jsonl.
 
-Usage: python3 -I run.py latency|loss|load [transport ...]
+Usage: python3 -I run.py latency|loss|load [transport ...] [--sizes 1000,4096]
 
 Starts the server, the lossy relay and the client from bench/target*/release/transport-bench with fixed
 arguments (no shell), pins them to CPUs so the server never shares a core with the load generator, and parses
@@ -147,7 +147,14 @@ def load(kinds, sizes=(1000, 4096), secs=30):
             server_args = [binary(kind), "server", kind, "127.0.0.1:7300", "load"]
             if kind == "quinn":
                 server_args.append(str(len(SERVER_CPUS)))
-            server = Proc(server_args, SERVER_CPUS, env)
+            # renet: one server process per netcode server (1,024 clients each), so each gets its own thread.
+            if kind == "renet":
+                servers = [
+                    Proc([binary(kind), "server", kind, f"127.0.0.1:{7300 + i}", "load"], SERVER_CPUS, {"SHARDS": "1"})
+                    for i in range(shards)
+                ]
+            else:
+                servers = [Proc(server_args, SERVER_CPUS, env)]
             # GNS runs every connection of a process on one service thread, so its generator is split in two.
             procs = 2 if kind == "gns" and n > 2048 else 1
             try:
@@ -174,11 +181,18 @@ def load(kinds, sizes=(1000, 4096), secs=30):
                     continue
                 t0 = started[-1] + 5 + 5
                 t1 = started[-1] + 5 + secs
-                reports = [fields(l) for t, l in server.lines if l.startswith("report ") and t0 <= t <= t1]
-                if not reports:
+                per_server = [
+                    [fields(l) for t, l in srv.lines if l.startswith("report ") and t0 <= t <= t1] for srv in servers
+                ]
+                if not all(per_server):
                     continue
-                avg = lambda k: sum(r[k] for r in reports) / len(reports)
+                # Sum over server processes of each one's mean (and of each one's worst sample for the maximum).
+                total_of = lambda k, f: sum(f(r[k] for r in rs) for rs in per_server)
+                mean = lambda xs: (lambda v: sum(v) / len(v))(list(xs))
+                reports = per_server[0]
                 total = {k: sum(d[k] for d in done) for k in ("connected", "events_sent", "events_back", "client_cpu_cores")}
+                total["client_busiest_thread_cores"] = max(d["client_busiest_thread_cores"] for d in done)
+                total["expected_recv_per_s"] = n * 21
                 total["snapshot_delivery_pct"] = round(sum(d["snapshot_delivery_pct"] for d in done) / procs, 1)
                 total["snapshots_per_client_s"] = round(sum(d["snapshots_per_client_s"] for d in done) / procs, 1)
                 save(
@@ -190,18 +204,23 @@ def load(kinds, sizes=(1000, 4096), secs=30):
                         "generator_processes": procs,
                         "secs": secs,
                         "all_connected": not any(l.startswith("only ") for _, l in lines),
-                        "server_conns": min(r["conns"] for r in reports),
-                        "server_cpu_cores": round(avg("cpu_cores"), 3),
-                        "server_cpu_cores_max": max(r["cpu_cores"] for r in reports),
-                        "server_rss_mb": max(r["rss_mb"] for r in reports),
-                        "server_recv_per_s": round(avg("recv_per_s")),
-                        "server_sent_per_s": round(avg("sent_per_s")),
+                        "server_processes": len(servers),
+                        "server_conns": total_of("conns", min),
+                        "server_cpu_cores": round(total_of("cpu_cores", mean), 3),
+                        "server_cpu_cores_max": round(total_of("cpu_cores", max), 3),
+                        "server_busiest_thread_cores": round(
+                            max(mean(r["busiest_thread_cores"] for r in rs) for rs in per_server), 3
+                        ),
+                        "server_rss_mb": round(total_of("rss_mb", max), 1),
+                        "server_recv_per_s": round(total_of("recv_per_s", mean)),
+                        "server_sent_per_s": round(total_of("sent_per_s", mean)),
                         "reports": len(reports),
                         **total,
                     },
                 )
             finally:
-                server.stop()
+                for srv in servers:
+                    srv.stop()
                 time.sleep(2)
 
 
@@ -209,8 +228,17 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ("latency", "loss", "load"):
         print(__doc__)
         sys.exit(2)
-    kinds = sys.argv[2:] or TRANSPORTS
-    {"latency": latency, "loss": loss, "load": load}[sys.argv[1]](kinds)
+    args = sys.argv[2:]
+    sizes = None
+    if "--sizes" in args:
+        i = args.index("--sizes")
+        sizes = tuple(int(x) for x in args[i + 1].split(","))
+        args = args[:i] + args[i + 2:]
+    kinds = args or TRANSPORTS
+    if sys.argv[1] == "load" and sizes:
+        load(kinds, sizes)
+    else:
+        {"latency": latency, "loss": loss, "load": load}[sys.argv[1]](kinds)
 
 
 if __name__ == "__main__":
