@@ -100,7 +100,8 @@ flowchart LR
   traffic, not simulation, is the bottleneck.
 - **Protocol** (`crates/sawgrass-protocol`): the wire format every peer shares, with quantized positions and
   rotations.
-- **PostgreSQL** is the source of truth for characters, money, inventory and property.
+- **PostgreSQL** is the source of truth for characters, money, inventory and property. Storage options (an
+  in-process log, SpacetimeDB, PostgreSQL) are measured in [docs/research](docs/research/spacetimedb-vs-postgresql/).
 - **Client module**: loaded by Leonida's runtime on the player's PC; syncs the local game with the server.
 - **Launcher**: checks the player's Leonida build, installs the signed client module and starts the game.
 
