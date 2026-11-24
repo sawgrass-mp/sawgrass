@@ -57,7 +57,9 @@ const RECEIVE_WINDOW: u32 = 256 * 1024;
 /// Limits fail closed, because the gateway faces the internet: a client may open exactly one bidirectional stream
 /// (the event stream) and no unidirectional ones, the gateway opens none, and stream and connection windows are
 /// [`RECEIVE_WINDOW`]. The datagram receive buffer is 1 MiB on the client, so a burst of snapshots is not dropped,
-/// and 64 KiB on the gateway, where a client sends only small state packets.
+/// and 64 KiB on the gateway, where a client sends only small state packets. The gateway's datagram send buffer
+/// is 64 KiB per connection, a dozen ticks of snapshots in a crowd: quinn drops the oldest beyond it, so a client
+/// that stops acknowledging holds at most that much until the idle timeout, instead of quinn's default 1 MiB.
 fn transport(gateway: bool) -> Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
     let (peer_bidi, datagram_buffer) = if gateway { (1u32, 64 * 1024) } else { (0, 1 << 20) };
@@ -69,6 +71,9 @@ fn transport(gateway: bool) -> Arc<quinn::TransportConfig> {
         .stream_receive_window(RECEIVE_WINDOW.into())
         .receive_window(RECEIVE_WINDOW.into())
         .datagram_receive_buffer_size(Some(datagram_buffer));
+    if gateway {
+        config.datagram_send_buffer_size(64 * 1024);
+    }
     Arc::new(config)
 }
 
@@ -234,6 +239,11 @@ impl Gateway {
 pub struct Incoming(quinn::Incoming);
 
 impl Incoming {
+    /// Refuses the connection without a handshake, for example when the server is full.
+    pub fn refuse(self) {
+        self.0.refuse();
+    }
+
     /// Completes the QUIC and Sawgrass handshakes, refusing an incompatible client version.
     pub async fn handshake(self) -> Result<Session, Error> {
         let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {

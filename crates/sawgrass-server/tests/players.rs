@@ -1,5 +1,6 @@
 //! Clients connect through the in-process gateway: the server places each one in its world where the client
-//! says it is, and sends each a snapshot with the other.
+//! says it is, and sends each a snapshot with the other. A flood of states costs one slot, not a queue, and
+//! connections beyond the player cap are refused.
 
 use std::time::Duration;
 
@@ -10,7 +11,7 @@ use sawgrass_protocol::game::{ClientState, ServerEvent, decode_snapshot};
 use sawgrass_protocol::{
     EntityState, PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity,
 };
-use sawgrass_server::net::{self, NetId, PlayerState};
+use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState};
 use sawgrass_server::{TickConfig, TickLoop};
 
 fn gateway() -> (Gateway, RootCertStore) {
@@ -79,7 +80,7 @@ fn players_are_placed_and_see_each_other() {
         let _guard = runtime.enter();
         let (gateway, roots) = gateway();
         let addr = gateway.local_addr().expect("addr");
-        (addr, roots, net::listen(gateway, false))
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
     };
     let mut tick_loop = TickLoop::new(TickConfig::default());
 
@@ -137,4 +138,63 @@ fn players_are_placed_and_see_each_other() {
     a.close();
     assert!(tick_until(&mut tick_loop, |t| position_of(t, id_a).is_none()));
     assert!(position_of(&tick_loop, id_b).is_some());
+}
+
+#[test]
+fn a_flood_of_states_keeps_only_the_latest() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+
+    // 10,000 states with no tick in between, the last one at x = 99.99 m. Loopback may drop some of them when
+    // the burst outruns quinn's buffers, so the client repeats the last until the server shows it.
+    for i in 0..10_000u32 {
+        let _ = client.send_datagram(state_packet(i as f32 / 100.0));
+    }
+    let last = state_packet(99.99);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(last.clone());
+        position_of(t, id) == Some([99.99, 5.0, 30.0])
+    }));
+    // One entity, and nothing left queued: the next ticks change nothing.
+    assert_eq!(tick_loop.world().query::<&NetId>().iter().count(), 1);
+    for _ in 0..5 {
+        tick_loop.run_tick();
+    }
+    assert_eq!(position_of(&tick_loop, id), Some([99.99, 5.0, 30.0]));
+}
+
+#[test]
+fn connections_beyond_the_cap_are_refused() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, _players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        let config = ListenConfig {
+            max_players: 1,
+            ..ListenConfig::default()
+        };
+        (addr, roots, net::listen(gateway, config))
+    };
+    runtime.block_on(async {
+        let first = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        assert!(first.is_ok(), "{first:?}");
+        let second = connect(addr, "localhost", roots, PROTOCOL_VERSION).await;
+        assert!(second.is_err(), "second player admitted");
+    });
 }

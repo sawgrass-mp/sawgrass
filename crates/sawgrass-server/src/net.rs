@@ -2,8 +2,10 @@
 //! (`docs/architecture.md`, "Gateways", stage 1: one process for everything).
 //!
 //! The gateway runs on a tokio runtime of its own. Each connection gets a task that reads the player's
-//! datagrams and events and forwards them to the tick thread over a channel; nothing on that path waits for the
-//! tick. Once per tick [`Players::run_tick`] applies what arrived (joins, states, leaves) to the ECS world,
+//! datagrams into a per-player inbox holding only the latest state, so a client that floods states overwrites
+//! one slot instead of growing a queue; only joins and leaves, once per connection, go over a channel. Nothing
+//! on that path waits for the tick. Once per tick [`Players::run_tick`] applies joins, latest states and leaves
+//! to the ECS world,
 //! updates the spatial grid, recomputes each player's visible set and sends each player a whole snapshot of
 //! the entities in it, split into datagrams of at most [`SNAPSHOT_MAX_ENTITIES`] states.
 //!
@@ -12,7 +14,7 @@
 //! done here.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -36,24 +38,48 @@ pub struct NetId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerState(pub ClientState);
 
-/// What a connection task tells the tick thread.
+/// Events queued for one player before the oldest new one is dropped. The server sends only `Joined` and a
+/// `Stats` every few seconds, so a client that reads its stream never comes near it.
+const EVENT_QUEUE: usize = 16;
+
+/// What one player's connection tasks leave for the tick thread. Each field holds the latest value only.
+#[derive(Debug, Default)]
+struct Inbox {
+    state: Mutex<Option<ClientState>>,
+    wants_stats: AtomicBool,
+}
+
+/// What a connection task tells the tick thread: once on joining, once on leaving.
 #[derive(Debug)]
 enum Inbound {
     Join {
         id: u32,
         sender: Datagrams,
-        events: tokio_mpsc::UnboundedSender<Vec<u8>>,
-    },
-    State {
-        id: u32,
-        state: ClientState,
-    },
-    WantsStats {
-        id: u32,
+        events: tokio_mpsc::Sender<Vec<u8>>,
+        inbox: Arc<Inbox>,
     },
     Leave {
         id: u32,
     },
+}
+
+/// How the server accepts players.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListenConfig {
+    /// Let clients ask for [`ServerStats`] (load tests); otherwise the request is ignored.
+    pub stats_to_clients: bool,
+    /// Connections, handshakes included, above which new ones are refused.
+    pub max_players: usize,
+}
+
+impl Default for ListenConfig {
+    /// No stats for clients, and the architecture's target of 4096 players.
+    fn default() -> Self {
+        Self {
+            stats_to_clients: false,
+            max_players: 4096,
+        }
+    }
 }
 
 /// Traffic counters shared between the connection tasks and the tick thread.
@@ -68,22 +94,28 @@ pub struct Traffic {
 }
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
-///
-/// `stats_to_clients` lets clients ask for [`ServerStats`] (load tests); otherwise the request is ignored.
-pub fn listen(gateway: Gateway, stats_to_clients: bool) -> Players {
+pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let (inbound_tx, inbound_rx) = mpsc::channel();
     let traffic = Arc::new(Traffic::default());
-    let next_id = Arc::new(AtomicU32::new(1));
+    let next_id = AtomicU32::new(1);
+    let active = Arc::new(AtomicUsize::new(0));
     let accept_traffic = traffic.clone();
     tokio::spawn(async move {
         while let Some(incoming) = gateway.accept().await {
+            if active.load(Ordering::Relaxed) >= config.max_players {
+                incoming.refuse();
+                continue;
+            }
+            active.fetch_add(1, Ordering::Relaxed);
             let inbound = inbound_tx.clone();
             let traffic = accept_traffic.clone();
+            let active = active.clone();
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
                 if let Ok(session) = incoming.handshake().await {
-                    serve(session, id, inbound, traffic, stats_to_clients).await;
+                    serve(session, id, inbound, traffic, config.stats_to_clients).await;
                 }
+                active.fetch_sub(1, Ordering::Relaxed);
             });
         }
     });
@@ -111,11 +143,13 @@ async fn serve(
     stats_to_clients: bool,
 ) {
     let (datagrams, mut event_sender, mut event_receiver) = session.split();
-    let (events_tx, mut events_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+    let (events_tx, mut events_rx) = tokio_mpsc::channel::<Vec<u8>>(EVENT_QUEUE);
+    let inbox = Arc::new(Inbox::default());
     let join = Inbound::Join {
         id,
         sender: datagrams.clone(),
         events: events_tx,
+        inbox: inbox.clone(),
     };
     if inbound.send(join).is_err() {
         return;
@@ -127,14 +161,13 @@ async fn serve(
             }
         }
     });
-    let events_inbound = inbound.clone();
+    let events_inbox = inbox.clone();
     tokio::spawn(async move {
         while let Ok((_, packet)) = event_receiver.recv().await {
             if stats_to_clients
                 && ClientEvent::decode(&packet[PacketHeader::SIZE..]) == Ok(ClientEvent::RequestStats)
-                && events_inbound.send(Inbound::WantsStats { id }).is_err()
             {
-                break;
+                events_inbox.wants_stats.store(true, Ordering::Relaxed);
             }
         }
     });
@@ -145,10 +178,10 @@ async fn serve(
         if header.kind != PacketKind::ClientState {
             continue;
         }
-        if let Ok((state, _)) = ClientState::decode(&packet[PacketHeader::SIZE..])
-            && inbound.send(Inbound::State { id, state }).is_err()
+        if let Ok(state) = ClientState::decode(&packet[PacketHeader::SIZE..])
+            && let Ok(mut slot) = inbox.state.lock()
         {
-            break;
+            *slot = Some(state);
         }
     }
     datagrams.close();
@@ -161,10 +194,10 @@ struct Player {
     id: u32,
     entity: Option<Entity>,
     sender: Datagrams,
-    events: tokio_mpsc::UnboundedSender<Vec<u8>>,
+    events: tokio_mpsc::Sender<Vec<u8>>,
+    inbox: Arc<Inbox>,
     visible: VisibleSet,
     sequence: u16,
-    wants_stats: bool,
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
@@ -212,6 +245,7 @@ impl Players {
     /// Applies what arrived since the last tick, then sends every player its snapshot for `info.tick`.
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
         self.apply_inbound(world, info);
+        self.apply_states(world);
         self.send_snapshots(info.tick as u32);
         self.send_stats();
     }
@@ -219,10 +253,15 @@ impl Players {
     fn apply_inbound(&mut self, world: &mut World, info: &TickInfo) {
         while let Ok(message) = self.inbound.try_recv() {
             match message {
-                Inbound::Join { id, sender, events } => {
+                Inbound::Join {
+                    id,
+                    sender,
+                    events,
+                    inbox,
+                } => {
                     let tick_hz =
                         (std::time::Duration::from_secs(1).as_nanos() / info.dt.as_nanos().max(1)) as u16;
-                    let _ = events.send(event_packet(
+                    let _ = events.try_send(event_packet(
                         &ServerEvent::Joined { entity: id, tick_hz },
                         info.tick,
                     ));
@@ -232,40 +271,10 @@ impl Players {
                         entity: None,
                         sender,
                         events,
+                        inbox,
                         visible: VisibleSet::new(),
                         sequence: 0,
-                        wants_stats: false,
                     });
-                }
-                Inbound::State { id, state } => {
-                    let Some(&slot) = self.slots.get(&id) else {
-                        continue;
-                    };
-                    let player = &mut self.players[slot];
-                    match player.entity {
-                        Some(entity) => {
-                            if let Ok(mut current) = world.get::<&mut PlayerState>(entity) {
-                                current.0 = state;
-                            }
-                        }
-                        None => player.entity = Some(world.spawn((NetId(id), PlayerState(state)))),
-                    }
-                    let [x, y, _] = state.position.to_metres();
-                    self.grid.upsert(EntityId(id), Point::new(x, y));
-                    self.states.insert(
-                        id,
-                        EntityState {
-                            id,
-                            position: state.position,
-                            velocity: state.velocity,
-                            rotation: state.rotation,
-                        },
-                    );
-                }
-                Inbound::WantsStats { id } => {
-                    if let Some(&slot) = self.slots.get(&id) {
-                        self.players[slot].wants_stats = true;
-                    }
                 }
                 Inbound::Leave { id } => {
                     let Some(slot) = self.slots.remove(&id) else {
@@ -282,6 +291,35 @@ impl Players {
                     self.states.remove(&id);
                 }
             }
+        }
+    }
+
+    /// Takes each player's latest state, if a new one arrived, into the world, the grid and the wire states.
+    fn apply_states(&mut self, world: &mut World) {
+        for player in &mut self.players {
+            let Some(state) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
+                continue;
+            };
+            let id = player.id;
+            match player.entity {
+                Some(entity) => {
+                    if let Ok(mut current) = world.get::<&mut PlayerState>(entity) {
+                        current.0 = state;
+                    }
+                }
+                None => player.entity = Some(world.spawn((NetId(id), PlayerState(state)))),
+            }
+            let [x, y, _] = state.position.to_metres();
+            self.grid.upsert(EntityId(id), Point::new(x, y));
+            self.states.insert(
+                id,
+                EntityState {
+                    id,
+                    position: state.position,
+                    velocity: state.velocity,
+                    rotation: state.rotation,
+                },
+            );
         }
     }
 
@@ -334,8 +372,13 @@ impl Players {
             return;
         };
         let packet = event_packet(&ServerEvent::Stats(stats), 0);
-        for player in self.players.iter().filter(|p| p.wants_stats) {
-            let _ = player.events.send(packet.clone());
+        // A player whose queue is full has not read the last ones; it misses this one.
+        for player in self
+            .players
+            .iter()
+            .filter(|p| p.inbox.wants_stats.load(Ordering::Relaxed))
+        {
+            let _ = player.events.try_send(packet.clone());
         }
     }
 }

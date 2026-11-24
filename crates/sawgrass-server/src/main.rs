@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
-//!                 [--stats-to-clients]
+//!                 [--max-players N] [--stats-to-clients]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -14,6 +14,7 @@
 //! - `--cert FILE`, `--key FILE`: the gateway's certificate (DER) and PKCS#8 private key (DER).
 //!   `sawgrass-bots gen-cert` writes a self-signed pair for tests.
 //! - `--net-threads N`: threads for the gateway runtime (default: all cores but the tick thread's).
+//! - `--max-players N`: refuse connections beyond N (default 4096).
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
 
 use std::net::SocketAddr;
@@ -36,6 +37,7 @@ struct Args {
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
     net_threads: Option<usize>,
+    max_players: usize,
     stats_to_clients: bool,
 }
 
@@ -47,6 +49,7 @@ fn parse_args() -> Result<Args, String> {
         cert: None,
         key: None,
         net_threads: None,
+        max_players: net::ListenConfig::default().max_players,
         stats_to_clients: false,
     };
     let mut iter = std::env::args().skip(1);
@@ -71,6 +74,11 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--net-threads: {e}"))?;
                 args.net_threads = Some(n.max(1));
+            }
+            "--max-players" => {
+                args.max_players = value("--max-players")?
+                    .parse()
+                    .map_err(|e| format!("--max-players: {e}"))?;
             }
             "--stats-to-clients" => args.stats_to_clients = true,
             other => return Err(format!("unknown argument {other:?}")),
@@ -99,7 +107,7 @@ fn main() -> ExitCode {
             eprintln!("sawgrass-server: {err}");
             eprintln!(
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
-                 [--net-threads N] [--stats-to-clients]"
+                 [--net-threads N] [--max-players N] [--stats-to-clients]"
             );
             return ExitCode::from(2);
         }
@@ -137,7 +145,13 @@ fn main() -> ExitCode {
             match net::bind_gateway(listen, cert, key) {
                 Ok(gateway) => {
                     println!("listening on {listen} with {threads} gateway threads");
-                    net::listen(gateway, args.stats_to_clients)
+                    net::listen(
+                        gateway,
+                        net::ListenConfig {
+                            stats_to_clients: args.stats_to_clients,
+                            max_players: args.max_players,
+                        },
+                    )
                 }
                 Err(e) => {
                     eprintln!("sawgrass-server: gateway: {e}");
