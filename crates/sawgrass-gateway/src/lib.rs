@@ -41,7 +41,19 @@ pub const VERSION_REFUSED: VarInt = VarInt::from_u32(1);
 pub const MAX_EVENT_LEN: usize = 64 * 1024;
 
 /// How long a peer may take to complete the handshake.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Transport settings for both sides, from the NET-3 measurements (`docs/research/network-transport`): a 30 s
+/// idle timeout so thousands of clients have time to connect, a keep-alive every 5 s, and a 1 MiB datagram
+/// receive buffer so a burst of snapshots is not dropped.
+fn transport() -> Arc<quinn::TransportConfig> {
+    let mut config = quinn::TransportConfig::default();
+    config
+        .max_idle_timeout(Some(quinn::IdleTimeout::from(VarInt::from_u32(30_000))))
+        .keep_alive_interval(Some(Duration::from_secs(5)))
+        .datagram_receive_buffer_size(Some(1 << 20));
+    Arc::new(config)
+}
 
 /// Why a connection or session operation failed.
 #[derive(Debug)]
@@ -176,7 +188,8 @@ impl Gateway {
             .map_err(Error::Tls)?;
         tls.alpn_protocols = vec![ALPN.to_vec()];
         let crypto = QuicServerConfig::try_from(tls).map_err(|e| Error::Io(std::io::Error::other(e)))?;
-        let config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+        let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+        config.transport_config(transport());
         let endpoint = Endpoint::server(config, addr).map_err(Error::Io)?;
         Ok(Self { endpoint })
     }
@@ -256,7 +269,9 @@ pub async fn connect(
         (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
     };
     let mut endpoint = Endpoint::client(local).map_err(Error::Io)?;
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+    let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+    config.transport_config(transport());
+    endpoint.set_default_client_config(config);
 
     let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         let connection = endpoint
