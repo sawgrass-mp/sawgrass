@@ -1,4 +1,4 @@
-//! Allocators and async runtimes on Sawgrass's hot paths (PERF-1). See `../README.md`.
+//! Allocators and async runtimes on Sawgrass's hot paths (SRV-5). See `../README.md`.
 //!
 //! ```text
 //! runtime-bench server <tokio-mt|tokio-tpc|smol|compio> <addr> <threads> [endpoints]

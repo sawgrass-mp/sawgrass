@@ -1,4 +1,4 @@
-"""Runs the PERF-1 measurements and appends one JSON line per run to results/<suite>.jsonl.
+"""Runs the SRV-5 measurements and appends one JSON line per run to results/<suite>.jsonl.
 
 Usage: python3 -I run.py gateway [--players 2048,4096] [--reps 3] [--runtimes tokio-mt,compio] [--allocators system]
        python3 -I run.py capacity [--players 1536,2048,2560,3072] [--runtimes ...] [--allocators ...]

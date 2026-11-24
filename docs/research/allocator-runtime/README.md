@@ -4,7 +4,7 @@ Measured 2026-11-24 with Rust 1.97.0 on the Sawgrass tree at NET-2 (c33723a). Al
 system allocator), mimalloc 2.3.2 through the `mimalloc` 0.1.52 crate, and jemalloc 5.3 through
 `tikv-jemallocator` 0.7.0. Runtimes: Tokio 1.54.1, smol 2.0.2, and compio 0.19.2 on io_uring with compio-quic
 0.8.2. quinn 0.11.12 (quinn-proto 0.11.19, rustls 0.23.46 with ring), RocksDB 10.4.2 through `rocksdb` 0.24.0.
-Task: PERF-1 (#70).
+Task: SRV-5 (#70).
 
 The question: which allocator and which async runtime should the server use, for 4096 players, fast and reliable
 together? The gateway (`sawgrass-gateway`) runs quinn on Tokio's multi-thread runtime today, and every binary uses
