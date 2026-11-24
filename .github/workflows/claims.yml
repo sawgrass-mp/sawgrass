@@ -17,7 +17,7 @@ concurrency:
   group: claims-${{ github.event.issue.number || github.event.pull_request.number || github.event_name }}
   cancel-in-progress: false
 
-# Runs the scripts from the default branch only: issue_comment, schedule and push never check out pull request code,
+# Runs the scripts from the default branch only: comment, timer and push events never check out pull request code,
 # and the pull_request_target job checks out the default branch explicitly and reads the pull request through the
 # API as data. The comment body reaches the script through the event file, never the shell.
 jobs:
@@ -39,7 +39,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   expire:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name != 'issue_comment' && github.event_name != 'pull_request_target' &&
+      github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
