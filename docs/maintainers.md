@@ -148,7 +148,7 @@ of every reviewer session, after the reviews, the reviewer refreshes them:
 4. A maintainer merges it like any other pull request. The reviewer still does not merge.
 
 The script runs only code from `main`, so this does not break the rule that the reviewer never runs pull request
-code. When a stage changes (a new stage starts, the game runs under VIctory), a maintainer updates `STAGES` in
+code. When a stage changes (a new stage starts, the game runs under VIctory or XCL), a maintainer updates `STAGES` in
 `scripts/progress.py` in a normal pull request.
 
 ## Security

@@ -18,7 +18,7 @@ player by more than 5% says so with numbers.
 ## Components
 
 ```text
- launcher ──starts──▶ game (VIctory) + client module ───────────┐
+ launcher ──starts──▶ game (VIctory or XCL) + client module ────┐
                                                                 │ QUIC
  load-test bots (same protocol, no game) ──────────────────────┤
                                                                 ▼
@@ -72,18 +72,18 @@ players' machines, so they run in a sandbox with no file, network or process acc
 
 ## Client and launcher
 
-- The game runs on PC under the **runtime** [VIctory](https://github.com/Marvisak/VIctory)
-  ([ADR 0004](adr/0004-victory-client-runtime.md)), which runs the console build's own x86-64 code in its process
-  and reimplements the console libraries beneath it.
-- The client module is a Rust library with a C ABI. A `Runtime` adapter loads it into the game, installs hooks and
-  locates game functions; it is the only code that knows VIctory, so another runtime would need only a new adapter.
-  Functions are found at run time by pattern, per game version; no bytes from the executable are stored in this
-  repository.
+- The game runs on PC through one of two **runtimes** ([ADR 0004](adr/0004-victory-client-runtime.md)):
+  [VIctory](https://github.com/Marvisak/VIctory), the furthest along, or [XCL](https://github.com/ivall/xcl). Both run
+  the console build's own x86-64 code natively and reimplement the console libraries beneath it. In-game testing starts
+  on whichever reaches a world with a controllable character first.
+- The client module is a Rust library with a C ABI. A `Runtime` adapter per runtime loads it into the game, installs
+  hooks and locates game functions; only the adapters know which runtime they serve. Functions are found at run time by
+  pattern, per runtime and game version; no bytes from the executable are stored in this repository.
 - All game access goes through a `GameApi` trait with two implementations: the real one over a runtime adapter,
   and a fake one used by bots and tests. Nothing above `GameApi` knows which runtime it runs on.
-- The launcher (Rust and Tauri) checks the player's VIctory build against its hash manifest, installs the signed
-  client module, lists servers, downloads server resources and starts the game. It never downloads or unpacks the
-  game.
+- The launcher (Rust and Tauri) detects the player's runtime, checks its build against that runtime's hash manifest,
+  installs the signed client module, lists servers, downloads server resources and starts the game. It never downloads
+  or unpacks the game.
 
 ## Anti-cheat
 

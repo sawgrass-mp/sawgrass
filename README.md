@@ -29,15 +29,15 @@ Sawgrass is a multiplayer roleplay platform for Grand Theft Auto VI, written in 
 
 > [!IMPORTANT]
 > **There is no playable build, and there cannot be one yet.** The game does not run on PC. Players will run it
-> through [VIctory](https://github.com/Marvisak/VIctory), which runs the Xbox Series build natively on Windows. It
-> loads the world but does not render it yet.
+> through [VIctory](https://github.com/Marvisak/VIctory) or [XCL](https://github.com/ivall/xcl), which run the Xbox
+> Series build natively on Windows. VIctory, the furthest along, loads the world but does not render it yet.
 
 So the work is split in two:
 
 | | Side | State |
 |---|---|---|
 | 🟢 | **Server, protocol, storage, scripting** | Being built now. Everything is tested and load-tested with headless bots that speak the real protocol, no game needed. |
-| ⏸️ | **Client module and launcher** | Waiting. Work starts when the game runs on PC through VIctory with a controllable character. |
+| ⏸️ | **Client module and launcher** | Waiting. Work starts when the game runs on PC through VIctory or XCL with a controllable character. |
 
 ## Progress
 
@@ -52,7 +52,7 @@ So the work is split in two:
 | **Stage 0: Repository foundation**<br><sub>Rules, CI, claim bot, review agent</sub> | `████████████████████` 100% | done |
 | **Stage 1: Server without the game**<br><sub>Gates: 1000 bots on one machine, then 4096</sub> | `████████░░░░░░░░░░░░` 41% | 3 of 7 tasks done |
 | **Stage 2: Roleplay base**<br><sub>PostgreSQL, scripting, characters, money, jobs</sub> | `██░░░░░░░░░░░░░░░░░░` 12% | 1 of 4 tasks done |
-| **Stage 3: Client in the game**<br><sub>Waits until the game runs on PC through VIctory</sub> | `░░░░░░░░░░░░░░░░░░░░` 0% | waiting for the game |
+| **Stage 3: Client in the game**<br><sub>Waits until the game runs on PC through VIctory or XCL</sub> | `░░░░░░░░░░░░░░░░░░░░` 0% | waiting for the game |
 | **Stage 4: Launcher and releases**<br><sub>Signing, auto-update, server list</sub> | `░░░░░░░░░░░░░░░░░░░░` 0% | not started |
 | **Stage 5: Scale**<br><sub>Real players; zones only if measurements call for them</sub> | `░░░░░░░░░░░░░░░░░░░░` 0% | not started |
 | **Tooling and docs**<br><sub>CI gates, review agent, documentation</sub> | `███████████░░░░░░░░░` 56% | 6 of 15 tasks done |
@@ -99,7 +99,7 @@ So the work is split in two:
 
 ```mermaid
 flowchart LR
-    L[Launcher] -->|starts| G["Game on PC (VIctory)<br>+ Sawgrass client module"]
+    L[Launcher] -->|starts| G["Game on PC (VIctory or XCL)<br>+ Sawgrass client module"]
     G -->|QUIC| GW["Gateways ×3–4"]
     B["Load-test bots<br>(same protocol, no game)"] -->|QUIC| GW
     GW -->|events| W["World simulation<br>(ECS, scripts, interest management)"]
@@ -114,8 +114,8 @@ flowchart LR
 - **Protocol** (`crates/sawgrass-protocol`): the wire format every peer shares, with quantized positions and
   rotations.
 - **PostgreSQL** is the source of truth for characters, money, inventory and property.
-- **Client module**: loaded into the game under VIctory on the player's PC; syncs the local game with the server.
-- **Launcher**: checks the player's VIctory build, installs the signed client module and starts the game.
+- **Client module**: loaded into the game under VIctory or XCL on the player's PC; syncs the local game with the server.
+- **Launcher**: checks the player's VIctory or XCL build, installs the signed client module and starts the game.
 
 | Budget | Target |
 |---|---|

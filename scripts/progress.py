@@ -54,7 +54,7 @@ STAGES = (
     {"n": 2, "name": "Roleplay base", "areas": ("DB", "SCRIPT", "RP"),
      "note": "PostgreSQL, scripting, characters, money, jobs"},
     {"n": 3, "name": "Client in the game", "areas": ("CLIENT",), "state": "waiting",
-     "note": "Waits until the game runs on PC through VIctory"},
+     "note": "Waits until the game runs on PC through VIctory or XCL"},
     {"n": 4, "name": "Launcher and releases", "areas": ("LAUNCH",),
      "note": "Signing, auto-update, server list"},
     {"n": 5, "name": "Scale", "areas": (),

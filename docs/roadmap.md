@@ -1,7 +1,7 @@
 # Roadmap
 
-Stages 0–2 do not need the game and run in parallel with the runtimes' work. Stage 3 starts when VIctory runs the game to a
-world with a controllable character (ADR 0004).
+Stages 0–2 do not need the game and run in parallel with the runtimes' work. Stage 3 starts when VIctory or XCL,
+whichever comes first, runs the game to a world with a controllable character (ADR 0004).
 
 1. **Stage 0: repository foundation.** Workspace, rules, CI, claim bot, first tasks. Done by maintainers before
    the repository opens to the swarm.
@@ -9,8 +9,10 @@ world with a controllable character (ADR 0004).
    Gates: 1000 bots on one machine, then 4096.
 3. **Stage 2: roleplay base.** PostgreSQL, scripting runtime, base resources (characters, money, inventory, jobs),
    admin tools. Everything tested with bots.
-4. **Stage 3: client in the game.** The VIctory adapter, a module-loading API proposed upstream, hooks, sync of
-   players, vehicles and damage, in-game UI. Runtime-independent client code (sync and prediction over the fake `GameApi`) can start earlier.
+4. **Stage 3: client in the game.** A runtime adapter for the first runtime that gets there (VIctory or XCL), a
+   module-loading API proposed upstream, hooks, sync of players, vehicles and damage, in-game UI. The other
+   runtime's adapter follows. Runtime-independent client code (sync and prediction over the fake `GameApi`) can
+   start earlier.
 5. **Stage 4: launcher and releases.** Signing, auto-update, server list.
 6. **Stage 5: scale.** Real players, zones only if measurements call for them.
 

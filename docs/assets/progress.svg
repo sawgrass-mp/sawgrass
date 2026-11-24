@@ -28,7 +28,7 @@
 <text x="360" y="256" class="n">1 of 4 tasks done</text>
 <text x="852" y="238" class="p" text-anchor="end">12%</text>
 <text x="28" y="284" class="l">Stage 3: Client in the game</text>
-<text x="28" y="302" class="n">Waits until the game runs on PC through VIctory</text>
+<text x="28" y="302" class="n">Waits until the game runs on PC through VIctory or XCL</text>
 <rect x="360" y="274" width="380" height="10" rx="5" fill="#13201b"/>
 <text x="360" y="302" class="n">waiting for the game</text>
 <text x="852" y="284" class="w" text-anchor="end">waiting</text>

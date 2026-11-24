@@ -6,12 +6,13 @@ to get wrong.
 
 ## What this is
 
-Sawgrass is an open-source multiplayer roleplay platform for Grand Theft Auto VI, written in Rust. The target is
-**4096 players in one world** on a dedicated server. Players run the game on PC through
-[VIctory](https://github.com/Marvisak/VIctory), which runs the Xbox Series build natively on Windows
-([ADR 0004](docs/adr/0004-victory-client-runtime.md)); a Sawgrass module loaded into the game connects them to the
-server. The game does not reach a playable world under it yet, so the server, protocol, storage, scripting and load-test bots
-are built and measured without the game, and client code above the `GameApi` trait is tested with its fake.
+Sawgrass is an open-source multiplayer roleplay platform for Grand Theft Auto VI, written in Rust. The target is **4096
+players in one world** on a dedicated server. Players run the game on PC through
+[VIctory](https://github.com/Marvisak/VIctory) or [XCL](https://github.com/ivall/xcl), two layers that run the Xbox
+Series build's own code natively on Windows, whichever reaches a playable world first ([ADR
+0004](docs/adr/0004-victory-client-runtime.md)); a Sawgrass module loaded into the game connects them to the server.
+Neither is there yet, so the server, protocol, storage, scripting and load-test bots are built and measured without the
+game, and client code above the `GameApi` trait is tested with its fake.
 
 ## Where things are
 
