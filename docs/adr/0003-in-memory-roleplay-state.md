@@ -10,8 +10,8 @@ speed together, with no need to keep existing code. Money is never created or lo
 survives a crash.
 
 DB-2 and DB-4 measured eleven designs on the DB-1 ledger with the same rules and workload
-([results](../research/spacetimedb-vs-postgresql/README.md)). One 4-vCPU VM, 64 callers, every transfer on disk
-before the reply:
+([results](../research/spacetimedb-vs-postgresql/README.md), figures as of commit `56c6b61` of #48). One 4-vCPU VM, 64
+callers, every transfer on disk before the reply:
 
 | Design | Transfers per second | One hot wallet | 5-minute run, p99 |
 |---|---:|---:|---:|
@@ -60,8 +60,15 @@ What the measurements say:
   operation's record and the new value of every key it changed.
 - **Recovery is RocksDB's, set strictly.** The WAL recovery mode is `TolerateCorruptedTailRecords`: an incomplete
   last record, never acknowledged, is dropped, and any other corruption stops start-up with an error for an
-  operator. `paranoid_checks` stays on. Start-up loads the current values into the writer's memory; there is no log
-  replay of our own and no snapshot format to maintain.
+  operator. A record that is complete in length but fails its checksum counts as corruption even when it is the
+  last one, so a power cut that damages the last batch stops start-up although nothing acknowledged is lost
+  (tested in DB-4). `paranoid_checks` stays on. Start-up loads the current values into the writer's memory; there
+  is no log replay of our own and no snapshot format to maintain.
+- **A refused start is resolved by restoring, never by relaxing recovery.** The operator restores the store from
+  the second machine's copy, which holds every acknowledged batch, and starts the server on it. Starting once in a
+  more lenient mode, such as `PointInTimeRecovery`, is not allowed: after damage in the middle of the log it
+  silently drops every acknowledged operation after the damage. The follow-up task writes and tests this
+  procedure.
 - **The write-ahead log is copied to a second machine before acknowledgement.** An operation is acknowledged only
   when its batch is on the local disk and has been received by a second machine. Group commit applies to the copy as
   well. If measurement shows this cost is too high, a later ADR may relax it, and must state how much acknowledged
@@ -74,7 +81,8 @@ What the measurements say:
   flush and copy that cover them.
 - **PostgreSQL becomes the archive.** It is fed from the operation records asynchronously and serves history, admin
   queries, analytics and backups. It never decides a balance and is never on the path of a game action. Operation
-  records are removed from RocksDB once archived and older than the idempotency window.
+  records are removed from RocksDB once archived and older than the idempotency window. The feed's lag is
+  monitored and alerts an operator, because a stalled feed makes RocksDB grow without bound.
 - **The store sits behind one trait.** The writer talks to its store through a small interface (commit a batch,
   load the state), as the DB-4 harness does, so the store can be replaced without touching game code.
 - **The realtime core is unchanged.** Positions and other per-tick entity state are not written to this store.
@@ -117,10 +125,10 @@ What the measurements say:
   rules (idempotency, no negative character wallet, entries summing to zero) move into the writer.
 - SpacetimeDB is not adopted.
 
-Follow-up tasks, each its own issue: the writer and its RocksDB store with crash tests at random points and
-corruption tests; the writer for money and inventory replacing `sawgrass-db` as the authority; the copy to a second
-machine, with its cost measured; the PostgreSQL archive feed; and a repeat of the measurement on larger hardware
-with BOT-2 load.
+Follow-up tasks, each its own issue: the writer and its RocksDB store with crash tests at random points and corruption
+tests, and the restore procedure from the second machine; the writer for money and inventory replacing `sawgrass-db` as
+the authority; the copy to a second machine, with its cost measured; the PostgreSQL archive feed; and a repeat of the
+measurement on larger hardware with BOT-2 load.
 
 ## Not measured yet
 
