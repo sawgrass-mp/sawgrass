@@ -20,6 +20,8 @@
   <a href="#network-transport-measured">Transport</a> ·
   <a href="#packet-serialization-measured">Serialization</a> ·
   <a href="#packet-compression-measured">Compression</a> ·
+  <a href="#scripting-engines-measured">Scripting</a> ·
+  <a href="#voice-chat-measured">Voice</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#contributing">Contributing</a>
 </p>
@@ -255,6 +257,69 @@ on 38,400 snapshots from a simulated city block, with quinn sending them to 2,04
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/packet-compression](docs/research/packet-compression/).
+
+## Scripting engines, measured
+
+Game modes are scripts that server owners and modders write, so the engine decides how much roleplay logic fits in a
+tick and whether one broken script can hang or crash the server. We ran the same roleplay resource (a zone check per
+player, chat commands that move money, a payday, an inventory) in nine engine setups and tried to break each with an
+endless loop, a long call into the string library, endless allocation, endless recursion and a thrown error.
+
+<p align="center"><img src="docs/assets/scripting.svg" alt="Script time per tick for 4096 players, one zone check per player: WebAssembly 0.8 ms, V8 1.0, LuaJIT 1.2 (stops neither an endless loop nor a long library call), Luau with native code 6.5, Luau interpreter 15.8, LuaJIT without JIT 11.0 and Lua 5.4 26.3 (neither stops a long library call), QuickJS-ng 37.7, Rhai 282.5 (no total memory cap)" width="100%"></p>
+
+**We recommend Luau with native code**; the choice is partly taste and partly what the client runtime allows, so
+the maintainer decides between Luau, JavaScript or TypeScript on V8, and WebAssembly.
+
+| Engine | Zone check | Host call | Stops a script | Memory cap | Why or why not |
+|---|---:|---:|---|---|---|
+| WebAssembly (wasmtime) | 0.18 µs | 5 ns | yes | exact | Fastest and best isolated, but authors must compile their code (a judgement, not a measurement). |
+| JavaScript, V8 | 0.25 µs | 23 ns | yes | soft | Fast; 46 MB binary, 1.5 MB per instance, and its memory cap needs an `unsafe` callback. |
+| LuaJIT | 0.30 µs | 36 ns | **no** | exact | Its hook never runs in compiled code or inside a library call: an endless loop or a backtracking `string.find` hangs it. |
+| **Luau, native code** | **1.59 µs** | **74 ns** | **yes** | **exact** | **Recommended**: passed every isolation test, the long library call included; sandbox made for game scripts; 3 MB. |
+| Lua 5.4 | 6.4 µs | 69 ns | **no** | exact | A backtracking `string.find` hangs it past any deadline; four times slower than Luau on the zone check. |
+| QuickJS-ng | 9.2 µs | 144 ns | yes | exact | 3 to 6 times slower than Luau with native code, nothing it lacks. |
+| Rhai | 69 µs | 279 ns | yes | none | 4 to 43 times slower than Luau, no cap on total memory. |
+
+- Event-driven roleplay logic is cheap on all of them but Rhai: a chat command took 2.3 µs in Luau, 0.6 µs in V8.
+  Work for every player on every tick is where V8 and WebAssembly pull ahead, 1.7 to 12 times.
+- Every engine survived deep recursion and a thrown error, and stayed usable after each stopped script. Luau
+  checks its deadline inside the pattern matcher; other long library calls (`table.sort` of a huge table) were not
+  tested.
+- Caveats: one 4-core VM; one core; our own workloads; the client (scripts inside the game on Windows, where a JIT
+  may not be allowed) was not measured.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/scripting-engines](docs/research/scripting-engines/).
+
+## Voice chat, measured
+
+Roleplay needs proximity voice: a player hears the people near them, their radio channel and their phone call. We
+measured our own Opus relay on the QUIC connection against server-side mixing and against LiveKit under the same
+load, with 4,096 players in a simulated city at 5, 10 and 20% speaking.
+
+<p align="center"><img src="docs/assets/voice.svg" alt="Voice server CPU at 4,096 players, 10% and 20% speaking: our relay batched 1.11 and 1.58 cores; one datagram per frame 1.68 and about 3.1 (computed); mixing on the server up to 9.8 and 13.5 cores (computed). Same rooms load at 1,100 and 2,200 players: our relay 0.52 and 0.91 cores, LiveKit 0.83 and 1.41" width="100%"></p>
+
+**We chose our own relay on the QUIC connection**: Opus at 24 kbit/s in 20 ms frames as datagrams, the server
+deciding who hears each frame and sending each listener one datagram every 20 ms with everything they hear.
+
+| Option | Server CPU, 4,096 players, 10% / 20% speaking | Same rooms load, 2,200 players | Why or why not |
+|---|---:|---:|---|
+| **Our relay, batched per listener** | **1.11 / 1.58 cores** | **1.00 cores, 107 MB** | **Chosen**: held 20% speaking with every frame delivered; the server decides who hears; one connection. |
+| Our relay, one datagram per frame | 1.68 / about 3.1 (computed) | 0.91 cores, 107 MB | Lowest latency, but 2.6 times the packets; at 20% it would need more than the server's 2 cores. |
+| Mixing on the server | up to 9.8 / 13.5 cores (computed) | not run | Encoding a stream per listener costs up to nine times the CPU; a mono mix loses each voice's direction. |
+| LiveKit | not established | 1.41 cores, 3.1 GB | 1.4 to 1.6 times the CPU and 30 times the memory; a second connection and a WebRTC stack in the client. |
+| mediasoup, Mumble | not run | not run | mediasoup could not be built here; Mumble-style routing by cell sends 8 to 24 times the packets. |
+
+- Packets set the cost: at 4,096 players and 10% speaking, 200,000 voice frames a second leave the server, 2.4
+  times the snapshot packets; batching per listener sends 80,000 datagrams for them. Batching adds 0 to 20 ms.
+- Voice is light in bytes: 18 MB/s out at 10% speaking, 33 MB/s at 20%, against 165 MB/s for snapshots.
+- libopus's in-band FEC added recovery data only when told to expect at least 10% loss; a redundant copy of each
+  frame recovered best, for twice the bytes.
+- Caveats: one 4-core VM; a simulated city whose hotspots, hearing ranges and radio use are assumptions; at 4,096
+  players sending per frame, and LiveKit from 2,200, server or load generator neared their cores; single runs.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/voice-chat](docs/research/voice-chat/).
 
 ## How it is built
 

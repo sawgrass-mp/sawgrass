@@ -1,0 +1,17 @@
+[package]
+name = "rp-guest"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+# The roleplay workloads as a WebAssembly module, built for wasm32-unknown-unknown and loaded by wasmtime.
+# Standalone, with no dependencies.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+panic = "abort"
