@@ -205,10 +205,11 @@ fn main() -> ExitCode {
                     received_bytes_per_sec: per_sec(received - last.4),
                 };
                 line += &format!(
-                    ", sent {} kB/s, received {} kB/s, send errors {}",
+                    ", sent {} kB/s, received {} kB/s, send errors {}, dropped ticks {}",
                     report.sent_bytes_per_sec / 1000,
                     report.received_bytes_per_sec / 1000,
-                    traffic.send_errors.load(Ordering::Relaxed)
+                    traffic.send_errors.load(Ordering::Relaxed),
+                    traffic.dropped_ticks.load(Ordering::Relaxed)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);

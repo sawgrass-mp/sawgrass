@@ -140,6 +140,57 @@ fn players_are_placed_and_see_each_other() {
     assert!(position_of(&tick_loop, id_b).is_some());
 }
 
+/// Snapshots leave through the gateway's send task once per tick (NET-9): each tick's datagram reaches the client,
+/// in the order the ticks sent them.
+#[test]
+fn snapshots_arrive_in_tick_order() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    client.send_datagram(state_packet(1.0)).expect("send");
+    assert!(tick_until(&mut tick_loop, |t| position_of(t, id).is_some()));
+
+    let headers: Vec<PacketHeader> = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            runtime.block_on(async {
+                let mut headers = Vec::new();
+                while headers.len() < 20 {
+                    let (header, _) = client.recv_datagram().await.expect("snapshot");
+                    assert_eq!(header.kind, PacketKind::Snapshot);
+                    headers.push(header);
+                }
+                headers
+            })
+        });
+        tick_until(&mut tick_loop, |_| reader.is_finished());
+        reader.join().expect("reader")
+    });
+    for pair in headers.windows(2) {
+        assert!(
+            pair[1].sequence > pair[0].sequence,
+            "sequence went back: {pair:?}"
+        );
+        assert!(
+            pair[1].tick > pair[0].tick,
+            "one datagram per tick when alone: {pair:?}"
+        );
+    }
+}
+
 #[test]
 fn a_flood_of_states_keeps_only_the_latest() {
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
