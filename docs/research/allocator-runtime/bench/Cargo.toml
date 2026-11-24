@@ -1,0 +1,35 @@
+[package]
+name = "runtime-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+# Standalone: not part of the Sawgrass workspace, so its dependencies never reach the project's graph.
+[workspace]
+
+[dependencies]
+bytes = "1"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "runtime-smol", "rustls-ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+smol = "2"
+compio = { version = "0.19", default-features = false, features = ["runtime", "time", "io", "net", "bytes", "io-uring"] }
+compio-quic = { version = "0.8.2", default-features = false, features = ["ring"] }
+futures-channel = "0.3"
+futures-util = "0.3"
+rocksdb = { version = "0.24", default-features = false }
+sawgrass-protocol = { path = "../../../../crates/sawgrass-protocol" }
+sawgrass-server = { path = "../../../../crates/sawgrass-server" }
+mimalloc = { version = "0.1.52", optional = true, default-features = false, features = ["override"] }
+tikv-jemallocator = { version = "0.7", optional = true, features = ["unprefixed_malloc_on_supported_platforms"] }
+
+[features]
+# One allocator per build; none selected is the system allocator (glibc malloc). Both replace malloc for the
+# whole process, so RocksDB's C++ code uses the same allocator as the Rust code.
+mimalloc = ["dep:mimalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
+
+[profile.release]
+debug = "line-tables-only"
