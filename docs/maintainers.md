@@ -106,8 +106,8 @@ merging it. Moving agents to their own account without write access restores the
 ## Review agent
 
 Reviews are done by a Claude session that a maintainer runs, in the maintainers' Claude project or on their own
-machine, through that maintainer's GitHub access. It is in comment-only mode: it comments, never approves or
-merges. Use a session that did not write the pull request.
+machine, through that maintainer's GitHub access. It comments, never approves, and merges the maintainer's own
+pull requests that pass (step 5). Use a session that did not write the pull request.
 
 For each pull request that is not a draft, the reviewer session:
 
@@ -126,8 +126,29 @@ For each pull request that is not a draft, the reviewer session:
    pull request, and never runs `cargo`, scripts or git hooks on that checkout.
 4. Posts one comment starting with `<!-- sawgrass-reviewer -->` (tier, checks, verdict, findings) and edits that
    comment after new pushes instead of posting another.
+5. Merges the pull request when all of these hold, any tier, `protected` included (the maintainer decided this on
+   2026-11-24):
+   - it is the maintainer's own (`policy.maintainer_pr`: a login in `MAINTAINERS`, from a branch of this
+     repository);
+   - the verdict is `looks good to merge`, given for the current head commit;
+   - every required check is green on that commit, and GitHub reports no merge conflict;
+   - neither the pull request nor its task has the `hold` label.
 
-The comments appear under the maintainer's account, and reviews happen only while a reviewer session runs.
+   It marks a draft ready for review first, then squash-merges with the reviewed commit pinned, so a push made
+   after the review is never merged unreviewed:
+
+   ```sh
+   gh api -X PUT "repos/sawgrass-mp/sawgrass/pulls/$PR/merge" -f merge_method=squash -f sha="$REVIEWED_SHA"
+   ```
+
+   When several pull requests pass, it merges the oldest first and re-checks the rest, since a merge can leave
+   another in conflict. A conflict, a red check or a later push goes back to the pull request's author; it never
+   resolves conflicts in someone else's pull request itself. Pull requests from other accounts are never merged
+   by the reviewer.
+
+The comments and merges appear under the maintainer's account, and reviews and merges happen only while a
+reviewer session runs. To stop one merge, add `hold` to the pull request or its task; to stop all of them, stop
+running the reviewer. Every merge is a squash commit, so a bad one is undone with a revert.
 
 The GitHub Actions variant (`.github/workflows/review.yml`, `tools/reviewer/review.py`) is dormant: without the
 `ANTHROPIC_API_KEY` secret it logs a warning and does nothing.
@@ -145,7 +166,7 @@ of every reviewer session, after the reviews, the reviewer refreshes them:
 3. It pushes the branch and opens a pull request titled `DOC-2: Refresh README progress`, or force-pushes the
    branch if that pull request is already open, so there is never more than one. The pull request has no linked
    task, so the "Linked task" policy check fails on it; that is expected for this pull request only.
-4. A maintainer merges it like any other pull request. The reviewer still does not merge.
+4. A maintainer merges it. The reviewer does not merge this one: it has no task and the reviewer wrote it.
 
 The script runs only code from `main`, so this does not break the rule that the reviewer never runs pull request
 code. When a stage changes (a new stage starts, the game boots under Leonida), a maintainer updates `STAGES` in

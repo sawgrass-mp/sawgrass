@@ -54,10 +54,11 @@ Safeguards:
   account, so a review is a comment, not a GitHub approval (GitHub does not let an account approve its own pull
   request).
 - Anyone with triage rights stops an automatic merge with a label; agent merges are squash commits, easy to revert.
-- It starts in comment-only mode. After about a month of comparing its verdicts with the maintainer's decisions,
-  automatic merging is enabled tier by tier, tier 1 first.
+- It started in comment-only mode. Since 2026-11-24, by the maintainer's decision, it merges the maintainer's own
+  pull requests of every tier once CI is green and its review has no blocking finding; the table above still
+  applies to pull requests from other accounts. `hold` on a pull request or its task stops its merge.
 
-How it works today (comment-only mode): a maintainer starts a reviewer session, which follows
+How it works today: a maintainer starts a reviewer session, which follows
 [maintainers.md](maintainers.md#review-agent). The tier, the task link and the size limit come from deterministic
 rules in `tools/reviewer/policy.py`, never from the model. Until automatic merging is enabled, only docs, tests,
 `resources/` and `README.md` count as tier 1; all other code is tier 2. Reviews happen only while such a session
