@@ -5,15 +5,20 @@
 //!   loss           delta-encoded snapshot size by round trip and loss
 //!   speed          time to compress and decompress a snapshot
 //!   fuzz METHOD N  decode N random and N corrupted packets with METHOD (e.g. delta/zstd-3-dict16k)
+//!   recorded TRAIN TEST sizes|loss|speed
+//!                  the same suite on snapshots recorded from the real server under the load-test bots:
+//!                  dictionaries trained on the TRAIN recording, everything measured on the TEST recording
 
 mod codec;
 mod delta;
 mod model;
+mod recorded;
 mod sim;
 
 use std::collections::VecDeque;
 use std::hint::black_box;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use codec::{Codec, Lz4, Plain, Zstd};
@@ -111,8 +116,12 @@ impl Link {
     }
 }
 
+/// Recordings from the real server (training, test), when the `recorded` command set them.
+static RECORDED: OnceLock<(recorded::Streams, recorded::Streams)> = OnceLock::new();
+
 /// Runs the world for `ticks` after the warm-up and calls `f` with every recorded snapshot, its baseline, and the
-/// player's own entity.
+/// player's own entity. With recordings loaded, replays the training recording for `TRAIN_SEED` and the test
+/// recording otherwise, at most `ticks` snapshots per bot, with no own entity (a default one is passed).
 fn simulate(
     seed: u64,
     ticks: u32,
@@ -120,6 +129,29 @@ fn simulate(
     loss: f64,
     mut f: impl FnMut(&Snapshot, Option<&Snapshot>, &Entity),
 ) {
+    if let Some((train, test)) = RECORDED.get() {
+        let streams = if seed == TRAIN_SEED { train } else { test };
+        let mut links: Vec<Link> = (0..streams.len())
+            .map(|i| Link::new(seed * 1000 + i as u64, rtt_ms, loss))
+            .collect();
+        let me = Entity {
+            id: u32::MAX,
+            pos: [0; 3],
+            vel: [0; 3],
+            rot: 0,
+        };
+        // Tick by tick across the bots, as the simulation goes, so `sample` takes every bot's snapshots.
+        for i in 0..ticks as usize {
+            for (stream, link) in streams.iter().zip(&mut links) {
+                let Some(snap) = stream.get(i) else { continue };
+                let now = f64::from(snap.tick) * sim::DT * 1000.0;
+                let base = link.baseline(snap.tick, now);
+                f(snap, base, &me);
+                link.sent(snap.clone(), now);
+            }
+        }
+        return;
+    }
     let mut world = World::new(seed, ENTITIES, AREA_M);
     let mut observers: Vec<Observer> = (0..OBSERVERS).map(Observer::new).collect();
     let mut links: Vec<Link> = (0..OBSERVERS)
@@ -317,7 +349,9 @@ fn sizes() {
             );
         }
     }
-    small_messages();
+    if RECORDED.get().is_none() {
+        small_messages();
+    }
 }
 
 /// Client state, a chat line and a script event: reliable or upstream messages that are not snapshots.
@@ -545,7 +579,9 @@ fn fuzz(method: &str, n: usize) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: compression-bench sizes | loss | speed | fuzz full|delta/CODEC N");
+    eprintln!(
+        "usage: compression-bench sizes | loss | speed | fuzz full|delta/CODEC N | recorded TRAIN TEST sizes|loss|speed"
+    );
     std::process::exit(2)
 }
 
@@ -555,6 +591,31 @@ fn main() {
         Some("sizes") => sizes(),
         Some("loss") => loss(),
         Some("speed") => speed(),
+        Some("recorded") => {
+            let load = |i: usize| {
+                let path = args.get(i).map_or_else(|| usage(), String::as_str);
+                let (streams, bad) = recorded::load(path).unwrap_or_else(|e| {
+                    eprintln!("{path}: {e}");
+                    std::process::exit(1)
+                });
+                let snapshots: usize = streams.iter().map(Vec::len).sum();
+                let entities: usize = streams.iter().flatten().map(|s| s.entities.len()).sum();
+                println!(
+                    "{{\"suite\":\"recording\",\"file\":\"{path}\",\"bots\":{},\"snapshots\":{snapshots},\"mean_entities\":{:.1},\"undecodable\":{bad}}}",
+                    streams.len(),
+                    entities as f64 / snapshots.max(1) as f64
+                );
+                streams
+            };
+            let streams = (load(2), load(3));
+            let _ = RECORDED.set(streams);
+            match args.get(4).map(String::as_str) {
+                Some("sizes") => sizes(),
+                Some("loss") => loss(),
+                Some("speed") => speed(),
+                _ => usage(),
+            }
+        }
         Some("fuzz") => fuzz(
             args.get(2).map_or_else(|| usage(), String::as_str),
             args.get(3)

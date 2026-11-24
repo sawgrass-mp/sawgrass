@@ -52,6 +52,10 @@ Other options: `--send-hz` (default 20), `--area` (side of the square in metres,
 (default 8), `--seed` (same seed, same routes), `--threads` (runtime threads, default all cores) and `--name`
 (the name in the server certificate, default `localhost`).
 
+`--record FILE` writes every snapshot datagram the first `--record-bots` bots (default 32) receive to FILE, for the
+packet compression benchmark to replay (`docs/research/packet-compression`). It takes about 70 MB a minute at 1,000
+bots over 1,500 m.
+
 ## Bots and server on separate machines
 
 The bots reach the server over the network like players, so give them the server's address and the name in its

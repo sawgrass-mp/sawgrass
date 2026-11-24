@@ -53,6 +53,7 @@ async fn bots_move_on_the_server_and_see_each_other() {
             hotspots: 0,
             ..Area::default()
         },
+        record: None,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(4);

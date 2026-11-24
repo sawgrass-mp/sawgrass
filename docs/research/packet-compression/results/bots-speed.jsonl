@@ -1,0 +1,12 @@
+{"suite": "speed", "encoding": "full", "codec": "none", "encode_ns": 2842, "decode_ns": 1939, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "full", "codec": "lz4", "encode_ns": 4922, "decode_ns": 2410, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-1", "encode_ns": 9054, "decode_ns": 4422, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-3", "encode_ns": 12363, "decode_ns": 5531, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-1-dict16k", "encode_ns": 9730, "decode_ns": 4470, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "full", "codec": "zstd-3-dict16k", "encode_ns": 15361, "decode_ns": 4859, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "delta", "codec": "none", "encode_ns": 1285, "decode_ns": 2364, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "delta", "codec": "lz4", "encode_ns": 1691, "decode_ns": 2219, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-1", "encode_ns": 5534, "decode_ns": 4104, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-3", "encode_ns": 6529, "decode_ns": 4782, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-1-dict16k", "encode_ns": 3017, "decode_ns": 3280, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}
+{"suite": "speed", "encoding": "delta", "codec": "zstd-3-dict16k", "encode_ns": 4886, "decode_ns": 3441, "source": "bots-1000-1500m", "at": "2026-11-24T22:01:00"}

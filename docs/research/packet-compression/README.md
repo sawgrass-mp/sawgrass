@@ -331,6 +331,42 @@ its own hostile-input run when it is adopted.
 - Gateway CPU rather than bandwidth turning out to be the limit, which would favour leaving zstd out for good.
 - Prediction or bit packing shrinking deltas further, which would leave less for zstd to find.
 
+## Checked on the load-test bots
+
+The size above was measured on a simulated world, and the dictionary was trained on it; the question of zstd with
+a dictionary was left for the load-test bots. BOT-3 runs the real server under them
+([load-test-bots](../load-test-bots/README.md)), and `sawgrass-bots run --record FILE` saves the snapshot datagrams
+the first 32 bots receive. Two runs of 1,000 bots over a 1.5 km square were recorded, seeds 1 and 2 (different
+hotspots and routes), 60 s each. `compression-bench recorded TRAIN TEST SUITE` replays them through the same
+pipelines and the same acknowledgement model: dictionaries are trained on the seed 2 run and every figure is measured
+on the seed 1 run, 35,164 snapshots, after the first 10 s of each bot
+([`results/bots-sizes.jsonl`](results/bots-sizes.jsonl), [`bots-speed`](results/bots-speed.jsonl),
+[`bots-loss`](results/bots-loss.jsonl)).
+
+The server sends whole snapshots today, so the recorded stream is the real server's visible sets and the bots'
+real movement, re-encoded here. It is not the traffic of real players: the bots only walk, run and drive between
+waypoints and pause, with no vehicles of their own, no animation state and no events.
+
+| Pipeline (100 ms round trip, no loss) | Simulated, 100 entities | Bots, 76 entities | Encode / decode on the bots |
+|---|---:|---:|---:|
+| Whole | 1,935 B, 2 datagrams | 1,466 B, 1.49 datagrams | 2.8 / 1.9 µs |
+| Whole + zstd 3, dictionary | 1,760 B | 1,177 B | 15.4 / 4.9 µs |
+| **Delta** | **793 B, 1 datagram** | **355 B, 1.00 datagram** | **1.3 / 2.4 µs** |
+| Delta + zstd 1, dictionary | 644 B (19% less) | 275 B (22% less) | 3.0 / 3.3 µs |
+| Delta + zstd 3, dictionary | 647 B | 278 B | 4.9 / 3.4 µs |
+
+**The choice holds, and delta encoding gains more on the bots than in the simulation**: 76% fewer bytes than the
+whole snapshot instead of 59%, because most bots walk in straight lines or stand still between waypoints. Only 0.09%
+of delta snapshots needed a second datagram. The delta stays as small under loss as it did here: at 10% loss it
+grew from 347 to 349 bytes at a 100 ms round trip, and to 367 bytes at 200 ms.
+
+**zstd with a dictionary stays out.** On the bots it saved 22% of the delta's bytes, about as much as the 19% here,
+not the "much more" that [What would change the answer](#what-would-change-the-answer) asked for, and a
+dictionary trained on one run worked on another with different hotspots. It saves no datagrams, since the delta
+already fits in one, and costs 1.7 µs more to encode and 0.9 µs more to decode per snapshot: about 0.14 cores at
+4,096 players. On the real server under the bots the limit is the tick thread, not outgoing bandwidth (see that
+page), so bytes are not yet worth CPU. It is worth measuring again on traffic from real players.
+
 ## Licences
 
 Checked against the licence files and manifests of the versions used. Sawgrass is AGPL-3.0, and #44 proposes MIT
@@ -364,6 +400,16 @@ reads the sizes suite's results.
 python3 -I run.py sizes loss speed fuzz   # about 5 minutes
 python3 -I run.py quinn                   # about 10 minutes
 python3 -I chart.py                       # redraws docs/assets/compression.svg
+```
+
+On snapshots recorded from the real server under the load-test bots (about 70 MB per run; not committed):
+
+```sh
+cargo build --release -p sawgrass-server -p sawgrass-bots   # at the workspace root
+# Start the server as in crates/sawgrass-bots/README.md, then once with --seed 1 and once with --seed 2:
+target/release/sawgrass-bots run --server 127.0.0.1:4433 --cert CERT --count 1000 --area 1500 \
+    --seed 1 --record /tmp/bots-1.bin
+bench/target/release/compression-bench recorded /tmp/bots-2.bin /tmp/bots-1.bin sizes   # also speed, loss
 ```
 
 ## Sources

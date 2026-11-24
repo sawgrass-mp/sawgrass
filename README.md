@@ -226,6 +226,8 @@ corrupted inputs.
   corrupted packets as valid, so integrity comes from QUIC's authenticated encryption.
 - Caveats: one 4-core VM; single-threaded microbenchmarks on one pinned core with warm caches; delta compression
   and bit packing, which shrink snapshots more than any format, were not measured.
+- Checked on snapshots recorded from the real server under the load-test bots: postcard was 17% smaller than the
+  current format (1,466 against 1,772 bytes), so the choice holds.
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/packet-serialization](docs/research/packet-serialization/).
@@ -254,6 +256,8 @@ on 38,400 snapshots from a simulated city block, with quinn sending them to 2,04
   uncompressed. No decoder crashed on 1.6 million random and corrupted packets.
 - Caveats: simulated traffic, not the game's; one 4-core VM; at 4,096 players server and load generator were both
   near their cores, so CPU is compared at 2,048.
+- Checked on snapshots recorded from the real server under the load-test bots: delta encoding saved 76% (355 against
+  1,466 bytes), and zstd with a dictionary another 22%, about as in the simulation, so it stays out for now.
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/packet-compression](docs/research/packet-compression/).

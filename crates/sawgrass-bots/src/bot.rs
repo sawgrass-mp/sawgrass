@@ -10,6 +10,7 @@ use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, decode_snap
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::record::Recorder;
 use crate::stats::Counters;
 use crate::walker::{Area, Walker};
 
@@ -26,6 +27,8 @@ pub struct BotConfig {
     pub send_hz: u32,
     /// Where the bots move.
     pub area: Area,
+    /// Records the snapshots of the first few bots, if set.
+    pub record: Option<Arc<Recorder>>,
 }
 
 /// What one bot learned from the server, for tests.
@@ -92,7 +95,12 @@ pub async fn run(
         }
     });
 
-    let reader = tokio::spawn(read_snapshots(datagrams.clone(), counters.clone()));
+    let recorder = config.record.clone().filter(|r| r.records(index));
+    let reader = tokio::spawn(read_snapshots(
+        datagrams.clone(),
+        counters.clone(),
+        recorder.map(|r| (r, index)),
+    ));
     let ended_early = send_states(&config, index, &datagrams, &counters, stop).await;
     datagrams.close();
     reader.abort();
@@ -146,7 +154,7 @@ async fn send_states(
     }
 }
 
-async fn read_snapshots(datagrams: Datagrams, counters: Arc<Counters>) {
+async fn read_snapshots(datagrams: Datagrams, counters: Arc<Counters>, record: Option<(Arc<Recorder>, u64)>) {
     let mut last_tick = None;
     while let Ok((header, packet)) = datagrams.recv().await {
         if header.kind != PacketKind::Snapshot {
@@ -154,6 +162,9 @@ async fn read_snapshots(datagrams: Datagrams, counters: Arc<Counters>) {
         }
         Counters::add(&counters.received_datagrams, 1);
         Counters::add(&counters.received_bytes, packet.len() as u64);
+        if let Some((recorder, index)) = &record {
+            recorder.write(*index, &packet);
+        }
         if let Ok(n) = decode_snapshot(&packet[PacketHeader::SIZE..], |_| {}) {
             Counters::add(&counters.received_entities, n as u64);
         }
