@@ -1,58 +1,58 @@
-# Storage for roleplay state: our own log, embedded engines, TigerBeetle, SpacetimeDB, PostgreSQL
+# Storage for roleplay state: what we measured and what we chose
 
-Measured 2026-11-23 with a prototype in-process ledger, SQLite 3.50.2, redb 3.1.3, RocksDB 10.4.2, LMDB 0.9.70,
-TigerBeetle 0.17.9, SpacetimeDB 2.16.1 and PostgreSQL 16.15. Tasks: DB-2, DB-4.
+Measured 2026-11-23 with a prototype in-process ledger, SQLite 3.50.2, redb 3.1.3, RocksDB 10.4.2, Fjall 3.1.13,
+LMDB 0.9.70 (the development `mdb.master` branch, as `heed` builds it), TigerBeetle 0.17.9, SpacetimeDB 2.16.1 and
+PostgreSQL 16.15. Tasks: DB-2, DB-4. The decision is
+[ADR 0003](../../adr/0003-in-memory-roleplay-state.md), proposed in #46.
 
-The question: what is the fastest sound way to store roleplay state with money in it (money, inventory, property,
-factions)? Keeping existing code is not a goal. Money must never be created or lost, and an acknowledged change
-must survive a crash. This page records what was measured, what was not, and what follows from it.
+The question: what storage for roleplay state with money in it (money, inventory, property, factions) is reliable
+and fast together? Keeping existing code is not a goal. Money must never be created or lost, and an acknowledged
+change must survive a crash. This page records what was measured, what was not, what we chose and why.
 
 ## Short answer
 
-| Design (same ledger, same rules, 64 callers, durable) | Transfers per second | One hot wallet | Restart |
+**We chose RocksDB behind one writer in the world server.** The server holds roleplay state in memory, one writer
+applies every change, and each batch of changes is one RocksDB write with its log flushed to disk before anyone
+gets a reply. See [What we chose and why](#what-we-chose-and-why).
+
+| Design (same ledger, same rules, 64 callers, durable) | Transfers per second | One hot wallet | 5-minute run (p99) |
 |---|---:|---:|---:|
-| **In-process ledger**, its own log, group commit | **72,781** | **71,969** | 1.7 s for 1.8 M operations |
-| In-process ledger on RocksDB | 51,542 | 56,738 | 1.2 s for 1.3 M operations |
-| In-process ledger on LMDB | 36,968 | 38,278 | 0.6 s for 0.9 M operations |
-| In-process ledger on redb | 29,142 | 29,343 | 0.7 s for 0.7 M operations |
-| In-process ledger on SQLite, `synchronous=FULL` | 24,042 | 21,553 | 0.2 s for 0.3 M operations |
-| TigerBeetle, one transfer per request | 20,781 | 22,281 | 3.0 s after a kill, 1.3 s clean |
-| SpacetimeDB 2.16.1 | 11,352 | 10,707 | 13 s clean, 27 s after a crash |
-| PostgreSQL, one SQL function per transfer | 5,666 | 917 | 0.8 s after a crash |
-| PostgreSQL, current `sawgrass-db` code | 3,437 | 642 | (same) |
+| One writer in the server, our own log | 72,781 | 71,969 | 73,828 (1.4 ms) |
+| **One writer in the server, RocksDB** | **51,542** | **56,738** | **55,480 (1.9 ms)** |
+| One writer in the server, Fjall | 43,836 | 48,973 | 40,107 (3.2 ms) |
+| One writer in the server, LMDB | 36,968 | 38,278 | 32,941 (3.7 ms) |
+| One writer in the server, redb | 29,142 | 29,343 | not run |
+| One writer in the server, SQLite `synchronous=FULL` | 24,042 | 21,553 | not run |
+| SpacetimeDB 2.16.1 | 11,352 | 10,707 | not run |
+| PostgreSQL, one SQL function per transfer | 5,666 | 917 | not run |
+| PostgreSQL, current `sawgrass-db` code | 3,437 | 642 | not run |
 
-"In-process ledger on X" is the same server-side writer with the same group commit, with X storing each batch
-instead of our own log. Two variants are left out of the table because they do not meet the same bar: SQLite with
-`synchronous=NORMAL` (29,616 and 30,861: it can lose recent acknowledged transfers on a power cut) and TigerBeetle
-with 100 transfers per request (50,516 and 60,037, but a p99 of 0.6 to 0.7 s, and our callers send one at a time).
+"One writer in the server, X" is the same writer with the same group commit, with X storing each batch. Left out
+of the table because they do not meet the same bar:
 
-- **The fastest design is our own server holding the state in memory**, with an append-only log flushed to disk
-  before each reply. Callers' transfers are flushed to disk together, one flush per batch. It was 6.4 times faster
-  than SpacetimeDB and 13 to 21 times faster than PostgreSQL, with sub-millisecond median latency and no penalty
-  for a hot wallet. In three kill -9 tests under load the log held every acknowledged transfer, and the invariants
-  held (a process kill, not a power cut; see [Results](#results)).
-- **An embedded engine under the same writer comes close.** RocksDB reached 71% of our own log at 64 callers and
-  70% at 256, LMDB 51% and 74%. Either would replace the storage code we would otherwise own (record format,
-  checksums, recovery, compaction) with a tested engine. See
-  [Embedded engines and TigerBeetle](#embedded-engines-and-tigerbeetle).
-- **Group commit decides it for every engine.** One commit per transfer gave 3,300 to 6,100 per second for all of
-  them except SQLite `NORMAL`, the speed of the disk.
-- **SQLite's speed-up is `synchronous=NORMAL`**, which skips the flush on commit. Here it gave 23% more at 64
-  callers and 2.8 times more for a single caller, at the cost of durability against a power cut.
-- **TigerBeetle** is a ledger database built for this kind of load, but it holds only accounts and transfers, not
-  inventory or property, and it could not be run here as it is meant to run in production (see below).
-- **SpacetimeDB is next.** It works on the same principle (state in memory, logic next to it, batched durability)
-  but adds a WebSocket hop and a WASM call per transfer.
-- **PostgreSQL is last on writes**, mostly because every transfer holds row locks across a network round trip and a
-  disk flush. It is still the best tool for history, queries, backups and replicas.
-- **Proposed design:** authoritative roleplay state in the world server's memory, made durable by its own log with
-  group commit, plus periodic snapshots. PostgreSQL becomes an asynchronous archive fed from the log, for queries,
-  admin tools and history. See [Proposed design](#proposed-design) for what it costs, and for RocksDB as the
-  storage under it.
+- SQLite with `synchronous=NORMAL`: 29,616 and 30,861. It can lose recent acknowledged transfers on a power cut.
+- TigerBeetle: 20,781 and 22,281 with one transfer per request, 50,516 and 60,037 with 100 per request (p99 0.6
+  to 0.7 s). It ran in `--development` mode without Direct I/O, so its durability against a power cut is not
+  established here (see [Embedded engines and TigerBeetle](#embedded-engines-and-tigerbeetle)).
 
-The prototype is about 490 lines and passed three kill tests and four corruption tests. It is not a hardened
-storage engine, and the figures come from one 4-core VM. Read [What was not measured](#what-was-not-measured)
-before relying on them.
+- **The architecture matters more than the engine.** Every design with one writer in the server, holding state in
+  memory and committing many transfers with one disk flush (group commit), did 24,000 to 74,000 durable transfers
+  per second, with no penalty for a hot wallet. The database servers did 3,400 to 11,000, and PostgreSQL fell below
+  1,000 on one hot wallet.
+- **Our own log is the fastest store; RocksDB is the fastest proven one.** Over five minutes, long enough for
+  RocksDB to compact its data into its lower levels, it kept 75% of our own log's throughput, with no write stall.
+- **Both are far above the need.** The expected peak is about 1,200 storage writes per second for 4096 players,
+  an estimate until BOT-2. RocksDB covers it about 45 times over, so the extra speed of our own log is not worth
+  owning a storage engine.
+- **No acknowledged transfer was lost.** In kill -9 tests under load (three per store, for our own log, RocksDB,
+  Fjall, LMDB, redb and SQLite `FULL`), every transfer a caller had been told was done was still there after
+  restart, and the ledger balanced. RocksDB, set to drop only an incomplete last record, refused to start on a log
+  damaged in the middle. These were process kills, not power cuts.
+- **Group commit decides it for every store.** One commit per transfer gave 3,300 to 6,100 per second for all of
+  them except SQLite `NORMAL`: the speed of the disk.
+
+All figures come from one 4-core VM and single runs that varied by up to about 20%. Read
+[What was not measured](#what-was-not-measured) before relying on them.
 
 ## What was compared
 
@@ -81,9 +81,11 @@ operation stored as a pair of entries with `balance_after`.
 - **In-process ledger on an embedded engine:** [`embedded/`](embedded/src/main.rs). The same writer thread, checks
   and group commit as `inproc`, but each batch is one transaction in the engine (every operation plus the new
   balance of each wallet it touched) instead of a record in our log. Engines: SQLite in WAL mode with
-  `synchronous=FULL` and with `synchronous=NORMAL`, redb with `Durability::Immediate`, RocksDB with a write batch
-  and `sync=true`, LMDB with default flags (synced on commit). On start it loads the balances and rebuilds the
-  idempotency keys from the stored operations.
+  `synchronous=FULL` and with `synchronous=NORMAL`; redb with `Durability::Immediate` (set explicitly); RocksDB
+  with a write batch and `sync=true`, WAL recovery mode `TolerateCorruptedTailRecords` and `paranoid_checks`;
+  Fjall with a write batch and `PersistMode::SyncAll`; LMDB with default flags (synced on commit). On start it
+  loads the balances and rebuilds the idempotency keys from the stored operations. With `SAWGRASS_ACK_MARKER` set,
+  it records how many operations are committed after each commit and before any reply, as `inproc` does.
 - **TigerBeetle:** one replica, driven by [`tigerbeetle/`](tigerbeetle/src/main.rs) through the official Rust
   client. Character accounts carry `debits_must_not_exceed_credits`, so they cannot go negative; the transfer id is
   the idempotency key. One shared client, which batches concurrent requests itself.
@@ -99,9 +101,9 @@ next. Runs last 20 seconds (10 seconds for the in-process ledger, the embedded e
 | PostgreSQL, `synchronous_commit = on` | After the WAL record is flushed | Nothing acknowledged |
 | SpacetimeDB, confirmed reads (default) | After the transaction is durable | Nothing acknowledged |
 | In-process, `each` or `group` | After `fdatasync` of the log | Nothing acknowledged |
-| In-process on SQLite `FULL`, redb, RocksDB or LMDB | After the engine's commit, which syncs to disk | Nothing acknowledged |
+| In-process on SQLite `FULL`, redb, RocksDB, Fjall or LMDB | After the engine's commit, which syncs to disk | Nothing acknowledged |
 | In-process on SQLite `NORMAL` | After the commit reaches the WAL file, before any sync | Nothing on a process crash; recent acknowledged transfers on a power cut or OS crash |
-| TigerBeetle, one replica | After the replica has written the transfer to its own log | Nothing acknowledged on a process kill (power cut not checked here; see below) |
+| TigerBeetle, one replica | After the replica has written the transfer to its own log | Nothing acknowledged on a process kill; against a power cut not established, because it ran without Direct I/O (see below) |
 | In-process `none`, PostgreSQL `synchronous_commit = off`, SpacetimeDB confirmed reads off | Before the flush | Recent acknowledged transfers, always whole ones |
 
 The headline figures use only the rows where nothing acknowledged is lost.
@@ -173,38 +175,71 @@ dropped. A real engine needs a durable note of how far the log was flushed to te
 
 ### Embedded engines and TigerBeetle
 
-Same machine, same workload, run with the machine otherwise idle. Transfers per second (p99 latency), `group`
-commit unless noted; our own log repeated from the table above for comparison:
+Same machine, same workload, run with the machine otherwise idle. Transfers per second (p99 latency), 10-second
+runs, `group` commit unless noted; our own log repeated from the table above for comparison:
 
-| Pattern | Callers | Own log | RocksDB | LMDB | redb | SQLite `FULL` | SQLite `NORMAL` | TigerBeetle |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| uniform | 1 | 5,444 (0.42 ms) | 4,643 (0.52 ms) | 2,688 (0.81 ms) | 3,052 (0.76 ms) | 4,563 (0.67 ms) | 12,649 (0.25 ms) | not run |
-| uniform | 16 | 44,718 (0.78 ms) | 33,362 (1.0 ms) | 16,319 (2.3 ms) | 13,845 (2.4 ms) | 15,764 (3.2 ms) | 26,046 (7.9 ms) | not run |
-| uniform | 64 | 72,781 (2.0 ms) | 51,542 (2.2 ms) | 36,968 (3.0 ms) | 29,142 (4.0 ms) | 24,042 (6.8 ms) | 29,616 (12 ms) | 20,781 (32 ms) |
-| uniform | 256 | 93,862 (4.0 ms) | 65,905 (6.1 ms) | 69,849 (5.8 ms) | 51,928 (8.2 ms) | 27,617 (19 ms) | 31,334 (21 ms) | 30,016 (48 ms) |
-| hot | 64 | 71,969 (1.7 ms) | 56,738 (2.3 ms) | 38,278 (3.1 ms) | 29,343 (4.6 ms) | 21,553 (7.4 ms) | 30,861 (12 ms) | 22,281 (30 ms) |
-| hot | 256 | 97,107 (4.1 ms) | not run | not run | not run | not run | not run | 33,492 (47 ms) |
-| uniform, one commit per transfer | 64 | 6,128 (16 ms) | 5,357 (21 ms) | 3,322 (34 ms) | 3,315 (33 ms) | 4,855 (25 ms) | 14,791 (12 ms) | |
+| Pattern | Callers | Own log | RocksDB | Fjall | LMDB | redb | SQLite `FULL` | SQLite `NORMAL`, not ranked | TigerBeetle, dev mode, not ranked |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| uniform | 1 | 5,444 (0.42 ms) | 4,643 (0.52 ms) | 5,055 (0.64 ms) | 2,688 (0.81 ms) | 3,052 (0.76 ms) | 4,563 (0.67 ms) | 12,649 (0.25 ms) | not run |
+| uniform | 16 | 44,718 (0.78 ms) | 33,362 (1.0 ms) | 26,066 (1.4 ms) | 16,319 (2.3 ms) | 13,845 (2.4 ms) | 15,764 (3.2 ms) | 26,046 (7.9 ms) | not run |
+| uniform | 64 | 72,781 (2.0 ms) | 51,542 (2.2 ms) | 43,836 (3.2 ms) | 36,968 (3.0 ms) | 29,142 (4.0 ms) | 24,042 (6.8 ms) | 29,616 (12 ms) | 20,781 (32 ms) |
+| uniform | 256 | 93,862 (4.0 ms) | 65,905 (6.1 ms) | 57,351 (7.5 ms) | 69,849 (5.8 ms) | 51,928 (8.2 ms) | 27,617 (19 ms) | 31,334 (21 ms) | 30,016 (48 ms) |
+| hot | 64 | 71,969 (1.7 ms) | 56,738 (2.3 ms) | 48,973 (2.7 ms) | 38,278 (3.1 ms) | 29,343 (4.6 ms) | 21,553 (7.4 ms) | 30,861 (12 ms) | 22,281 (30 ms) |
+| hot | 256 | 97,107 (4.1 ms) | not run | not run | not run | not run | not run | not run | 33,492 (47 ms) |
+| uniform, one commit per transfer | 64 | 6,128 (16 ms) | 5,357 (21 ms) | 5,236 (21 ms) | 3,322 (34 ms) | 3,315 (33 ms) | 4,855 (25 ms) | 14,791 (12 ms) | |
 
 TigerBeetle with 100 transfers per request at 64 callers: 50,516 uniform (p50 98 ms, p99 694 ms) and 57,690 to
 60,037 hot (p99 604 ms). Its invariant check (debits equal credits, no character overdrawn) passed after every run.
 
-Restart and crash, measured after dropping the page cache:
+**Five minutes under load.** A 10-second run writes about 100 MB, too little for an LSM engine (RocksDB, Fjall)
+to compact its data into its lower levels, which is where write stalls and long-run slowdowns show. So the four
+fastest stores ran for 300 seconds at 64 callers, uniform:
 
-| Engine | Restart | Kill -9 under load at 64 callers, after 6 s |
-|---|---|---|
-| RocksDB | 1.17 s for 1,269,388 operations (104 MB) | 332,229 operations recovered, invariants hold |
-| LMDB | 0.60 s for 886,233 operations (81 MB) | 225,065 recovered, invariants hold |
-| redb | 0.68 s for 712,429 operations (114 MB) | 181,582 recovered, invariants hold |
-| SQLite `FULL` | 0.23 s for 303,867 operations (31 MB) | 154,172 recovered, invariants hold |
-| SQLite `NORMAL` | 0.50 s for 716,994 operations (72 MB) | 205,617 recovered, invariants hold |
-| TigerBeetle | 3.0 s after kill -9, 1.3 s after SIGTERM (2.8 GB preallocated file) | invariants hold after the kill |
+| Store | Transfers per second | p50 | p99 | Worst request | Stored | Restart after |
+|---|---:|---:|---:|---:|---:|---:|
+| Own log | 73,828 | 0.82 ms | 1.4 ms | 4.5 s | 22.2 M operations, 1.9 GB | not run |
+| RocksDB | 55,480 | 1.07 ms | 1.9 ms | 4.3 s | 16.7 M operations, 1.4 GB | 22.3 s |
+| Fjall | 40,107 | 1.39 ms | 3.2 ms | 2.3 s | 12.1 M operations, 1.1 GB | 17.9 s |
+| LMDB | 32,941 | 1.83 ms | 3.7 ms | 2.7 s | 9.9 M operations, 0.9 GB | 10.9 s |
 
-For the embedded engines restart time is about one second per million operations, almost all of it rebuilding the
-idempotency keys from every stored operation, which this harness does and a real server would bound. Unlike our own
-log, they keep balances on disk, so a bounded key window would make restarts close to instant without snapshots.
-The kill tests check that each engine comes back consistent; unlike the tests of our own log above, they did not
-record which operations had been acknowledged.
+An earlier 300-second RocksDB run gave 50,097 (p99 2.3 ms). In it RocksDB completed 13 compactions, its data
+reached levels 5 and 6, and its own statistics reported no write stall. Every store, our own log included, had a
+worst single request of 2 to 4.5 seconds over five minutes on this VM, which points at the virtual disk rather
+than the engines; it was not investigated further. Restart times here are long because this harness rebuilds the
+idempotency keys from every stored operation, about one second per million; a real server keeps a bounded window,
+and these stores keep balances on disk, so there is nothing else to replay.
+
+**Crash tests with acknowledgements.** With `SAWGRASS_ACK_MARKER` set, each store was killed with SIGKILL after 2, 5
+and 9 seconds of `group` load at 64 callers, then restarted with the page cache dropped:
+
+| Store | Killed after 2 s | 5 s | 9 s |
+|---|---|---|---|
+| RocksDB | 110,811 stored, 110,748 acknowledged | 257,679 / 257,615 | 456,264 / 456,264 |
+| RocksDB, strict recovery mode | 110,858 / 110,794 | 250,256 / 250,193 | 453,668 / 453,668 |
+| Fjall | 117,498 / 117,436 | 275,871 / 275,807 | 448,736 / 448,672 |
+| LMDB | 85,060 / 85,060 | 179,383 / 179,383 | 322,022 / 322,022 |
+| redb | 61,930 / 61,930 | 135,000 / 135,000 | 248,357 / 248,295 |
+| SQLite `FULL` | 58,894 / 58,894 | 129,798 / 129,798 | 212,432 / 212,368 |
+
+In all 18 runs every acknowledged operation was stored, and the invariants held. (The first five rows ran before
+RocksDB's recovery mode was set; the second row is the same test with it set.) As for our own log, a process kill
+leaves the page cache intact, so these test commit-before-reply and each engine's recovery, not a power cut.
+
+**RocksDB with a damaged log**, recovery mode `TolerateCorruptedTailRecords`, on a log of 24.6 MB left by a kill
+after 4 seconds (202,488 operations stored, 202,426 acknowledged):
+
+| Damage | Result |
+|---|---|
+| None | Starts; 202,488 operations, invariants hold |
+| One byte changed in the middle of the log | Start-up refused: "Corruption: checksum mismatch" |
+| Log cut 30 bytes short | Starts; the incomplete last batch (62 operations, never acknowledged) is dropped, invariants hold |
+
+That is the same rule our own log follows, implemented and maintained by RocksDB.
+
+**Restart after a short run**, page cache dropped: RocksDB 1.17 s for 1,269,388 operations (104 MB), LMDB 0.60 s
+for 886,233 (81 MB), redb 0.68 s for 712,429 (114 MB), SQLite `FULL` 0.23 s for 303,867 (31 MB), SQLite `NORMAL`
+0.50 s for 716,994 (72 MB). TigerBeetle: 3.0 s after kill -9, 1.3 s after SIGTERM (2.8 GB preallocated file), with
+its invariants intact after the kill.
 
 What to keep in mind about these rows:
 
@@ -214,15 +249,14 @@ What to keep in mind about these rows:
   runs six replicas, which adds network round trips to every commit and adds fault tolerance. Treat its figures as
   a rough indication only. It also holds only accounts and transfers, so inventory and property would live in a
   second store, and a purchase would span two systems.
-- **RocksDB and LMDB gain more from more callers** than our log does, so the gap narrows at 256 callers (70% and 74%
-  of our log). Our log reached 94,000 there with one `fdatasync` per batch; these engines do more work per batch
-  (index updates, page writes) but are mature and tested.
+- **The B-tree and LSM engines gain more from more callers** than our log does, so the gap narrows at 256 callers
+  (RocksDB 70%, LMDB 74% of our log).
 - **SQLite `NORMAL` is the fast mode people know SQLite for.** In WAL mode it skips the sync at commit and syncs
   at checkpoints, which is safe against a process crash but not a power cut. Its single-caller figure is high for
   that reason. It also hit a ceiling near 31,000 at 256 callers.
 - **Building them.** SQLite (bundled) and RocksDB compile C and C++ code during the build, through their `-sys`
-  crates' build scripts; RocksDB also needs clang and adds minutes to a clean build. LMDB is a small C library;
-  redb is pure Rust.
+  crates' build scripts; RocksDB also needs clang and adds minutes to a clean build. LMDB is a small C library.
+  Fjall and redb are pure Rust.
 
 ### Was the comparison fair?
 
@@ -262,47 +296,63 @@ to the PostgreSQL figures. So the question is whether the other two already had 
 
 ### What was not measured
 
-- Machines larger than 4 cores, callers on another machine, runs longer than 30 seconds, and a real power cut.
+- Machines larger than 4 cores, callers on another machine, runs longer than five minutes, and a real power cut.
 - Reads under write load, subscriptions (SpacetimeDB's push of changes to clients), and memory use of the
   in-process ledger. It keeps every idempotency key in memory as built; a real one keeps a bounded window.
 - Inventory, property and factions. The ledger is the strictest of them; that they behave alike is an assumption.
-- The asynchronous PostgreSQL archive of the proposed design, and snapshots for faster restarts. Neither exists
-  yet.
-- For the embedded engines: which acknowledged operations survive a kill (only consistency was checked), tuning
-  beyond the settings named above (RocksDB and LMDB both have many), and memory use.
+- The asynchronous PostgreSQL archive and the copy to a second machine. Neither exists yet.
+- For the embedded engines: tuning beyond the settings named above (RocksDB, Fjall and LMDB all have many),
+  memory use, and the hot pattern over five minutes.
 - TigerBeetle with Direct I/O, with several replicas, or with callers on other machines.
 
-## Proposed design
+## What we chose and why
 
-Authoritative roleplay state lives in the world server's memory, owned by one writer with one log for everything
-that has value (money, inventory, property, factions), so an action that touches several kinds, such as buying an
-item, is one record and cannot be half applied. Changes are made durable by that append-only log with group commit
-before the caller is told "done". Snapshots bound the replay time. PostgreSQL is fed from the log asynchronously
-and serves history, admin queries, backups and analytics, but never decides a balance.
+**RocksDB behind one writer in the world server**, recorded in
+[ADR 0003](../../adr/0003-in-memory-roleplay-state.md) (proposed in #46).
 
-What it costs, in honesty:
+- **One writer owns all state with value** (money, inventory, property, factions) inside the world server process.
+  It checks every rule against its copy in memory, so a hot wallet costs nothing, and an action that touches
+  several kinds of state, such as buying an item, is one write batch that is applied whole or not at all.
+- **Each batch of waiting operations is one RocksDB write with its log flushed to disk** (group commit) before any
+  caller in the batch gets a reply. Measured: 51,542 to 56,738 transfers per second in 10-second runs and 55,480
+  over five minutes, p99 under 2 ms, about 45 times the expected peak.
+- **Recovery is RocksDB's, set strictly**: an incomplete last record, never acknowledged, is dropped; any other
+  damage stops start-up. Tested above with kills and a damaged log.
+- **Copied to a second machine before acknowledgement**, so a dead disk loses nothing acknowledged. Not built or
+  measured yet.
+- **No reads of state that is not yet durable**: results leave the writer only after the flush that covers them.
+- **PostgreSQL becomes the archive**, fed asynchronously for history, admin queries and backups. It never decides
+  a balance.
+- **The store sits behind one small interface** (commit a batch, load the state), so it can be replaced without
+  touching game code.
 
-- **We own a storage engine.** Log format, CRC, torn-tail recovery, refusing to start on corruption, directory
-  `fsync`, snapshots, log rotation, a bounded window of idempotency keys and checks against silent corruption all
-  become our code and need tests: crash tests at random points, power-cut tests, fuzzed logs, replay equivalence
-  against PostgreSQL.
-- **One machine holds the truth.** A dead disk loses everything not yet copied elsewhere. Shipping the log to a
-  second machine (and to the PostgreSQL archive) has to come with it, ideally before acknowledgement for money.
-- **Reads must respect durability.** With group commit, a transfer is applied in memory before its flush. Game
-  logic that reads a balance in that window sees money that a crash could still undo. Either reads go through the
-  writer after the flush, or the server accepts that, as SpacetimeDB does with confirmed reads off.
-- **The architecture changes.** `docs/architecture.md` names PostgreSQL as the source of truth for characters,
-  money, inventory and property. Moving that is an ADR first, then the code.
+Why this one: the requirement is reliability and speed together. The measurements show that the speed comes from
+the architecture (one writer, state in memory, group commit), not from the store: every store behind that writer
+was 2 to 20 times faster than the database servers. Among the stores, RocksDB is the fastest that we do not have
+to write and maintain ourselves. It has been in heavy production use for over a decade, and its recovery behaved
+exactly as required in our tests.
 
-**Or keep the design and use RocksDB under it.** The same writer with RocksDB as its store did 71% of our own log's
-throughput at 64 callers and 70% at 256, with a p99 of 2.2 ms. That removes the first cost above (format,
-checksums, recovery, compaction become a mature engine's job, and balances live on disk, so restarts need no
-snapshots) and keeps the others. LMDB is the next candidate. Choosing between our own log and an engine is a
-decision for the ADR.
+### Why not the others
 
-SpacetimeDB would give most of this ready-made (in-memory state, log, snapshots, logic next to the data). It is
-about 6 times slower here than our own process, needs a network hop from the world server, and comes with the
-licence terms below.
+| Option | Measured (64 callers, durable) | Why not |
+|---|---:|---|
+| Our own log | 72,781; 73,828 over 5 min | 33% faster, but the need is about 1,200 writes per second, so the extra speed buys nothing the game needs. In return we would own a storage engine for good: record format, checksums, torn-tail rules, snapshots, log rotation and corruption handling, each with crash, power-cut and fuzz tests. Kept as the planned optimisation behind the same interface, if measured load ever approaches what RocksDB delivers. |
+| Fjall | 43,836; 40,107 over 5 min | Pure Rust with no C++ build, and it passed the same crash tests. Slower than RocksDB here and far younger, with much less production use. The first replacement to reconsider if the C++ build becomes a burden. |
+| LMDB | 36,968; 32,941 over 5 min | Mature and simple, but slower at 64 callers, needs its maximum size set in advance, and is opened through an `unsafe` call. |
+| redb | 29,142 | Pure Rust, passed the crash tests, but about half of RocksDB's throughput. |
+| SQLite, `synchronous=FULL` | 24,042 | Reliable, but the slowest store here and flat beyond 64 callers. |
+| SQLite, `synchronous=NORMAL` | 29,616 | Can lose acknowledged transfers on a power cut. |
+| TigerBeetle | 20,781 (dev mode) | Holds only accounts and transfers, so inventory and property would need a second store and a purchase would span two systems. Could not run with Direct I/O here, so its figures are not representative. |
+| SpacetimeDB | 11,352 | About 4.5 times slower than RocksDB behind our writer, a network hop from the world server, and its Business Source Licence allows one production instance (see [Licences](#licences)). |
+| PostgreSQL | 3,437 to 5,666; under 1,000 on one hot wallet | Row locks held across a network round trip and a flush. Kept as the archive. |
+
+### What would change the answer
+
+- A repeat on larger hardware with BOT-2 load shows RocksDB, together with the copy to a second machine, close to
+  the measured need. Then our own log, behind the same interface, is the next step.
+- The worst-case requests of several seconds seen over five minutes turn out to come from RocksDB rather than the
+  VM's disk on real hardware.
+- RocksDB's C++ build becomes a real cost for contributors or releases. Then Fjall is measured again first.
 
 ## The realtime core
 
@@ -324,6 +374,7 @@ Apache-2.0.
 
 | Engine | Licence | Fits AGPL-3.0 and MIT OR Apache-2.0 |
 |---|---|---|
+| Fjall | MIT OR Apache-2.0 | Yes |
 | SQLite | Public domain; `rusqlite` and `libsqlite3-sys` MIT | Yes |
 | redb | MIT OR Apache-2.0 | Yes |
 | RocksDB | GPL-2.0 OR Apache-2.0, used under Apache-2.0 (parts from LevelDB, BSD-3-Clause); `rocksdb` crate Apache-2.0 | Yes |
@@ -405,9 +456,12 @@ cargo run --release -- run rocksdb /tmp/ledger-rocksdb 64 10 uniform group   # e
 cargo run --release -- recover rocksdb /tmp/ledger-rocksdb                   # load time and invariants
 ```
 
-Engines: `sqlite-full`, `sqlite-normal`, `redb`, `rocksdb`, `lmdb`. Use a new directory per engine.
+Engines: `sqlite-full`, `sqlite-normal`, `redb`, `rocksdb`, `fjall`, `lmdb`. Use a new directory per engine. For
+a crash test, set `SAWGRASS_ACK_MARKER=<dir>/ack` for both commands, kill the `run` with SIGKILL, then `recover`
+prints `acknowledged=N all present` or `LOST`.
 
-TigerBeetle (binary from <https://github.com/tigerbeetle/tigerbeetle/releases>; drop `--development` on a disk with Direct I/O):
+TigerBeetle (binary from <https://github.com/tigerbeetle/tigerbeetle/releases>; drop `--development` on a disk
+with Direct I/O):
 
 ```sh
 tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development /tmp/0_0.tigerbeetle

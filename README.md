@@ -91,7 +91,8 @@ flowchart LR
     G -->|QUIC| GW["Gateways ×3–4"]
     B["Load-test bots<br>(same protocol, no game)"] -->|QUIC| GW
     GW -->|events| W["World simulation<br>(ECS, scripts, interest management)"]
-    W --> DB[(PostgreSQL)]
+    W --> DB[(RocksDB)]
+    DB -.->|archive| PG[(PostgreSQL)]
     W --> M[Web map]
 ```
 
@@ -101,8 +102,8 @@ flowchart LR
   traffic, not simulation, is the bottleneck.
 - **Protocol** (`crates/sawgrass-protocol`): the wire format every peer shares, with quantized positions and
   rotations.
-- **PostgreSQL** is the source of truth for characters, money, inventory and property. Faster storage options
-  are measured below, in [Storage, measured](#storage-measured).
+- **Roleplay state** (characters, money, inventory, property) is held by the world server and stored in RocksDB;
+  **PostgreSQL** is its archive. Why: [Storage, measured](#storage-measured).
 - **Client module**: loaded by Leonida's runtime on the player's PC; syncs the local game with the server.
 - **Launcher**: checks the player's Leonida build, installs the signed client module and starts the game.
 
@@ -117,29 +118,37 @@ The design is in [docs/architecture.md](docs/architecture.md), the stages in [do
 
 ## Storage, measured
 
-Roleplay state with money in it needs storage that is fast and never loses an acknowledged change. We measured
-nine designs on the same money ledger, with the same rules and the same load.
+Roleplay state with money in it needs storage that is both reliable and fast: money is never created or lost,
+and a change the server has confirmed survives a crash. We measured eleven designs on the same money ledger, with
+the same rules and load, counting a transfer only once it was written to disk.
 
-<p align="center"><img src="docs/assets/storage.svg" alt="Durable money transfers per second at 64 callers: own log in the server 72,781; RocksDB 51,542; LMDB 36,968; redb 29,142; SQLite FULL 24,042; TigerBeetle 20,781; SpacetimeDB 11,352; PostgreSQL 5,666 and 3,437" width="100%"></p>
+<p align="center"><img src="docs/assets/storage.svg" alt="Durable money transfers per second at 64 callers: own log in the server 72,781; RocksDB in the server, chosen, 51,542; Fjall 43,836; LMDB 36,968; redb 29,142; SQLite FULL 24,042; SpacetimeDB 11,352; PostgreSQL 5,666 and 3,437" width="100%"></p>
 
-| Design | Durable transfers/s | One hot wallet | p99 |
-|---|---:|---:|---:|
-| **Own log in the server**, group commit | **72,781** | **71,969** | 2.0 ms |
-| RocksDB in the server | 51,542 | 56,738 | 2.2 ms |
-| LMDB in the server | 36,968 | 38,278 | 3.0 ms |
-| redb in the server | 29,142 | 29,343 | 4.0 ms |
-| SQLite (`synchronous=FULL`) in the server | 24,042 | 21,553 | 6.8 ms |
-| TigerBeetle, one replica | 20,781 | 22,281 | 32 ms |
-| SpacetimeDB | 11,352 | 10,707 | 11 ms |
-| PostgreSQL | 3,437 to 5,666 | 642 to 917 | 37 ms (current code) |
+**We chose RocksDB behind one writer in the world server** ([ADR 0003](docs/adr/0003-in-memory-roleplay-state.md)).
+The server keeps roleplay state in memory, one writer applies every change, and each batch of changes is one
+RocksDB write flushed to disk before anyone gets a reply. PostgreSQL stays as an archive for history and admin
+queries.
 
-- Keeping the state in the server's memory and flushing many transfers with one disk write wins. RocksDB under the
-  same writer reaches about 70% of our own log and is the alternative to writing our own storage.
-- SQLite's fast mode (`synchronous=NORMAL`, 29,616) can lose recent transfers on a power cut, so it is not ranked.
-- Caveats: one 4-core VM, single runs with up to 20% spread, a prototype that is not a hardened engine, kill tests
-  rather than power cuts, and TigerBeetle in development mode because the VM lacks Direct I/O.
+| Design | Durable transfers/s | Over 5 minutes (p99) | Why or why not |
+|---|---:|---:|---|
+| Own log in the server | 72,781 | 73,828 (1.4 ms) | Fastest, but we would have to build and maintain a storage engine. Kept as a later optimisation. |
+| **RocksDB in the server** | **51,542** | **55,480 (1.9 ms)** | **Chosen**: fastest proven engine, about 45 times the expected peak load. |
+| Fjall in the server | 43,836 | 40,107 (3.2 ms) | Pure Rust, but slower and far younger. First fallback. |
+| LMDB in the server | 36,968 | 32,941 (3.7 ms) | Mature, but slower and needs a fixed maximum size. |
+| redb, SQLite in the server | 24,042 to 29,142 | not run | About half of RocksDB or less. |
+| SpacetimeDB | 11,352 | not run | About 4.5 times slower, extra network hop, licence allows one production instance. |
+| PostgreSQL | 3,437 to 5,666 | not run | Under 1,000 on one hot wallet. Kept as the archive. |
 
-Full results, crash tests, licences and how to reproduce:
+- Speed comes from the design, not the database: one writer with state in memory and one disk flush per batch was
+  2 to 20 times faster than any database server.
+- In 21 kill -9 tests under load (our own log, RocksDB, Fjall, LMDB, redb, SQLite), no confirmed transfer was lost.
+  RocksDB refused to start on a log damaged in the middle and dropped only an unconfirmed, cut-off last batch.
+- Not ranked: SQLite's fast mode (`synchronous=NORMAL`) can lose confirmed transfers on a power cut, and TigerBeetle
+  could only run in development mode here, without the Direct I/O it relies on.
+- Caveats: one 4-core VM; single runs with up to 20% spread; process kills, not power cuts; the copy to a second
+  machine and the PostgreSQL archive are not built yet.
+
+Full results, crash tests, licences, the reasoning for each option and how to reproduce:
 [docs/research](docs/research/spacetimedb-vs-postgresql/).
 
 ## How it is built

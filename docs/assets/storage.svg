@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="516" viewBox="0 0 880 516" role="img" aria-label="Durable money transfers per second, 64 callers: own log 72,781; RocksDB 51,542; LMDB 36,968; redb 29,142; SQLite FULL 24,042; TigerBeetle 20,781; SpacetimeDB 11,352; PostgreSQL 5,666 and 3,437">
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="516" viewBox="0 0 880 516" role="img" aria-label="Durable money transfers per second, 64 callers: own log 72,781; RocksDB, chosen, 51,542; Fjall 43,836; LMDB 36,968; redb 29,142; SQLite FULL 24,042; SpacetimeDB 11,352; PostgreSQL 5,666 and 3,437">
 <defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#14e1f0"/><stop offset="1" stop-color="#7cf000"/></linearGradient></defs>
 <style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:14px;fill:#8fb3a6}.l{font-size:15px;font-weight:600;fill:#e8fff4}.n{font-size:12px;fill:#7d9a90}.p{font-size:14px;font-weight:700;fill:#a6ff4d}.v{font-size:14px;font-weight:600;fill:#cfe9df}</style>
 <rect width="880" height="516" rx="16" fill="#060a08"/>
@@ -6,35 +6,35 @@
 <text x="28" y="44" class="h">Durable money transfers per second</text>
 <text x="28" y="68" class="s">Same ledger and rules, 64 callers, reply only after the transfer is on disk. Higher is better.</text>
 <text x="28" y="118" class="l">Own log, in the server</text>
-<text x="28" y="135" class="n">our design</text>
+<text x="28" y="135" class="n">fastest; we would maintain it</text>
 <rect x="300" y="110" width="470" height="12" rx="6" fill="#13201b"/>
-<rect x="300" y="110" width="470.0" height="12" rx="6" fill="url(#g)"/>
-<text x="852" y="121" class="p" text-anchor="end">72,781</text>
+<rect x="300" y="110" width="470.0" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="121" class="v" text-anchor="end">72,781</text>
 <text x="28" y="158" class="l">RocksDB, in the server</text>
-<text x="28" y="175" class="n">embedded engine</text>
+<text x="28" y="175" class="n">chosen: fastest proven engine</text>
 <rect x="300" y="150" width="470" height="12" rx="6" fill="#13201b"/>
-<rect x="300" y="150" width="332.8" height="12" rx="6" fill="#3f8f7a"/>
-<text x="852" y="161" class="v" text-anchor="end">51,542</text>
-<text x="28" y="198" class="l">LMDB, in the server</text>
-<text x="28" y="215" class="n">embedded engine</text>
+<rect x="300" y="150" width="332.8" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="161" class="p" text-anchor="end">51,542</text>
+<text x="28" y="198" class="l">Fjall, in the server</text>
+<text x="28" y="215" class="n">embedded engine, pure Rust</text>
 <rect x="300" y="190" width="470" height="12" rx="6" fill="#13201b"/>
-<rect x="300" y="190" width="238.7" height="12" rx="6" fill="#3f8f7a"/>
-<text x="852" y="201" class="v" text-anchor="end">36,968</text>
-<text x="28" y="238" class="l">redb, in the server</text>
+<rect x="300" y="190" width="283.1" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="201" class="v" text-anchor="end">43,836</text>
+<text x="28" y="238" class="l">LMDB, in the server</text>
 <text x="28" y="255" class="n">embedded engine</text>
 <rect x="300" y="230" width="470" height="12" rx="6" fill="#13201b"/>
-<rect x="300" y="230" width="188.2" height="12" rx="6" fill="#3f8f7a"/>
-<text x="852" y="241" class="v" text-anchor="end">29,142</text>
-<text x="28" y="278" class="l">SQLite FULL, in the server</text>
+<rect x="300" y="230" width="238.7" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="241" class="v" text-anchor="end">36,968</text>
+<text x="28" y="278" class="l">redb, in the server</text>
 <text x="28" y="295" class="n">embedded engine</text>
 <rect x="300" y="270" width="470" height="12" rx="6" fill="#13201b"/>
-<rect x="300" y="270" width="155.3" height="12" rx="6" fill="#3f8f7a"/>
-<text x="852" y="281" class="v" text-anchor="end">24,042</text>
-<text x="28" y="318" class="l">TigerBeetle</text>
-<text x="28" y="335" class="n">ledger server, dev mode</text>
+<rect x="300" y="270" width="188.2" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="281" class="v" text-anchor="end">29,142</text>
+<text x="28" y="318" class="l">SQLite FULL, in the server</text>
+<text x="28" y="335" class="n">embedded engine</text>
 <rect x="300" y="310" width="470" height="12" rx="6" fill="#13201b"/>
-<rect x="300" y="310" width="134.2" height="12" rx="6" fill="#3f8f7a"/>
-<text x="852" y="321" class="v" text-anchor="end">20,781</text>
+<rect x="300" y="310" width="155.3" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="321" class="v" text-anchor="end">24,042</text>
 <text x="28" y="358" class="l">SpacetimeDB</text>
 <text x="28" y="375" class="n">database server</text>
 <rect x="300" y="350" width="470" height="12" rx="6" fill="#13201b"/>
@@ -50,5 +50,5 @@
 <rect x="300" y="430" width="470" height="12" rx="6" fill="#13201b"/>
 <rect x="300" y="430" width="22.2" height="12" rx="6" fill="#3f8f7a"/>
 <text x="852" y="441" class="v" text-anchor="end">3,437</text>
-<text x="28" y="494" class="n">One 4-core cloud VM, single 10 to 20 s runs (spread up to about 20%). TigerBeetle ran in --development mode, one replica.</text>
+<text x="28" y="494" class="n">One 4-core cloud VM, single runs (spread up to about 20%). Not ranked: SQLite NORMAL and TigerBeetle in dev mode.</text>
 </svg>

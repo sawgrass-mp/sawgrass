@@ -11,6 +11,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 redb = "3"
 rocksdb = { version = "0.24", default-features = false }
 heed = "0.22"
+fjall = "3"
 
 [profile.release]
 lto = true

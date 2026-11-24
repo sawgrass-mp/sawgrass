@@ -13,7 +13,8 @@
 //!
 //! Engines: `sqlite-full` (WAL, `synchronous=FULL`), `sqlite-normal` (WAL, `synchronous=NORMAL`: not durable
 //! against a power cut until the next checkpoint), `redb` (`Durability::Immediate`), `rocksdb` (write batch with
-//! `sync=true`), `lmdb` (default flags: synced on commit). `each` commits one transaction per transfer, `group` one
+//! `sync=true`, WAL recovery mode `TolerateCorruptedTailRecords`), `lmdb` (default flags: synced on commit), `fjall`
+//! (write batch with `PersistMode::SyncAll`). `each` commits one transaction per transfer, `group` one
 //! per batch of up to 4,096 waiting requests.
 
 use std::collections::HashMap;
@@ -237,7 +238,9 @@ struct Redb(redb::Database);
 
 impl Store for Redb {
     fn commit(&mut self, ops: &[(u64, Record)], wallets: &[(u64, i64)]) -> Res<()> {
-        let tx = self.0.begin_write().map_err(err)?;
+        let mut tx = self.0.begin_write().map_err(err)?;
+        // The default in redb 3, set explicitly so the durability claim does not rest on a library default.
+        tx.set_durability(redb::Durability::Immediate).map_err(err)?;
         {
             let mut o = tx.open_table(REDB_OPS).map_err(err)?;
             for (id, r) in ops {
@@ -266,6 +269,53 @@ impl Store for Redb {
         for item in o.iter().map_err(err)? {
             let (_, v) = item.map_err(err)?;
             ops.push(decode(v.value()).ok_or("bad record")?);
+        }
+        Ok((wallets, ops))
+    }
+}
+
+struct Fjall {
+    db: fjall::Database,
+    wallets: fjall::Keyspace,
+    ops: fjall::Keyspace,
+}
+
+impl Fjall {
+    fn open(dir: &Path) -> Res<Self> {
+        let db = fjall::Database::builder(dir.join("fjall")).open().map_err(err)?;
+        let wallets = db
+            .keyspace("wallets", fjall::KeyspaceCreateOptions::default)
+            .map_err(err)?;
+        let ops = db
+            .keyspace("operations", fjall::KeyspaceCreateOptions::default)
+            .map_err(err)?;
+        Ok(Self { db, wallets, ops })
+    }
+}
+
+impl Store for Fjall {
+    fn commit(&mut self, ops: &[(u64, Record)], wallets: &[(u64, i64)]) -> Res<()> {
+        // `SyncAll`: the journal is synced to disk before `commit` returns.
+        let mut batch = self.db.batch().durability(Some(fjall::PersistMode::SyncAll));
+        for (id, r) in ops {
+            batch.insert(&self.ops, id.to_be_bytes(), encode(r));
+        }
+        for (id, balance) in wallets {
+            batch.insert(&self.wallets, id.to_be_bytes(), balance.to_le_bytes());
+        }
+        batch.commit().map_err(err)
+    }
+
+    fn load(&mut self) -> Res<Loaded> {
+        let (mut wallets, mut ops) = (Vec::new(), Vec::new());
+        for item in self.wallets.iter() {
+            let (k, v) = item.into_inner().map_err(err)?;
+            let id = u64::from_be_bytes(k[..].try_into().map_err(err)?);
+            wallets.push((id, i64::from_le_bytes(v[..].try_into().map_err(err)?)));
+        }
+        for item in self.ops.iter() {
+            let (_, v) = item.into_inner().map_err(err)?;
+            ops.push(decode(&v).ok_or("bad record")?);
         }
         Ok((wallets, ops))
     }
@@ -369,9 +419,13 @@ fn open(engine: &str, dir: &Path) -> Res<Box<dyn Store + Send>> {
         "rocksdb" => {
             let mut o = rocksdb::Options::default();
             o.create_if_missing(true);
+            // Drop only an incomplete last WAL record (never acknowledged); any other corruption stops start-up.
+            o.set_wal_recovery_mode(rocksdb::DBRecoveryMode::TolerateCorruptedTailRecords);
+            o.set_paranoid_checks(true);
             Box::new(Rocks(rocksdb::DB::open(&o, dir.join("rocksdb")).map_err(err)?))
         }
         "lmdb" => Box::new(Lmdb::open(dir)?),
+        "fjall" => Box::new(Fjall::open(dir)?),
         other => return Err(format!("unknown engine {other}")),
     })
 }
@@ -401,6 +455,16 @@ fn load(store: &mut dyn Store) -> Res<Ledger> {
 }
 
 fn writer(mut ledger: Ledger, mut store: Box<dyn Store + Send>, group: bool, rx: Receiver<Request>) {
+    // For crash tests: after each commit and before any reply, record how many operations are committed, so every
+    // acknowledgement a caller received is covered by the number in this file.
+    let marker = std::env::var_os("SAWGRASS_ACK_MARKER").map(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .expect("marker")
+    });
     let mut ops = Vec::with_capacity(MAX_BATCH);
     let mut touched: HashMap<u64, i64> = HashMap::new();
     let mut pending: Vec<(Sender<Res<u64>>, u64)> = Vec::with_capacity(MAX_BATCH);
@@ -427,6 +491,12 @@ fn writer(mut ledger: Ledger, mut store: Box<dyn Store + Send>, group: bool, rx:
         let wallets: Vec<(u64, i64)> = touched.drain().collect();
         store.commit(&ops, &wallets).expect("commit");
         ops.clear();
+        if let Some(marker) = &marker {
+            use std::os::unix::fs::FileExt;
+            marker
+                .write_all_at(&ledger.operations.to_le_bytes(), 0)
+                .expect("marker");
+        }
         for (reply, op) in pending.drain(..) {
             let _ = reply.send(Ok(op));
         }
@@ -525,13 +595,15 @@ fn run(engine: &str, dir: &Path, clients: usize, seconds: u64, hot: bool, group:
         latencies.get(i).map_or(0.0, |d| d.as_secs_f64() * 1000.0)
     };
     println!(
-        "engine={engine} pattern={} clients={clients} commit={} transfers={} tps={:.0} p50_ms={:.3} p99_ms={:.3}",
+        "engine={engine} pattern={} clients={clients} commit={} transfers={} tps={:.0} p50_ms={:.3} p99_ms={:.3} \
+         max_ms={:.1}",
         if hot { "hot" } else { "uniform" },
         if group { "group" } else { "each" },
         latencies.len(),
         latencies.len() as f64 / elapsed.as_secs_f64(),
         at(0.5),
-        at(0.99)
+        at(0.99),
+        at(1.0)
     );
     Ok(())
 }
@@ -553,8 +625,23 @@ fn main() {
             let ledger = load(store.as_mut())?;
             let elapsed = started.elapsed();
             let invariants = ledger.check_invariants().map_or_else(|e| e, |()| "ok".into());
+            // With the marker of a killed run: every acknowledged operation must still be there.
+            let acknowledged = match std::env::var_os("SAWGRASS_ACK_MARKER") {
+                Some(path) => {
+                    let bytes = std::fs::read(path).map_err(err)?;
+                    let n =
+                        u64::from_le_bytes(bytes.get(..8).ok_or("short marker")?.try_into().map_err(err)?);
+                    let verdict = if ledger.operations >= n {
+                        "all present"
+                    } else {
+                        "LOST"
+                    };
+                    format!(" acknowledged={n} {verdict}")
+                }
+                None => String::new(),
+            };
             println!(
-                "engine={} operations={} seconds={:.2} invariants={invariants}",
+                "engine={} operations={} seconds={:.2} invariants={invariants}{acknowledged}",
                 args[2],
                 ledger.operations,
                 elapsed.as_secs_f64()
