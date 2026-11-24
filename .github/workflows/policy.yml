@@ -11,7 +11,8 @@ concurrency:
 
 # Runs tools/reviewer/policy.py from the default branch, so a pull request cannot edit the rules it is checked
 # against. It never checks out or runs pull request code and uses no secret. It fails when a check fails: task ID in
-# the title, `Closes #N` to an issue labelled `ready`, the `Model:` line, and the tier 1 size limit.
+# the title, `Closes #N` to an issue labelled `ready` and the `Model:` line (both waived for the maintainer's own
+# pull requests, see maintainer_pr), and the tier 1 size limit.
 # Labelling the task `ready` later does not re-run it: edit the description or re-run the job.
 jobs:
   policy:
