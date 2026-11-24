@@ -1078,6 +1078,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "sawgrass-bots"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "rcgen",
+ "sawgrass-gateway",
+ "sawgrass-protocol",
+ "sawgrass-server",
+ "tokio",
+]
+
+[[package]]
 name = "sawgrass-db"
 version = "0.0.0"
 dependencies = [
