@@ -16,6 +16,7 @@
   <a href="#where-the-project-is">Status</a> ·
   <a href="#progress">Progress</a> ·
   <a href="#how-it-fits-together">Architecture</a> ·
+  <a href="#storage-measured">Storage</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#contributing">Contributing</a>
 </p>
@@ -90,7 +91,8 @@ flowchart LR
     G -->|QUIC| GW["Gateways ×3–4"]
     B["Load-test bots<br>(same protocol, no game)"] -->|QUIC| GW
     GW -->|events| W["World simulation<br>(ECS, scripts, interest management)"]
-    W --> DB[(PostgreSQL)]
+    W --> DB[(RocksDB)]
+    DB -.->|archive| PG[(PostgreSQL)]
     W --> M[Web map]
 ```
 
@@ -100,7 +102,8 @@ flowchart LR
   traffic, not simulation, is the bottleneck.
 - **Protocol** (`crates/sawgrass-protocol`): the wire format every peer shares, with quantized positions and
   rotations.
-- **PostgreSQL** is the source of truth for characters, money, inventory and property.
+- **Roleplay state** (characters, money, inventory, property) is held by the world server and stored in RocksDB;
+  **PostgreSQL** is its archive. Why: [Storage, measured](#storage-measured).
 - **Client module**: loaded by Leonida's runtime on the player's PC; syncs the local game with the server.
 - **Launcher**: checks the player's Leonida build, installs the signed client module and starts the game.
 
@@ -112,6 +115,42 @@ flowchart LR
 | Downstream per player | about 40 KB/s at 100 visible entities |
 
 The design is in [docs/architecture.md](docs/architecture.md), the stages in [docs/roadmap.md](docs/roadmap.md).
+
+## Storage, measured
+
+Roleplay state with money in it needs storage that is both reliable and fast: money is never created or lost,
+and a change the server has confirmed survives a crash. We measured eleven designs on the same money ledger, with
+the same rules and load, counting a transfer only once it was written to disk.
+
+<p align="center"><img src="docs/assets/storage.svg" alt="Durable money transfers per second at 64 callers: own log in the server 72,781; RocksDB in the server, chosen, 51,542; Fjall 43,836; LMDB 36,968; redb 29,142; SQLite FULL 24,042; SpacetimeDB 11,352; PostgreSQL 5,666 and 3,437" width="100%"></p>
+
+**We chose RocksDB behind one writer in the world server** ([ADR 0003](docs/adr/0003-in-memory-roleplay-state.md)).
+The server keeps roleplay state in memory, one writer applies every change, and each batch of changes is one
+RocksDB write flushed to disk before anyone gets a reply. PostgreSQL stays as an archive for history and admin
+queries.
+
+| Design | Durable transfers/s | Over 5 minutes (p99) | Why or why not |
+|---|---:|---:|---|
+| Own log in the server | 72,781 | 73,828 (1.4 ms) | Fastest, but we would have to build and maintain a storage engine. Kept as a later optimisation. |
+| **RocksDB in the server** | **51,542** | **55,480 (1.9 ms)** | **Chosen**: fastest proven engine, about 45 times the expected peak load. |
+| Fjall in the server | 43,836 | 40,107 (3.2 ms) | Pure Rust, but slower and far younger. First fallback. |
+| LMDB in the server | 36,968 | 32,941 (3.7 ms) | Mature, but slower and needs a fixed maximum size. |
+| redb, SQLite in the server | 24,042 to 29,142 | not run | About half of RocksDB or less. |
+| SpacetimeDB | 11,352 | not run | About 4.5 times slower, extra network hop, licence allows one production instance. |
+| PostgreSQL | 3,437 to 5,666 | not run | Under 1,000 on one hot wallet. Kept as the archive. |
+
+- Speed comes from the design, not the database: one writer with state in memory and one disk flush per batch was
+  2 to 20 times faster than any database server.
+- In 21 kill -9 tests under load (our own log, RocksDB, Fjall, LMDB, redb, SQLite), no confirmed transfer was lost.
+  RocksDB dropped only an unconfirmed, cut-off last batch, and refused to start on any damaged record, even the
+  last one; then an operator restores from the second machine's copy.
+- Not ranked: SQLite's fast mode (`synchronous=NORMAL`) can lose confirmed transfers on a power cut, and TigerBeetle
+  could only run in development mode here, without the Direct I/O it relies on.
+- Caveats: one 4-core VM; single runs with up to 20% spread; process kills, not power cuts; the copy to a second
+  machine and the PostgreSQL archive are not built yet.
+
+Full results, crash tests, licences, the reasoning for each option and how to reproduce:
+[docs/research](docs/research/spacetimedb-vs-postgresql/).
 
 ## How it is built
 

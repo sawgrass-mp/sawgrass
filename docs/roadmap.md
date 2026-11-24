@@ -1,7 +1,7 @@
 # Roadmap
 
-Stages 0–2 do not need the game and run in parallel with Leonida's work. Stage 3 starts when Leonida boots to a
-world with a controllable character.
+Stages 0–2 do not need the game and run in parallel with the runtimes' work. Stage 3 starts when Leonida or XCL,
+whichever comes first, boots the game to a world with a controllable character (ADR 0002).
 
 1. **Stage 0: repository foundation.** Workspace, rules, CI, claim bot, first tasks. Done by maintainers before
    the repository opens to the swarm.
@@ -9,8 +9,9 @@ world with a controllable character.
    Gates: 1000 bots on one machine, then 4096.
 3. **Stage 2: roleplay base.** PostgreSQL, scripting runtime, base resources (characters, money, inventory, jobs),
    admin tools. Everything tested with bots.
-4. **Stage 3: client in the game.** A plugin API in Leonida's runtime (proposed upstream), hooks, sync of
-   players, vehicles and damage, in-game UI.
+4. **Stage 3: client in the game.** A runtime adapter for the first runtime that boots the game, a module-loading
+   API proposed upstream, hooks, sync of players, vehicles and damage, in-game UI. The second runtime's adapter
+   follows. Runtime-independent client code (sync and prediction over the fake `GameApi`) can start earlier.
 5. **Stage 4: launcher and releases.** Signing, auto-update, server list.
 6. **Stage 5: scale.** Real players, zones only if measurements call for them.
 
@@ -53,10 +54,11 @@ Safeguards:
   account, so a review is a comment, not a GitHub approval (GitHub does not let an account approve its own pull
   request).
 - Anyone with triage rights stops an automatic merge with a label; agent merges are squash commits, easy to revert.
-- It starts in comment-only mode. After about a month of comparing its verdicts with the maintainer's decisions,
-  automatic merging is enabled tier by tier, tier 1 first.
+- It started in comment-only mode. Since 2026-11-24, by the maintainer's decision, it merges the maintainer's own
+  pull requests of every tier once CI is green and its review has no blocking finding; the table above still
+  applies to pull requests from other accounts. `hold` on a pull request or its task stops its merge.
 
-How it works today (comment-only mode): a maintainer starts a reviewer session, which follows
+How it works today: a maintainer starts a reviewer session, which follows
 [maintainers.md](maintainers.md#review-agent). The tier, the task link and the size limit come from deterministic
 rules in `tools/reviewer/policy.py`, never from the model. Until automatic merging is enabled, only docs, tests,
 `resources/` and `README.md` count as tier 1; all other code is tier 2. Reviews happen only while such a session

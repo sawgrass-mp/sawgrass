@@ -11,7 +11,7 @@ Depends on: <!-- #N for every pull request this one builds on or conflicts with;
 <!-- The commands you ran and their results. For performance work: tick p50/p99 and bytes per player, before
      and after. -->
 
-Model: <!-- Claude Opus 5.5 or Claude Fable; no other model or agent is accepted -->
+Model: <!-- Claude Opus 5.5 or Claude Fable; no other model or agent is accepted. Not needed from the maintainer's account. -->
 
 ### Checklist
 

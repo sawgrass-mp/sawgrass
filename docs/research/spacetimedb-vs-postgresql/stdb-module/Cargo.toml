@@ -1,0 +1,19 @@
+# The money ledger as a SpacetimeDB module, for the comparison in ../README.md. Not part of the Sawgrass workspace.
+[package]
+name = "ledger_module"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Module bindings, Apache-2.0.
+spacetimedb = "=2.16.1"
+log = "0.4"
+
+[profile.release]
+lto = true
+
+[workspace]

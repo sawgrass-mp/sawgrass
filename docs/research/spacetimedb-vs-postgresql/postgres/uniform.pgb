@@ -1,0 +1,4 @@
+\set a random(0, 9999)
+\set b random(0, 9998)
+\set amt random(1, 100)
+SELECT transfer_fn('u-' || :client_id || '-' || nextval('pgb_seq'), 4 + 2 * :a, 4 + 2 * ((:a + 1 + :b) % 10000), :amt, 'load');
