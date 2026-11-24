@@ -7,8 +7,9 @@ whichever comes first, runs the game to a world with a controllable character (A
    the repository opens to the swarm.
 2. **Stage 1: server without the game.** Protocol, gateway, simulation, interest management, bots, web map.
    Gates: 1000 bots on one machine, then 4096.
-3. **Stage 2: roleplay base.** PostgreSQL, scripting runtime, base resources (characters, money, inventory, jobs),
-   admin tools. Everything tested with bots.
+3. **Stage 2: roleplay base.** Roleplay state in server memory, stored in RocksDB, with a PostgreSQL archive
+   (ADR 0003), scripting runtime, base resources (characters, money, inventory, jobs), admin tools. Everything
+   tested with bots.
 4. **Stage 3: client in the game.** A runtime adapter for the first runtime that gets there (VIctory or XCL), a
    module-loading API proposed upstream, hooks, sync of players, vehicles and damage, in-game UI. The other
    runtime's adapter follows. Runtime-independent client code (sync and prediction over the fake `GameApi`) can
