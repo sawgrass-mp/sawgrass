@@ -2,13 +2,19 @@
 
     python3 -I scripts/claims.py command   # handle the issue comment in $GITHUB_EVENT_PATH
     python3 -I scripts/claims.py expire    # release claims older than CLAIM_HOURS with no open pull request
+    python3 -I scripts/claims.py link N    # claim the task that the maintainer's pull request N closes
+    python3 -I scripts/claims.py link-all  # the same for every open pull request
 
 Needs GITHUB_TOKEN and GITHUB_REPOSITORY (both set by GitHub Actions). Standard library only.
 
 Rules (CONTRIBUTING.md):
 - Only an open issue labelled `ready` can be claimed; maintainers add that label, nobody else can.
 - A claim adds the `claimed` label and assigns the commenter (GitHub lets anyone who commented be assigned).
-- One account holds at most MAX_CLAIMS open claims.
+- One account holds at most MAX_CLAIMS open claims; maintainers have no limit, since all the maintainer's agents
+  share the maintainer's account.
+- A pull request the maintainer opens from a branch of this repository claims the task it closes (`Closes #N`)
+  without a `/claim` comment, and is labelled `protected` while it changes a tier 3 path, so the maintainer sees
+  at merge time which pull requests touch CI, rules or the client.
 - A claim with no open pull request by the assignee that links the issue (`Closes #N`) after CLAIM_HOURS is released.
 - `/unclaim` works for the assignee and for maintainers.
 
@@ -24,11 +30,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "reviewer"))
+import policy  # noqa: E402
+
 API = "https://api.github.com"
 READY = "ready"
 CLAIMED = "claimed"
 MAX_CLAIMS = 2
 CLAIM_HOURS = 72
+PROTECTED = "protected"
 MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
@@ -43,14 +53,14 @@ def parse_command(body):
     return None
 
 
-def decide_claim(labels, assignees, user, open_claims):
+def decide_claim(labels, assignees, user, open_claims, maintainer=False):
     """(ok, reply) for `user` claiming an issue with these label names and assignee logins."""
     if CLAIMED in labels:
         holders = ", ".join(f"@{a}" for a in assignees) or "someone"
         return False, f"This task is already claimed by {holders}. Pick another one from the `{READY}` list."
     if READY not in labels:
         return False, f"Only issues labelled `{READY}` can be claimed. A maintainer adds that label after triage."
-    if open_claims >= MAX_CLAIMS:
+    if open_claims >= MAX_CLAIMS and not maintainer:
         return False, (f"@{user} already holds {open_claims} claims (the limit is {MAX_CLAIMS}). "
                        "Finish or `/unclaim` one first.")
     return True, (f"Claimed by @{user}. Open a draft pull request with `Closes #ISSUE` in its description "
@@ -126,7 +136,8 @@ def handle_command(gh, event):
     if command == "claim":
         open_claims = sum(1 for i in gh.pages("/issues", {"state": "open", "labels": CLAIMED, "assignee": user})
                           if "pull_request" not in i)
-        ok, reply = decide_claim(labels, assignees, user, open_claims)
+        maintainer = policy.is_maintainer(comment.get("user"))
+        ok, reply = decide_claim(labels, assignees, user, open_claims, maintainer)
         if ok:
             gh.call("POST", f"/issues/{number}/labels", {"labels": [CLAIMED]})
             gh.call("POST", f"/issues/{number}/assignees", {"assignees": [user]})
@@ -148,6 +159,49 @@ def release(gh, number, assignees):
             raise
     if assignees:
         gh.call("DELETE", f"/issues/{number}/assignees", {"assignees": assignees})
+
+
+def decide_link(pr, issue):
+    """Whether the maintainer's pull request `pr` claims its open, unclaimed, maintainer-opened task `issue`."""
+    if not policy.maintainer_pr(pr) or issue is None or "pull_request" in issue:
+        return False
+    labels = {label["name"] for label in issue.get("labels", [])}
+    return issue.get("state") == "open" and policy.is_maintainer(issue.get("user")) and CLAIMED not in labels
+
+
+def link(gh, pr):
+    """Claim the task of a maintainer's open pull request; label any open one `protected` while it changes tier 3
+    paths. The claim comes first, so a failed label cannot block it."""
+    if pr.get("state") != "open":
+        return
+    claim_linked(gh, pr)
+    files = list(gh.pages(f"/pulls/{pr['number']}/files", {}))
+    paths = [p for f in files for p in (f["filename"], f.get("previous_filename")) if p]
+    protected = any(policy.file_tier(p) == 3 for p in paths)
+    if protected and PROTECTED not in {label["name"] for label in pr.get("labels", [])}:
+        gh.call("POST", f"/issues/{pr['number']}/labels", {"labels": [PROTECTED]})
+    elif not protected and PROTECTED in {label["name"] for label in pr.get("labels", [])}:
+        try:
+            gh.call("DELETE", f"/issues/{pr['number']}/labels/{PROTECTED}")
+        except urllib.error.HTTPError as err:
+            if err.code != 404:
+                raise
+
+
+def claim_linked(gh, pr):
+    if not policy.maintainer_pr(pr):
+        return
+    number = policy.linked_issue(pr.get("body"))
+    issue = gh.call("GET", f"/issues/{number}") if number is not None else None
+    if decide_link(pr, issue):
+        # A `/claim` may have landed since: it runs in another concurrency group, so read the issue again.
+        issue = gh.call("GET", f"/issues/{number}")
+    if decide_link(pr, issue):
+        user = pr["user"]["login"]
+        gh.call("POST", f"/issues/{number}/labels", {"labels": [CLAIMED]})
+        gh.call("POST", f"/issues/{number}/assignees", {"assignees": [user]})
+        gh.comment(number, f"Claimed by @{user} through pull request #{pr['number']}.")
+        print(f"#{number} claimed through #{pr['number']}")
 
 
 def claimed_at(gh, number):
@@ -177,12 +231,32 @@ def expire(gh, now):
         print(f"released #{number}")
 
 
+def link_all(gh):
+    """`link` for every open pull request. One failure does not stop the others; any failure fails the run."""
+    failed = []
+    for pr in list(gh.pages("/pulls", {"state": "open"})):
+        try:
+            link(gh, pr)
+        except urllib.error.HTTPError as err:
+            print(f"#{pr['number']}: {err.code} {err.reason}", file=sys.stderr)
+            failed.append(pr["number"])
+    if failed:
+        print("failed: " + ", ".join(f"#{n}" for n in failed), file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv):
-    if argv not in (["command"], ["expire"]):
+    if argv not in (["command"], ["expire"], ["link-all"]) and not (len(argv) == 2 and argv[0] == "link"
+                                                                    and argv[1].isdigit()):
         print(__doc__, file=sys.stderr)
         return 2
     gh = GitHub(os.environ["GITHUB_TOKEN"], os.environ["GITHUB_REPOSITORY"])
-    if argv == ["command"]:
+    if argv[0] == "link":
+        link(gh, gh.call("GET", f"/pulls/{argv[1]}"))
+    elif argv == ["link-all"]:
+        return link_all(gh)
+    elif argv == ["command"]:
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
             handle_command(gh, json.load(f))
     else:

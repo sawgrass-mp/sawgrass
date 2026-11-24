@@ -6,6 +6,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "reviewer"))
 import policy  # noqa: E402
 
+policy.MAINTAINERS = {"maint"}
+
 
 class Tiers(unittest.TestCase):
     def test_file_tiers(self):
@@ -77,6 +79,22 @@ class Checks(unittest.TestCase):
                      "Closes #1\nModel: Claude Opus 5", "Closes #1\nModel: GPT", "Closes #1\nModel: Claude Sonnet 5.5",
                      "Closes #1\nWe did not use Model: Claude Fable"):
             self.assertFalse(self.rows(body=body)["Model declared"], body)
+
+    def test_maintainer_pull_request(self):
+        rows = self.rows(body="Closes #1", issue={"labels": [{"name": "triage"}]}, maintainer=True)
+        self.assertTrue(rows["Model declared"])
+        self.assertTrue(rows["Task is `ready`"])
+        self.assertFalse(self.rows(issue=None, maintainer=True)["Linked task"])
+
+    def test_maintainer_pr(self):
+        repo = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
+        pr = {"user": {"login": "Maint"}, "author_association": "MEMBER", "head": repo, "base": repo}
+        self.assertTrue(policy.maintainer_pr(pr))
+        # An association is not write access: only listed logins count.
+        self.assertFalse(policy.maintainer_pr({**pr, "user": {"login": "member"}}))
+        self.assertFalse(policy.maintainer_pr({**pr, "user": None}))
+        self.assertFalse(policy.maintainer_pr({**pr, "head": {"repo": {"full_name": "fork/sawgrass"}}}))
+        self.assertFalse(policy.maintainer_pr({**pr, "head": {"repo": None}}))
 
     def test_size_limit_only_for_tier1(self):
         self.assertFalse(self.rows(changed_lines=policy.TIER1_MAX_LINES + 1)["Size"])

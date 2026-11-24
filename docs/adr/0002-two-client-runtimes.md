@@ -1,6 +1,6 @@
 # ADR 0002: Support two client runtimes, Leonida and XCL
 
-Status: proposed, 2026-11-23
+Status: superseded by [ADR 0004](0004-victory-client-runtime.md), 2026-11-24
 
 ## Context
 
