@@ -77,13 +77,17 @@ def main():
     (b10, f10, m10), (b20, f20, m20) = city
     head("Server CPU, 4,096 players, 10% speaking", "City model; text gives 10% / 20% speaking. Mixing is computed from measured codec costs.")
     y += 62
-    f20_text = "saturated" if f20["delivered"] < 0.99 else f"{f20['server_cpu_cores']:.2f}"
+    # The per-frame run at 4,096 and 20% saturated the load generator too, so its CPU is not established;
+    # computed instead from the cost per datagram at 2,048 players and 20%, where neither side was near its cores.
+    f2048 = relay(rel, "quinn-frame", 2048, 0.20)
+    f20_est = w[(4096, 0.20)]["frames_out_per_s"] * f2048["server_cpu_cores"] / f2048["server_datagrams_out_per_s"]
+    f20_text = f"about {f20_est:.1f} (computed)"
     bars([
         ("Our relay, batched per listener", "one datagram per listener every 20 ms", b10["server_cpu_cores"],
          f"{b10['server_cpu_cores']:.2f} / {c2(b20['server_cpu_cores'])} cores", True),
-        ("Our relay, one datagram per frame", "lowest latency, most packets", f10["server_cpu_cores"],
-         f"{f10['server_cpu_cores']:.2f} / {f20_text}", False),
-        ("Mixing on the server", "decode, mix and encode per listener", m10, f"{m10:.1f} / {m20:.1f} cores", False),
+        ("Our relay, one datagram per frame", "lowest latency, most packets; 20% computed", f10["server_cpu_cores"],
+         f"{f10['server_cpu_cores']:.2f} / ~{f20_est:.1f}", False),
+        ("Mixing on the server", "naive mono mixer, upper bound; bar cut at 4", m10, f"up to {m10:.1f} / {m20:.1f} cores", False),
     ], 4.0)
 
     y += 22
@@ -102,7 +106,7 @@ def main():
     label = (
         f"Voice server CPU at 4,096 players, 10% and 20% speaking: our relay batched {b10['server_cpu_cores']:.2f} and "
         f"{c2(b20['server_cpu_cores'])} cores; one datagram per frame {f10['server_cpu_cores']:.2f} and {f20_text}; "
-        f"mixing on the server {m10:.1f} and {m20:.1f} cores (computed). Same rooms load at 1,100 and 2,200 players: "
+        f"mixing on the server up to {m10:.1f} and {m20:.1f} cores (computed). Same rooms load at 1,100 and 2,200 players: "
         f"our relay {q1['server_cpu_cores']:.2f} and {q2['server_cpu_cores']:.2f} cores, LiveKit "
         f"{l1['server_cpu_cores']:.2f} and {l2['server_cpu_cores']:.2f}"
     )

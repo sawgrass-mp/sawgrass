@@ -14,16 +14,16 @@ word arrive, and what happens when packets are lost?
 phone call) and sends each listener **one datagram every 20 ms holding every frame they should hear**. In-band
 FEC is switched on when a client reports loss. See [What we chose and why](#what-we-chose-and-why).
 
-<p align="center"><img src="../../assets/voice.svg" alt="Voice server CPU at 4,096 players, 10% and 20% speaking: our relay batched 1.11 and 1.58 cores; one datagram per frame 1.68 and saturated; mixing on the server 9.8 and 13.5 cores (computed). Same rooms load at 1,100 and 2,200 players: our relay 0.52 and 0.91 cores, LiveKit 0.83 and 1.41" width="100%"></p>
+<p align="center"><img src="../../assets/voice.svg" alt="Voice server CPU at 4,096 players, 10% and 20% speaking: our relay batched 1.11 and 1.58 cores; one datagram per frame 1.68 and about 3.1 (computed); mixing on the server up to 9.8 and 13.5 cores (computed). Same rooms load at 1,100 and 2,200 players: our relay 0.52 and 0.91 cores, LiveKit 0.83 and 1.41" width="100%"></p>
 
 | Option | Server CPU, 4,096 players, 10% / 20% speaking | Same load as LiveKit, 2,200 players | Latency the server adds, p50 / p99 | Why or why not |
 |---|---:|---:|---:|---|
 | **Our relay, batched per listener** | **1.11 / 1.58 cores** | **1.00 cores, 107 MB** | **13 / 26 ms** | **Chosen**: held 20% speaking at 4,096 within its 2 cores, everything delivered; one connection; server decides who hears. |
-| Our relay, one datagram per frame | 1.68 / saturated | 0.91 cores, 107 MB | 2.6 / 24 ms | Lowest latency, but at 20% speaking it delivered 61% of frames. |
-| Mixing on the server | 9.8 / 13.5 cores (computed) | not run | adds an encode | One stream per listener, but nine times the CPU and no per-speaker direction. |
-| LiveKit | not established | 1.41 cores, 3.1 GB | 12 / 488 ms (generator near its limit) | 1.6 times our CPU and 30 times our memory for the same rooms, a second connection and a WebRTC stack in the client. |
+| Our relay, one datagram per frame | 1.68 / about 3.1 (computed) | 0.91 cores, 107 MB | 2.6 / 24 ms | Lowest latency, but 2.6 times the datagrams; at 20% speaking it would need about 3.1 cores, over the server's 2. |
+| Mixing on the server | up to 9.8 / 13.5 cores (computed) | not run | adds an encode | One stream per listener, but up to nine times the CPU; a mono mix loses each voice's direction. |
+| LiveKit | not established | 1.41 cores, 3.1 GB | 12 / 488 ms (generator near its limit) | 1.4 to 1.6 times our CPU and 30 times our memory for the same rooms, a second connection and a WebRTC stack in the client. |
 | mediasoup | not run (estimate below) | not run | | Could not be built here; one worker per core, rooms piped between workers. |
-| Mumble (FiveM's voice) | not run | not run | | Routes by channel or grid cell, so clients receive voice they should not hear. |
+| Mumble-style routing | not run | not run | | Routes by channel or grid cell, so clients receive voice they should not hear. |
 
 - **Packets, not bytes, set the cost.** Ten listeners per frame on average means 200,000 voice frames a second
   leave the server at 4,096 players and 10% speaking, 2.4 times the snapshot packets (82,000 a second). Batching
@@ -125,14 +125,17 @@ Server CPU in cores (the server had 2), and the share of expected frames deliver
 | 2,048 | 20% | 1.00 | 100% | 0.83 | 100% | 128,216 / 49,803 |
 | 4,096 | 5% | 0.93 | 100% | 0.75 | 100% | 103,927 / 57,493 |
 | 4,096 | 10% | **1.68** | 100% | **1.11** | 100% | 206,271 / 79,949 |
-| 4,096 | 20% | 1.97 | **61%** | **1.58** | 100% | 249,434 / 104,931 |
+| 4,096 | 20% | not established (1.97, generator saturated) | 61% | **1.58** | 100% | 249,434 / 104,931 |
 
 - **CPU follows datagrams.** Per frame, a datagram cost 8 to 17 µs of server CPU, less as the load grew and the
   fixed cost of each connection was spread over more packets. Batching removed datagrams wherever a listener heard
   more than one speaker at once, which is common in a crowd.
-- **At 4,096 and 20% speaking, sending per frame failed**: server and generator were both at their 2 cores, a
-  third of the frames were lost, and p50 latency reached 197 ms. Batched, the same load used 1.58 cores and
-  delivered everything.
+- **At 4,096 and 20% speaking, the per-frame run is not established**: the load generator, which in that mode
+  has to take in up to 400,000 datagrams a second, was at 1.97 of its 2 cores, as was the server, so the 61%
+  delivered and the 197 ms p50 measure the stand as much as the server. Computed instead: at 2,048 players the
+  server spent 7.8 µs per datagram sent per frame (1.00 cores for 128,216 a second), so the 401,014 frames a
+  second of 4,096 players at 20% would need about 3.1 cores, over its 2. Batched, the same load used 1.58 cores
+  and delivered everything, with the generator at 1.32.
 - **At 4,096 and 10% speaking, the per-frame run was near the limit too**: server 1.68 and generator 1.69 of their
   2 cores, p99 24 ms. Its CPU figure is real, but it is close to the machine's limit, so the clean comparison of
   the two modes is at 2,048: 0.70 against 0.49 cores at 10%, 1.00 against 0.83 at 20%.
@@ -168,8 +171,8 @@ Rooms of one speaker and ten listeners:
 | 4,092 | Our relay, batched | 1.66 | 0.83 | 192 MB | 100% | 14.5 / 39 ms | 1.57 |
 | 4,092 | LiveKit | 1.88 | 0.67 | 6,012 MB | 91% | 988 / 1,000 ms | 1.83 |
 
-- **LiveKit used 1.6 times the CPU of our relay** for the same forwarding (0.83 against 0.52 cores at 1,100,
-  1.41 against 0.91 at 2,200): 15 to 17 µs of CPU per packet sent, against 9 to 10. Its published benchmark comes
+- **LiveKit used 1.6 times the CPU of our relay sending per frame** for the same forwarding (0.83 against 0.52
+  cores at 1,100, 1.41 against 0.91 at 2,200), and 1.4 to 1.5 times that of the batched relay (0.54 and 1.00): 15 to 17 µs of CPU per packet sent, against 9 to 10. Its published benchmark comes
   to a similar 13 µs: 80% of a 16-core machine for 959,156 audio packets a second.
 - **LiveKit held about 1.45 MB per participant** (1.6 GB at 1,100, 6 GB at 4,092); our relay about 50 KB.
 - **Batching does not help here**: each listener hears one speaker, so there is nothing to put together.
@@ -196,12 +199,18 @@ libopus as bundled by `audiopus_sys` 0.2.2, mono, 48 kHz, `VOIP` application, va
 - The encoder's look-ahead is 6.5 ms; with a 20 ms frame, a word leaves the client at the earliest 26.5 ms after it
   is spoken.
 - A client encodes one stream (0.5% of a core) and decodes one per speaker it hears (about 0.1% each).
-- 16 kbit/s was slower to encode than 24 kbit/s at the same complexity; we did not look into why.
+- 16 kbit/s was slower to encode than 24 kbit/s at the same complexity, and complexity 5 slower than 10 (121
+  against 105 µs in the mixing test); we did not look into why. The encoding times may depend on the synthetic
+  signal or carry noise from the shared VM, so read them to within about 20%.
 
 **Mixing on the server**, from these costs: decoding every frame once (19.4 µs), adding each into its listeners'
 mixes (0.10 µs per frame and listener) and encoding one frame per listener every 20 ms (105 µs at complexity 10)
 comes to 8.7 cores at 4,096 players and 10% speaking, almost all of it encoding, plus the 1.1 cores of sending
 what batching sends: 9.8 cores; 13.5 at 20%. Complexity 1 cuts encoding to 66 µs and the mixing to about 5.7 cores at 10%.
+These are upper bounds for a naive mono mixer, which encodes a frame for every listener who hears anything. A
+mixer would forward the original frame to a listener who hears exactly one speaker, likely the common case in a
+city of whispers and normal speech, and could pan each voice into a stereo mix, at a higher encoding cost. Even a
+mixer that encoded for a third of the listeners would cost several times the relay.
 
 ### Packet loss
 
@@ -255,8 +264,9 @@ Arriving at the server: 1.3, 2.6 and 5.3 MB/s. A listener in a crowd hearing fiv
 
 ### Routing by range, not by cell
 
-What a server sends depends on who it thinks can hear. Mumble-based voice (FiveM's) sends to a channel or to the
-players of nearby grid cells and leaves the cut by distance to the client. In the same city at 4,096 players, a
+What a server sends depends on who it thinks can hear. A Mumble-style server sends to a channel or to the players
+of nearby grid cells and leaves the cut by distance to the client (we did not check how a particular game mode's
+voice resource configures this). In the same city at 4,096 players, a
 normal-speech frame reaches 6.4 players within 7 m, but 53 players in the 3 by 3 cells of 16 m around the speaker,
 141 in cells of 64 m and 152 in cells of 128 m: 8 to 24 times the packets, and every one of those clients receives
 voice it is not meant to hear, which a modified client can play.
@@ -272,7 +282,7 @@ channels, so by that rule of thumb it would need about 50 workers, its routers p
 `pipeToRouter`, because one world does not split into rooms. That figure is an estimate from documentation, made
 for video-heavy rooms; audio consumers are cheaper.
 
-**Mumble** (the protocol behind FiveM's voice) was not run either. Its server forwards each packet to a channel or
+**Mumble** was not run either. Its server forwards each packet to a channel or
 a client-defined voice target; positional audio is the client attenuating by the positions it receives, so the
 server sends more than is heard (see above).
 
@@ -317,8 +327,9 @@ server sends more than is heard (see above).
 
 Why:
 
-- **It was the cheapest and the only one that held**: 1.11 cores at 4,096 players and 10% speaking and 1.58 at
-  20%, everything delivered; LiveKit needed 1.6 times the CPU and 30 times the memory for the same forwarding.
+- **It was the cheapest that held**: 1.11 cores at 4,096 players and 10% speaking and 1.58 at 20%, everything
+  delivered; sending per frame would need about 3.1 cores at 20% (computed), and LiveKit needed 1.4 to 1.6 times
+  the CPU and 30 times the memory for the same forwarding.
 - **The server decides who hears**, with the same rules as everything else it sends: no client receives voice from
   outside its range, bucket, channel or call.
 - **One connection, one stack**: no second server, port, token or WebRTC library in the client module, and the
@@ -331,11 +342,11 @@ Why:
 
 | Option | Measured | Why not |
 |---|---|---|
-| Our relay, one datagram per frame | 1.68 cores at 10%, 61% delivered at 20% | 2.6 times the datagrams of batching; fails first as speech grows. Kept as the low-latency mode for small servers. |
-| Mixing on the server | 9.8 cores at 10% (computed) | Nine times the CPU, almost all of it encoding a stream per listener, and the listener loses the direction of each voice. |
+| Our relay, one datagram per frame | 1.68 cores at 10%; about 3.1 at 20% (computed) | 2.6 times the datagrams of batching; outgrows the server first as speech grows. Kept as the low-latency mode for small servers. |
+| Mixing on the server | up to 9.8 cores at 10% (computed, naive mono mixer) | Up to nine times the CPU, almost all of it encoding a stream per listener; a mono mix loses the direction of each voice. |
 | LiveKit | 1.41 against 0.91 cores, 3.1 GB against 107 MB at 2,200 | More CPU and much more memory for the same packets; a room must fit on one node; proximity means subscription changes over signalling; a WebRTC stack in the client module. |
 | mediasoup | not run | One core per worker and a few hundred consumers each by its own guidance; one world would be piped across many workers; a Node.js or Rust control process; a WebRTC stack in the client. |
-| Mumble / FiveM-style | not run | Routes by channel or cell: 8 to 24 times the packets in our city, and clients get voice they should not hear. |
+| Mumble-style routing | not run | Routes by channel or cell: 8 to 24 times the packets in our city, and clients get voice they should not hear. |
 | In-band FEC always on | 2 dB at 1 to 5% loss | libopus adds nothing below 10% expected loss at 24 kbit/s; switching it on with the measured loss gets the same. |
 | Redundant copy (RED) | 37 to 59 dB, twice the bytes | The best recovery; worth trying for listeners or speakers with high loss once real loss is known. |
 
