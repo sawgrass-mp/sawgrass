@@ -70,9 +70,11 @@ The game engine cannot run on the server, so physics runs on clients, as in othe
 ## Scripting
 
 Game modes are **resources**: a folder with a manifest, server scripts and client scripts, in `resources/`. They
-use events (server ↔ client), RPC, replicated per-entity state, commands and permissions. The proposed language
-is Luau through `mlua` (decision pending, see the roadmap). Client scripts are downloaded from servers and run on
-players' machines, so they run in a sandbox with no file, network or process access.
+use events (server ↔ client), RPC, replicated per-entity state, commands and permissions. Scripts are written in
+Luau, embedded through `mlua` with native code generation ([ADR 0005](adr/0005-luau-scripting.md)). Every call into
+a resource runs under a deadline enforced by Luau's interrupt callback, and every resource has a memory cap. Client
+scripts are downloaded from servers and run on players' machines, so scripts on both sides run in Luau's sandbox
+with no file, network or process access.
 
 ## Client and launcher
 
