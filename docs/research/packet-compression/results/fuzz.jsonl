@@ -1,0 +1,16 @@
+{"suite": "fuzz", "method": "full/none", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 39.8, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "full/none", "inputs": "mutated", "count": 100000, "rejected": 88493, "accepted": 11507, "panicked": 0, "slowest_us": 168.0, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "full/lz4", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 17.7, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "full/lz4", "inputs": "mutated", "count": 100000, "rejected": 89483, "accepted": 10517, "panicked": 0, "slowest_us": 69.0, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "full/zstd-3", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 600.5, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "full/zstd-3", "inputs": "mutated", "count": 100000, "rejected": 96435, "accepted": 3565, "panicked": 0, "slowest_us": 274.2, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "full/zstd-3-dict16k", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 45.7, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "full/zstd-3-dict16k", "inputs": "mutated", "count": 100000, "rejected": 96373, "accepted": 3627, "panicked": 0, "slowest_us": 144.1, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/none", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 50.7, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/none", "inputs": "mutated", "count": 100000, "rejected": 92199, "accepted": 7801, "panicked": 0, "slowest_us": 2842.3, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/lz4", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 18.4, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/lz4", "inputs": "mutated", "count": 100000, "rejected": 92314, "accepted": 7686, "panicked": 0, "slowest_us": 262.9, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/zstd-3", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 82.1, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/zstd-3", "inputs": "mutated", "count": 100000, "rejected": 98688, "accepted": 1312, "panicked": 0, "slowest_us": 310.6, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/zstd-3-dict16k", "inputs": "random", "count": 100000, "rejected": 100000, "accepted": 0, "panicked": 0, "slowest_us": 856.2, "at": "2026-11-24T14:45:42"}
+{"suite": "fuzz", "method": "delta/zstd-3-dict16k", "inputs": "mutated", "count": 100000, "rejected": 98433, "accepted": 1567, "panicked": 0, "slowest_us": 571.0, "at": "2026-11-24T14:45:42"}

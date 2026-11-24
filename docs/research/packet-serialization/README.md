@@ -71,7 +71,9 @@ every format carries the same information and only the encoding differs.
   on untrusted input they are undefined behaviour.
 - **FlatBuffers**: the schema [`packets.fbs`](bench/schema/packets.fbs) compiled by `flatc` into
   [`packets_generated.rs`](bench/src/packets_generated.rs); entities are a fixed-size struct, the message a union.
-  Every decode runs the verifier (`root_as_packet`) first.
+  Every decode runs the verifier (`root_as_packet`) first. The generated code uses `unsafe` accessors, as all
+  `flatc` Rust output does; it is generated, and lives in this research crate outside the workspace, whose
+  `unsafe` ban does not reach it.
 
 ### Tests
 
@@ -109,8 +111,10 @@ Bytes per message:
   entities spread over 500 m it ended slightly larger than the current encoding.
 - rkyv and FlatBuffers keep fixed, aligned layouts (and FlatBuffers adds tables and offsets), which is what lets
   them read in place, at the cost of padding: 28 bytes per entity, and several times more for small events.
-- A snapshot of 100 entities is larger than one datagram in every format (about 1,200 bytes fit), so the gateway
-  sends two either way.
+- A snapshot of 100 entities is larger than one datagram in every format (quinn sends at most 1,414 bytes, or 1,162
+  on a path at the 1,200-byte QUIC minimum, as measured in [NET-5](../packet-compression/README.md)), so the
+  gateway sends two either way. postcard's savings are therefore in bytes, not in packets; the bandwidth budget
+  counts bytes, but per-packet costs (headers, encryption calls, system calls) do not shrink.
 
 ### Speed
 
@@ -187,10 +191,13 @@ Nanoseconds per message, median of three runs (range in brackets):
 
 ### What was not measured
 
-- Delta compression against the last acknowledged snapshot, and domain-specific bit packing (positions relative
-  to a grid cell, a flag for zero velocity). These shrink snapshots far more than any choice of format, and they
-  work on the values before any format sees them.
-- General compression (LZ4, zstd) of packets.
+- Delta encoding against the last acknowledged snapshot and general compression (LZ4, zstd): measured afterwards
+  in [NET-5](../packet-compression/README.md). Domain-specific bit packing (positions relative to a grid cell, a
+  flag for zero velocity) was not measured.
+- Coverage-guided fuzzing. The hostile-input test is random and mutated bytes; half of it is random bytes, which
+  mostly fail at the first tag. It is good evidence against crashes on common corruptions, not proof that no input
+  can crash a decoder. A `cargo fuzz` target on the protocol crate's real decoder is the follow-up that would
+  establish that.
 - Other formats: bincode, MessagePack, Protocol Buffers (prost), Cap'n Proto, speedy, borsh.
 - Schema evolution in practice: adding a field and reading old packets with new code.
 - Code size and compile time of each format, and memory use.
@@ -209,7 +216,11 @@ The protocol version check at connection (`PROTOCOL_VERSION`) stays as it is.
 - **A stable wire format.** postcard's format is documented and stable since 1.0, so a client and a server built
   with different postcard versions still agree. bitcode states that its format may change between major
   versions.
-- **Reliable on hostile input**: no panic, no runaway allocation, no stall in 400,000 inputs.
+- **No crash on hostile input we tried**: no panic, no runaway allocation, no stall in 400,000 random and corrupted
+  inputs (not coverage-guided fuzzing; see [What was not measured](#what-was-not-measured)).
+- **Decoded strictly.** postcard's `from_bytes` ignores bytes after a valid packet, so the protocol decodes with
+  `take_from_bytes` and rejects any remainder, as the current code does: one encoding per packet, and no room for
+  data smuggled after it.
 - **Little to maintain.** A serde derive on the message types replaces hand-written encode and decode for every new
   message, and keeps us free to change messages without writing byte offsets.
 

@@ -64,7 +64,8 @@ pub fn serve<S: PollServer>(mut server: S, load: bool) {
     let tick = Duration::from_secs(1) / TICK_HZ;
     let mut next_update = Instant::now();
     let mut next_tick = Instant::now() + tick;
-    let snapshot = message(KIND_SNAPSHOT, 0, 0, SNAPSHOT_BYTES);
+    let snapshot = message(KIND_SNAPSHOT, 0, 0, snapshot_bytes());
+    let per_tick = snapshots_per_tick();
     loop {
         if load {
             next_update += update;
@@ -91,7 +92,7 @@ pub fn serve<S: PollServer>(mut server: S, load: bool) {
         if load && Instant::now() >= next_tick {
             next_tick += tick;
             for conn in server.connections() {
-                for _ in 0..SNAPSHOTS_PER_TICK {
+                for _ in 0..per_tick {
                     server.send(conn, false, &snapshot);
                     reporter.sent += 1;
                 }
