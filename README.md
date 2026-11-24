@@ -204,6 +204,9 @@ movement and snapshots, streams for reliable events.
 - Caveats: one 4-core VM with server and clients together; loss from our own relay (random, no bursts); single
   runs; default settings for every library. For renet and GNS at 4,096 the server or load generator cores were
   saturated, so their limits there are not established.
+- Checked on the real server under the load-test bots: quinn spent 0.49 cores for 1,000 players and 0.86 for 2,000
+  in a dense crowd, 4.7 to 9.4 µs per datagram against this harness's 7.9 to 12.8, so the choice holds
+  ([load-test-bots](docs/research/load-test-bots/README.md)).
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/network-transport](docs/research/network-transport/).

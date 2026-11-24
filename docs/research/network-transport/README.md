@@ -296,6 +296,25 @@ paid in gateways that scale out, and it buys encryption and the best loss behavi
   direction.
 - Measurements on a real network with burst loss reverse the order of quinn and GNS under loss.
 
+## Checked on the load-test bots
+
+BOT-3 loaded the real server (quinn 0.11.12 in `sawgrass-gateway`, one gateway thread) with 1,000 to 3,000
+load-test bots on this VM, three runs each; the full page is [load-test-bots](../load-test-bots/README.md).
+
+| | Players | Datagrams per second | Network CPU | Per datagram |
+|---|---:|---:|---:|---:|
+| This harness, quinn | 1,000 | 60,000 | 0.77 cores | 12.8 µs |
+| This harness, quinn | 4,096 | 245,760 | 1.94 cores | 7.9 µs |
+| Real server, bots over 1.5 km | 1,000 | 61,500 | 0.49 cores | 8.0 µs |
+| Real server, bots over 1.5 km | 2,000 | 184,000 | 0.86 cores | 4.7 µs |
+| Real server, bots over 4 km | 3,000 | 153,000 | 0.95 cores | 6.2 µs |
+
+**The conclusion holds.** The real gateway costs no more per datagram than this harness measured, so a gateway of
+1,000 to 1,400 players needs at most the 0.8 to 1 core estimated above. Gateway CPU is not what limits the server
+on this VM either: the tick thread is (see that page). Only quinn was run: the bots and the gateway speak QUIC
+alone, so ENet, GNS and renet would need a gateway and a client of their own. The runs are on loopback without
+loss, and 4,096 players need the bots on a second machine.
+
 ## Licences
 
 Checked against the licence files and manifests of the versions used. Sawgrass is AGPL-3.0, and #44 proposes MIT
