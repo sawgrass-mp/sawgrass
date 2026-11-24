@@ -1104,8 +1104,12 @@ version = "0.0.0"
 name = "sawgrass-server"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "hecs",
+ "rcgen",
+ "sawgrass-gateway",
  "sawgrass-protocol",
+ "tokio",
 ]
 
 [[package]]

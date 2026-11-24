@@ -23,10 +23,14 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use quinn::rustls;
 use quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use quinn::rustls::{self, RootCertStore};
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream, SendStream, VarInt};
 use sawgrass_protocol::{DecodeError, PROTOCOL_VERSION, PacketHeader, PacketKind, is_compatible};
+
+/// The certificate types and root store [`Gateway::bind`] and [`connect`] take, so callers need no rustls
+/// dependency of their own.
+pub use quinn::rustls::{RootCertStore, pki_types};
 
 /// TLS application protocol name for Sawgrass connections.
 pub const ALPN: &[u8] = b"sawgrass";
@@ -53,7 +57,9 @@ const RECEIVE_WINDOW: u32 = 256 * 1024;
 /// Limits fail closed, because the gateway faces the internet: a client may open exactly one bidirectional stream
 /// (the event stream) and no unidirectional ones, the gateway opens none, and stream and connection windows are
 /// [`RECEIVE_WINDOW`]. The datagram receive buffer is 1 MiB on the client, so a burst of snapshots is not dropped,
-/// and 64 KiB on the gateway, where a client sends only small state packets.
+/// and 64 KiB on the gateway, where a client sends only small state packets. The gateway's datagram send buffer
+/// is 64 KiB per connection, a dozen ticks of snapshots in a crowd: quinn drops the oldest beyond it, so a client
+/// that stops acknowledging holds at most that much until the idle timeout, instead of quinn's default 1 MiB.
 fn transport(gateway: bool) -> Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
     let (peer_bidi, datagram_buffer) = if gateway { (1u32, 64 * 1024) } else { (0, 1 << 20) };
@@ -65,6 +71,9 @@ fn transport(gateway: bool) -> Arc<quinn::TransportConfig> {
         .stream_receive_window(RECEIVE_WINDOW.into())
         .receive_window(RECEIVE_WINDOW.into())
         .datagram_receive_buffer_size(Some(datagram_buffer));
+    if gateway {
+        config.datagram_send_buffer_size(64 * 1024);
+    }
     Arc::new(config)
 }
 
@@ -230,6 +239,11 @@ impl Gateway {
 pub struct Incoming(quinn::Incoming);
 
 impl Incoming {
+    /// Refuses the connection without a handshake, for example when the server is full.
+    pub fn refuse(self) {
+        self.0.refuse();
+    }
+
     /// Completes the QUIC and Sawgrass handshakes, refusing an incompatible client version.
     pub async fn handshake(self) -> Result<Session, Error> {
         let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
@@ -351,35 +365,110 @@ impl Session {
 
     /// Sends an event on the reliable stream. Events arrive in order.
     pub async fn send_event(&mut self, packet: &[u8]) -> Result<(), Error> {
-        if packet.len() > MAX_EVENT_LEN {
-            return Err(Error::EventTooLong(packet.len()));
-        }
-        check_kind(packet, true)?;
-        let len = u32::try_from(packet.len()).map_err(|_| Error::EventTooLong(packet.len()))?;
-        self.send.write_all(&len.to_le_bytes()).await?;
-        self.send.write_all(packet).await?;
-        Ok(())
+        write_event(&mut self.send, packet).await
     }
 
     /// Waits for the next event and returns its header with the whole packet.
     pub async fn recv_event(&mut self) -> Result<(PacketHeader, Vec<u8>), Error> {
-        let mut len = [0u8; 4];
-        self.recv.read_exact(&mut len).await?;
-        let len = u32::from_le_bytes(len) as usize;
-        if len > MAX_EVENT_LEN {
-            self.connection.close(VarInt::from_u32(0), b"event too long");
-            return Err(Error::EventTooLong(len));
-        }
-        let mut packet = vec![0u8; len];
-        self.recv.read_exact(&mut packet).await?;
-        let header = check_kind(&packet, true)?;
-        Ok((header, packet))
+        read_event(&mut self.recv, &self.connection).await
     }
 
     /// Closes the connection.
     pub fn close(&self) {
         self.connection.close(VarInt::from_u32(0), b"closed");
     }
+
+    /// Splits the session so that datagrams, incoming events and outgoing events can each be handled by their
+    /// own task or thread. Reading an event is not cancel-safe, so it should not race other work in a
+    /// `select!`; after a split it does not have to.
+    #[must_use]
+    pub fn split(self) -> (Datagrams, EventSender, EventReceiver) {
+        let datagrams = Datagrams(self.connection.clone());
+        let receiver = EventReceiver {
+            recv: self.recv,
+            connection: self.connection,
+        };
+        (datagrams, EventSender { send: self.send }, receiver)
+    }
+}
+
+/// The datagram half of a [`Session`]; cheap to clone and usable from any thread.
+#[derive(Debug, Clone)]
+pub struct Datagrams(Connection);
+
+impl Datagrams {
+    /// Sends a state packet as an unreliable datagram, like [`Session::send_datagram`].
+    pub fn send(&self, packet: Bytes) -> Result<(), Error> {
+        check_kind(&packet, false)?;
+        self.0.send_datagram(packet).map_err(Error::SendDatagram)
+    }
+
+    /// Waits for the next datagram, like [`Session::recv_datagram`].
+    pub async fn recv(&self) -> Result<(PacketHeader, Bytes), Error> {
+        let packet = self.0.read_datagram().await?;
+        let header = check_kind(&packet, false)?;
+        Ok((header, packet))
+    }
+
+    /// Closes the connection.
+    pub fn close(&self) {
+        self.0.close(VarInt::from_u32(0), b"closed");
+    }
+}
+
+/// The outgoing event stream of a split [`Session`].
+#[derive(Debug)]
+pub struct EventSender {
+    send: SendStream,
+}
+
+impl EventSender {
+    /// Sends an event, like [`Session::send_event`].
+    pub async fn send(&mut self, packet: &[u8]) -> Result<(), Error> {
+        write_event(&mut self.send, packet).await
+    }
+}
+
+/// The incoming event stream of a split [`Session`].
+#[derive(Debug)]
+pub struct EventReceiver {
+    recv: RecvStream,
+    connection: Connection,
+}
+
+impl EventReceiver {
+    /// Waits for the next event, like [`Session::recv_event`].
+    pub async fn recv(&mut self) -> Result<(PacketHeader, Vec<u8>), Error> {
+        read_event(&mut self.recv, &self.connection).await
+    }
+}
+
+async fn write_event(send: &mut SendStream, packet: &[u8]) -> Result<(), Error> {
+    if packet.len() > MAX_EVENT_LEN {
+        return Err(Error::EventTooLong(packet.len()));
+    }
+    check_kind(packet, true)?;
+    let len = u32::try_from(packet.len()).map_err(|_| Error::EventTooLong(packet.len()))?;
+    send.write_all(&len.to_le_bytes()).await?;
+    send.write_all(packet).await?;
+    Ok(())
+}
+
+async fn read_event(
+    recv: &mut RecvStream,
+    connection: &Connection,
+) -> Result<(PacketHeader, Vec<u8>), Error> {
+    let mut len = [0u8; 4];
+    recv.read_exact(&mut len).await?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_EVENT_LEN {
+        connection.close(VarInt::from_u32(0), b"event too long");
+        return Err(Error::EventTooLong(len));
+    }
+    let mut packet = vec![0u8; len];
+    recv.read_exact(&mut packet).await?;
+    let header = check_kind(&packet, true)?;
+    Ok((header, packet))
 }
 
 /// Decodes the header and checks that its kind belongs on the event stream (`event`) or in a datagram.
