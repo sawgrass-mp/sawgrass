@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="406" viewBox="0 0 880 406" role="img" aria-label="Voice server CPU at 4,096 players, 10% and 20% speaking: our relay batched 1.11 and 1.58 cores; one datagram per frame 1.68 and saturated; mixing on the server 9.8 and 13.5 cores (computed). Same rooms load at 1,100 and 2,200 players: our relay 0.52 and 0.91 cores, LiveKit 0.83 and 1.41">
+<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#14e1f0"/><stop offset="1" stop-color="#7cf000"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:13px;fill:#8fb3a6}.l{font-size:15px;font-weight:600;fill:#e8fff4}.n{font-size:12px;fill:#7d9a90}.p{font-size:14px;font-weight:700;fill:#a6ff4d}.v{font-size:14px;font-weight:600;fill:#cfe9df}</style>
+<rect width="880" height="406" rx="16" fill="#060a08"/>
+<rect x="1" y="1" width="878" height="404" rx="15" fill="none" stroke="#1d3b2f"/>
+<text x="28" y="44" class="h">Server CPU, 4,096 players, 10% speaking</text>
+<text x="28" y="68" class="s">City model; text gives 10% / 20% speaking. Mixing is computed from measured codec costs.</text>
+<text x="28" y="114" class="l">Our relay, batched per listener</text>
+<text x="28" y="131" class="n">one datagram per listener every 20 ms</text>
+<rect x="330" y="106" width="370" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="106" width="102.6" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="117" class="p" text-anchor="end">1.11 / 1.58 cores</text>
+<text x="28" y="154" class="l">Our relay, one datagram per frame</text>
+<text x="28" y="171" class="n">lowest latency, most packets</text>
+<rect x="330" y="146" width="370" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="146" width="155.3" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="157" class="v" text-anchor="end">1.68 / saturated</text>
+<text x="28" y="194" class="l">Mixing on the server</text>
+<text x="28" y="211" class="n">decode, mix and encode per listener</text>
+<rect x="330" y="186" width="370" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="186" width="370.0" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="197" class="v" text-anchor="end">9.8 / 13.5 cores</text>
+<text x="28" y="248" class="h">Same load, two servers</text>
+<text x="28" y="272" class="s">Rooms of one speaker and ten listeners; text gives 1,100 / 2,200 players.</text>
+<text x="28" y="318" class="l">Our relay over quinn</text>
+<text x="28" y="335" class="n">57 / 107 MB of memory</text>
+<rect x="330" y="310" width="370" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="310" width="168.2" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="321" class="p" text-anchor="end">0.52 / 0.91 cores</text>
+<text x="28" y="358" class="l">LiveKit</text>
+<text x="28" y="375" class="n">1.6 / 3.1 GB of memory</text>
+<rect x="330" y="350" width="370" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="350" width="261.6" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="361" class="v" text-anchor="end">0.83 / 1.41 cores</text>
+</svg>

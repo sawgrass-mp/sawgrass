@@ -21,6 +21,7 @@
   <a href="#packet-serialization-measured">Serialization</a> ·
   <a href="#packet-compression-measured">Compression</a> ·
   <a href="#scripting-engines-measured">Scripting</a> ·
+  <a href="#voice-chat-measured">Voice</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#contributing">Contributing</a>
 </p>
@@ -289,6 +290,36 @@ the maintainer decides between Luau, JavaScript or TypeScript on V8, and WebAsse
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/scripting-engines](docs/research/scripting-engines/).
+
+## Voice chat, measured
+
+Roleplay needs proximity voice: a player hears the people near them, their radio channel and their phone call. We
+measured our own Opus relay on the QUIC connection against server-side mixing and against LiveKit under the same
+load, with 4,096 players in a simulated city at 5, 10 and 20% speaking.
+
+<p align="center"><img src="docs/assets/voice.svg" alt="Voice server CPU at 4,096 players, 10% and 20% speaking: our relay batched 1.11 and 1.58 cores; one datagram per frame 1.68 and saturated; mixing on the server 9.8 and 13.5 cores (computed). Same rooms load at 1,100 and 2,200 players: our relay 0.52 and 0.91 cores, LiveKit 0.83 and 1.41" width="100%"></p>
+
+**We chose our own relay on the QUIC connection**: Opus at 24 kbit/s in 20 ms frames as datagrams, the server
+deciding who hears each frame and sending each listener one datagram every 20 ms with everything they hear.
+
+| Option | Server CPU, 4,096 players, 10% / 20% speaking | Same rooms load, 2,200 players | Why or why not |
+|---|---:|---:|---|
+| **Our relay, batched per listener** | **1.11 / 1.58 cores** | **1.00 cores, 107 MB** | **Chosen**: held 20% speaking with every frame delivered; the server decides who hears; one connection. |
+| Our relay, one datagram per frame | 1.68 / saturated | 0.91 cores, 107 MB | Lowest latency, but 2.6 times the packets; at 20% it delivered 61% of frames. |
+| Mixing on the server | 9.8 / 13.5 cores (computed) | not run | Encoding a stream per listener costs nine times the CPU and loses each voice's direction. |
+| LiveKit | not established | 1.41 cores, 3.1 GB | 1.6 times the CPU and 30 times the memory; a second connection and a WebRTC stack in the client. |
+| mediasoup, Mumble | not run | not run | mediasoup could not be built here; Mumble-style routing by cell sends 8 to 24 times the packets. |
+
+- Packets set the cost: at 4,096 players and 10% speaking, 200,000 voice frames a second leave the server, 2.4
+  times the snapshot packets; batching per listener sends 80,000 datagrams for them. Batching adds 0 to 20 ms.
+- Voice is light in bytes: 18 MB/s out at 10% speaking, 33 MB/s at 20%, against 165 MB/s for snapshots.
+- libopus's in-band FEC added recovery data only when told to expect at least 10% loss; a redundant copy of each
+  frame recovered best, for twice the bytes.
+- Caveats: one 4-core VM; a simulated city whose hotspots, hearing ranges and radio use are assumptions; at 4,096
+  players sending per frame, and LiveKit from 2,200, server or load generator neared their cores; single runs.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/voice-chat](docs/research/voice-chat/).
 
 ## How it is built
 

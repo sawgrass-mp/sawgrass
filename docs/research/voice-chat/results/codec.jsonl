@@ -1,0 +1,33 @@
+{"kind": "lookahead", "ms": 6.5, "samples": 312.0}
+{"bitrate": 16000.0, "complexity": 10.0, "decode_ns": 22614.0, "encode_ns": 224236.0, "fec_loss": -1.0, "frame_ms": 20.0, "kind": "codec", "label": "plain", "max_bytes": 69.0, "mean_bytes": 37.9, "p99_bytes": 54.0, "payload_kbps": 15.2}
+{"bitrate": 24000.0, "complexity": 10.0, "decode_ns": 19437.0, "encode_ns": 107061.0, "fec_loss": -1.0, "frame_ms": 20.0, "kind": "codec", "label": "plain", "max_bytes": 119.0, "mean_bytes": 59.2, "p99_bytes": 86.0, "payload_kbps": 23.7}
+{"bitrate": 32000.0, "complexity": 10.0, "decode_ns": 20224.0, "encode_ns": 103993.0, "fec_loss": -1.0, "frame_ms": 20.0, "kind": "codec", "label": "plain", "max_bytes": 148.0, "mean_bytes": 78.5, "p99_bytes": 113.0, "payload_kbps": 31.4}
+{"bitrate": 24000.0, "complexity": 10.0, "decode_ns": 38868.0, "encode_ns": 223746.0, "fec_loss": -1.0, "frame_ms": 40.0, "kind": "codec", "label": "plain", "max_bytes": 182.0, "mean_bytes": 118.0, "p99_bytes": 164.0, "payload_kbps": 23.6}
+{"bitrate": 24000.0, "complexity": 10.0, "decode_ns": 57510.0, "encode_ns": 362261.0, "fec_loss": -1.0, "frame_ms": 60.0, "kind": "codec", "label": "plain", "max_bytes": 244.0, "mean_bytes": 177.6, "p99_bytes": 244.0, "payload_kbps": 23.7}
+{"bitrate": 24000.0, "complexity": 5.0, "decode_ns": 23836.0, "encode_ns": 126982.0, "fec_loss": -1.0, "frame_ms": 20.0, "kind": "codec", "label": "plain", "max_bytes": 83.0, "mean_bytes": 52.9, "p99_bytes": 74.0, "payload_kbps": 21.2}
+{"bitrate": 24000.0, "complexity": 1.0, "decode_ns": 23291.0, "encode_ns": 65692.0, "fec_loss": -1.0, "frame_ms": 20.0, "kind": "codec", "label": "plain", "max_bytes": 91.0, "mean_bytes": 52.9, "p99_bytes": 74.0, "payload_kbps": 21.1}
+{"bitrate": 24000.0, "complexity": 10.0, "decode_ns": 19636.0, "encode_ns": 123586.0, "fec_loss": 5.0, "frame_ms": 20.0, "kind": "codec", "label": "fec", "max_bytes": 120.0, "mean_bytes": 59.9, "p99_bytes": 86.0, "payload_kbps": 24.0}
+{"bitrate": 24000.0, "complexity": 10.0, "decode_ns": 15921.0, "encode_ns": 310995.0, "fec_loss": 10.0, "frame_ms": 20.0, "kind": "codec", "label": "fec", "max_bytes": 80.0, "mean_bytes": 56.2, "p99_bytes": 73.0, "payload_kbps": 22.5}
+{"bitrate": 24000.0, "complexity": 10.0, "decode_ns": 22534.0, "encode_ns": 320953.0, "fec_loss": 20.0, "frame_ms": 20.0, "kind": "codec", "label": "fec", "max_bytes": 88.0, "mean_bytes": 60.1, "p99_bytes": 76.0, "payload_kbps": 24.0}
+{"burst": 1.0, "concealed": 0.0107, "direct": 0.9893, "kind": "loss", "loss": 0.01, "lost_frame_snr_db": 1.8, "mean_bytes": 59.2, "method": "plc", "repaired": 0.0}
+{"burst": 1.0, "concealed": 0.0001, "direct": 0.9893, "kind": "loss", "loss": 0.01, "lost_frame_snr_db": 2.0, "mean_bytes": 60.0, "method": "fec", "repaired": 0.0107}
+{"burst": 1.0, "concealed": 0.0001, "direct": 0.9893, "kind": "loss", "loss": 0.01, "lost_frame_snr_db": 59.3, "mean_bytes": 122.3, "method": "red", "repaired": 0.0107}
+{"burst": 1.0, "concealed": 0.0487, "direct": 0.9513, "kind": "loss", "loss": 0.05, "lost_frame_snr_db": 2.2, "mean_bytes": 59.2, "method": "plc", "repaired": 0.0}
+{"burst": 1.0, "concealed": 0.0021, "direct": 0.9513, "kind": "loss", "loss": 0.05, "lost_frame_snr_db": 2.0, "mean_bytes": 59.9, "method": "fec", "repaired": 0.0467}
+{"burst": 1.0, "concealed": 0.0021, "direct": 0.9513, "kind": "loss", "loss": 0.05, "lost_frame_snr_db": 55.1, "mean_bytes": 122.3, "method": "red", "repaired": 0.0467}
+{"burst": 1.0, "concealed": 0.1027, "direct": 0.8973, "kind": "loss", "loss": 0.1, "lost_frame_snr_db": 1.7, "mean_bytes": 59.2, "method": "plc", "repaired": 0.0}
+{"burst": 1.0, "concealed": 0.0104, "direct": 0.8973, "kind": "loss", "loss": 0.1, "lost_frame_snr_db": 10.0, "mean_bytes": 56.2, "method": "fec", "repaired": 0.0923}
+{"burst": 1.0, "concealed": 0.0104, "direct": 0.8973, "kind": "loss", "loss": 0.1, "lost_frame_snr_db": 47.7, "mean_bytes": 122.3, "method": "red", "repaired": 0.0923}
+{"burst": 1.0, "concealed": 0.203, "direct": 0.797, "kind": "loss", "loss": 0.2, "lost_frame_snr_db": 0.9, "mean_bytes": 59.2, "method": "plc", "repaired": 0.0}
+{"burst": 1.0, "concealed": 0.0402, "direct": 0.797, "kind": "loss", "loss": 0.2, "lost_frame_snr_db": 8.2, "mean_bytes": 60.1, "method": "fec", "repaired": 0.1628}
+{"burst": 1.0, "concealed": 0.0402, "direct": 0.797, "kind": "loss", "loss": 0.2, "lost_frame_snr_db": 36.5, "mean_bytes": 122.3, "method": "red", "repaired": 0.1628}
+{"burst": 3.0, "concealed": 0.0513, "direct": 0.9487, "kind": "loss", "loss": 0.05, "lost_frame_snr_db": -1.6, "mean_bytes": 59.2, "method": "plc", "repaired": 0.0}
+{"burst": 3.0, "concealed": 0.0345, "direct": 0.9487, "kind": "loss", "loss": 0.05, "lost_frame_snr_db": -1.7, "mean_bytes": 59.9, "method": "fec", "repaired": 0.0168}
+{"burst": 3.0, "concealed": 0.0345, "direct": 0.9487, "kind": "loss", "loss": 0.05, "lost_frame_snr_db": 5.3, "mean_bytes": 122.3, "method": "red", "repaired": 0.0168}
+{"burst": 3.0, "concealed": 0.095, "direct": 0.905, "kind": "loss", "loss": 0.1, "lost_frame_snr_db": -1.9, "mean_bytes": 59.2, "method": "plc", "repaired": 0.0}
+{"burst": 3.0, "concealed": 0.0622, "direct": 0.905, "kind": "loss", "loss": 0.1, "lost_frame_snr_db": 0.8, "mean_bytes": 56.2, "method": "fec", "repaired": 0.0328}
+{"burst": 3.0, "concealed": 0.0622, "direct": 0.905, "kind": "loss", "loss": 0.1, "lost_frame_snr_db": 5.5, "mean_bytes": 122.3, "method": "red", "repaired": 0.0328}
+{"kind": "mix", "ns_per_source_frame": 101.0}
+{"complexity": 10.0, "kind": "mix_encode", "ns_per_frame": 104573.0}
+{"complexity": 5.0, "kind": "mix_encode", "ns_per_frame": 121329.0}
+{"complexity": 1.0, "kind": "mix_encode", "ns_per_frame": 66386.0}
