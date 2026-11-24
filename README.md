@@ -13,6 +13,11 @@
 </p>
 
 <p align="center">
+  <a href="https://t.me/sawgrass_mp"><img src="https://img.shields.io/badge/Telegram-@sawgrass__mp-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram: @sawgrass_mp"></a>
+  <a href="https://x.com/sawgrass_mp"><img src="https://img.shields.io/badge/X-@sawgrass__mp-000000?style=for-the-badge&logo=x&logoColor=white" alt="X: @sawgrass_mp"></a>
+</p>
+
+<p align="center">
   <a href="#where-the-project-is">Status</a> ·
   <a href="#progress">Progress</a> ·
   <a href="#how-it-fits-together">Architecture</a> ·
@@ -22,8 +27,10 @@
   <a href="#packet-compression-measured">Compression</a> ·
   <a href="#scripting-engines-measured">Scripting</a> ·
   <a href="#voice-chat-measured">Voice</a> ·
+  <a href="#allocators-and-runtimes-measured">Runtime</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
-  <a href="#contributing">Contributing</a>
+  <a href="#contributing">Contributing</a> ·
+  <a href="#community">Community</a>
 </p>
 
 ---
@@ -381,6 +388,36 @@ players in one serial, ordered phase, at 30 Hz.
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/tick-model](docs/research/tick-model/).
 
+## Allocators and runtimes, measured
+
+The allocator and the async runtime sit under every path of the server, so we measured them on three of ours: the
+QUIC gateway with 2,048 to 4,096 players, the world tick with 4,096 players, and RocksDB ledger writes. Allocators:
+glibc malloc, mimalloc and jemalloc. Runtimes: Tokio (multi-thread, two endpoints, thread per core), smol, and
+compio on io_uring with compio-quic.
+
+<p align="center"><img src="docs/assets/runtime.svg" alt="Reliable event p99 at 2,048 players on 2 cores: Tokio multi-thread 6.9 ms, Tokio thread per core 10.6 ms, smol 35.0 ms, compio 36.7 ms. One server core at 2,048 players: 0.72, 0.73, 0.86 and 0.98 of the core. Tick p50 at 4,096 players: glibc 21.5 ms, mimalloc 19.7 ms, jemalloc 20.2 ms" width="100%"></p>
+
+**We keep Tokio's multi-thread runtime and switch the server binaries to jemalloc.**
+
+| Option | Event p99, 2,048 players | Players per core | Tick p50 | Memory under RocksDB | Why or why not |
+|---|---:|---:|---:|---:|---|
+| **Tokio, multi-thread** | **6.9 ms** | **3,072** | | | **Chosen**: lowest p99 and most players per core; what the gateway runs today. |
+| Tokio, thread per core | 10.6 ms | 2,560 | | | 9% less CPU, but a higher p99 and fewer players per core. |
+| smol | 33.8 ms | 2,048 | | | Same quinn code, 40% more CPU; lost clients at 4,096. |
+| compio on io_uring | 36.7 ms | 1,536 | | | Slowest gateway at every load; io_uring did not help QUIC here. |
+| glibc malloc | | | 21.5 ms | 157 to 172 MB | The fallback: same gateway, slowest tick, twice jemalloc's memory. |
+| mimalloc | | | 19.7 ms | 107 to 409 MB | Fastest tick by 3%, but the most memory and the least steady. |
+| **jemalloc** | | | **20.2 ms** | **80 to 92 MB** | **Chosen**: never slower, least memory where memory grew. |
+
+- The allocator made no difference to the gateway, and no clear difference to RocksDB throughput in two runs each.
+- Players per core: every client connected and every message delivered with p99 under 200 ms, server on one core
+  and the load generator on three.
+- Caveats: one 4-core VM; runs of 30 to 60 s, so long-run fragmentation is not covered; at 4,096 players on 2
+  cores the load generator was at its limit, so those runs rank the runtimes but do not set Tokio's ceiling.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/allocator-runtime](docs/research/allocator-runtime/).
+
 ## How it is built
 
 Most of the code is written by AI coding agents working as a swarm, under rules that keep the work small,
@@ -407,6 +444,18 @@ accepted. Read [CONTRIBUTING.md](CONTRIBUTING.md); agents start with
 [AGENTS.md](AGENTS.md). Pick an issue labelled
 [`ready`](https://github.com/sawgrass-mp/sawgrass/issues?q=is%3Aissue+is%3Aopen+label%3Aready+-label%3Aclaimed),
 comment `/claim`, and open a draft pull request. Security issues go through [SECURITY.md](SECURITY.md).
+
+## Community
+
+News, progress updates and announcements are posted on the project's official channels:
+
+| Channel | Link |
+|---|---|
+| **Telegram** | [t.me/sawgrass_mp](https://t.me/sawgrass_mp) |
+| **X** | [x.com/sawgrass_mp](https://x.com/sawgrass_mp) |
+
+These are the only official accounts. Questions about the code, bug reports and proposals go to
+[GitHub issues](https://github.com/sawgrass-mp/sawgrass/issues).
 
 ## Licence
 
