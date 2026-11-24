@@ -6,7 +6,7 @@
 //! one slot instead of growing a queue; only joins and leaves, once per connection, go over a channel. Nothing
 //! on that path waits for the tick. Once per tick [`Players::run_tick`] applies joins, latest states and leaves
 //! to the ECS world,
-//! updates the spatial grid, recomputes each player's visible set and sends each player a whole snapshot of
+//! rebuilds the spatial grid, recomputes each player's visible set and sends each player a whole snapshot of
 //! the entities in it, split into datagrams of at most [`SNAPSHOT_MAX_ENTITIES`] states.
 //!
 //! The tick thread does not hand datagrams to quinn itself (task NET-9). It writes every datagram of a tick into
@@ -40,7 +40,7 @@ use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
-use crate::interest::{EntityId, Point, SpatialGrid, VisibilityChanges, VisibilityConfig, VisibleSet};
+use crate::interest::{DenseGrid, EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
 use crate::slots::{Slot, Slots};
 
 /// The network id of a player's entity, the `id` in snapshots.
@@ -155,7 +155,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         players: Vec::new(),
         slots: Slots::new(),
         by_connection: std::collections::HashMap::new(),
-        grid: SpatialGrid::default(),
+        grid: DenseGrid::default(),
         visibility: VisibilityConfig::default(),
         changes: VisibilityChanges::default(),
         states: Vec::new(),
@@ -272,7 +272,7 @@ pub struct Players {
     slots: Slots,
     /// Slot of each connection, by the connection's id; used only when a connection leaves.
     by_connection: std::collections::HashMap<u32, Slot>,
-    grid: SpatialGrid,
+    grid: DenseGrid,
     visibility: VisibilityConfig,
     changes: VisibilityChanges,
     /// The wire state of every placed player, by slot index.
@@ -317,6 +317,7 @@ impl Players {
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
         self.apply_inbound(world, info);
         self.apply_states(world);
+        self.grid.rebuild();
         self.send_snapshots(info.tick as u32);
         // Every visible set has been recomputed without the players who left: their slots may be reused.
         self.slots.release();

@@ -1,8 +1,13 @@
 //! Interest management: a spatial grid and each viewer's visible set (see `docs/architecture.md`,
 //! "Interest management").
 //!
-//! [`SpatialGrid`] buckets entities into square cells on the horizontal plane. [`VisibleSet`] keeps the
-//! entities one viewer sees and, on every update, reports which entered and which left. Membership uses two
+//! [`DenseGrid`] is the server's index (task IM-5, chosen in IM-2, `docs/research/visibility-index`): one array
+//! of 50 m cells over fixed map bounds, rebuilt every tick by counting entities into cells, so a query reads one
+//! contiguous run of entities per row of cells and nothing is hashed or allocated after the first tick.
+//! [`SpatialGrid`], the IM-1 hashed grid, stays for the benchmarks that compare against it. Both answer
+//! [`Nearby`] queries. [`VisibleSet`] keeps the entities one viewer sees as one bit per entity id, and on every
+//! update reports which entered and which left. Ids must be dense (the server's slots, [`crate::slots`]): a set
+//! takes one bit per id up to the largest id in the index. Membership uses two
 //! radii: an entity enters within [`VisibilityConfig::enter_radius`] and leaves only beyond
 //! [`VisibilityConfig::leave_radius`], so an entity moving along the edge does not flicker in and out.
 //!
@@ -101,6 +106,8 @@ pub struct SpatialGrid {
     /// Entities and their positions per cell. Positions are kept here too so queries read one list.
     cells: IntMap<CellKey, Vec<(EntityId, Point)>>,
     slots: IntMap<EntityId, Slot>,
+    /// One past the largest id ever inserted.
+    id_bound: usize,
 }
 
 impl Default for SpatialGrid {
@@ -126,6 +133,7 @@ impl SpatialGrid {
             inverse_cell_size: 1.0 / cell_size,
             cells: IntMap::default(),
             slots: IntMap::default(),
+            id_bound: 0,
         }
     }
 
@@ -164,6 +172,7 @@ impl SpatialGrid {
 
     /// Adds `id` at `position`, or moves it there if it is already in the grid.
     pub fn upsert(&mut self, id: EntityId, position: Point) {
+        self.id_bound = self.id_bound.max(id.0 as usize + 1);
         let cell = self.cell_of(position);
         if let Some(slot) = self.slots.get_mut(&id) {
             slot.position = position;
@@ -237,6 +246,227 @@ impl SpatialGrid {
                 }
             }
         }
+    }
+}
+
+/// A spatial index a [`VisibleSet`] can be computed from.
+pub trait Nearby {
+    /// Calls `visit` with the id, position and squared distance of every entity within `radius` metres of
+    /// `center`, in no particular order.
+    fn for_each_within(&self, center: Point, radius: f32, visit: impl FnMut(EntityId, Point, f32));
+
+    /// One past the largest id the index can return.
+    fn id_bound(&self) -> usize;
+}
+
+impl Nearby for SpatialGrid {
+    fn for_each_within(&self, center: Point, radius: f32, visit: impl FnMut(EntityId, Point, f32)) {
+        SpatialGrid::for_each_within(self, center, radius, visit);
+    }
+
+    fn id_bound(&self) -> usize {
+        self.id_bound
+    }
+}
+
+/// Cell edge of the [`DenseGrid`], in metres (IM-2 measured 50 m best or tied in every scenario but the nearest-128
+/// cut in the largest crowd).
+pub const DENSE_CELL_SIZE: f32 = 50.0;
+
+/// The square the [`DenseGrid`] covers. Positions outside it are counted into the nearest edge cell, so queries stay
+/// exact; they only get slower if many entities end up there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapBounds {
+    /// South-west corner, in metres.
+    pub min: Point,
+    /// Edge length, in metres.
+    pub size: f32,
+}
+
+impl Default for MapBounds {
+    /// 16,384 m centred on the origin. The game's real map bounds are not known yet; this is twice IM-2's 8 km
+    /// placeholder on each axis, as a margin, and costs 430 KB of cell offsets at 50 m.
+    fn default() -> Self {
+        Self {
+            min: Point::new(-8192.0, -8192.0),
+            size: 16_384.0,
+        }
+    }
+}
+
+/// A grid over fixed map bounds stored as one array: [`DenseGrid::rebuild`] counts the entities into cells and
+/// writes them out sorted by cell, row by row, so a query reads one contiguous run of entities per row of cells.
+///
+/// [`DenseGrid::upsert`] and [`DenseGrid::remove`] only record positions; call [`DenseGrid::rebuild`] once after a
+/// tick's changes and before its queries.
+#[derive(Debug, Clone)]
+pub struct DenseGrid {
+    origin: Point,
+    inverse_cell: f32,
+    /// Cells per side.
+    side: usize,
+    /// Position of each id, `None` for ids not in the grid.
+    positions: Vec<Option<Point>>,
+    len: usize,
+    /// `start[c]..start[c + 1]` index the entities of cell `c` in `xs`, `ys` and `ids`.
+    start: Vec<u32>,
+    xs: Vec<f32>,
+    ys: Vec<f32>,
+    ids: Vec<u32>,
+    cell_of: Vec<u32>,
+    dirty: bool,
+}
+
+impl Default for DenseGrid {
+    fn default() -> Self {
+        Self::new(MapBounds::default(), DENSE_CELL_SIZE)
+    }
+}
+
+impl DenseGrid {
+    /// An empty grid over `bounds` with cells `cell_size` metres wide.
+    ///
+    /// # Panics
+    ///
+    /// If `cell_size` or the bounds' size is not a finite positive number, or the grid would have more than 2^26
+    /// cells.
+    #[must_use]
+    pub fn new(bounds: MapBounds, cell_size: f32) -> Self {
+        assert!(
+            cell_size.is_finite() && cell_size > 0.0 && bounds.size.is_finite() && bounds.size > 0.0,
+            "cell size and bounds must be positive"
+        );
+        let side = (bounds.size / cell_size).ceil().max(1.0) as usize;
+        assert!(side * side <= 1 << 26, "too many cells: {side} per side");
+        Self {
+            origin: bounds.min,
+            inverse_cell: 1.0 / cell_size,
+            side,
+            positions: Vec::new(),
+            len: 0,
+            start: vec![0; side * side + 1],
+            xs: Vec::new(),
+            ys: Vec::new(),
+            ids: Vec::new(),
+            cell_of: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    /// Number of entities in the grid.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the grid holds no entity.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Where `id` is, if it is in the grid.
+    #[must_use]
+    pub fn position(&self, id: EntityId) -> Option<Point> {
+        self.positions.get(id.0 as usize).copied().flatten()
+    }
+
+    /// Adds `id` at `position`, or moves it there.
+    pub fn upsert(&mut self, id: EntityId, position: Point) {
+        let i = id.0 as usize;
+        if i >= self.positions.len() {
+            self.positions.resize(i + 1, None);
+        }
+        if self.positions[i].replace(position).is_none() {
+            self.len += 1;
+        }
+        self.dirty = true;
+    }
+
+    /// Removes `id`. Returns whether it was in the grid.
+    pub fn remove(&mut self, id: EntityId) -> bool {
+        let removed = self
+            .positions
+            .get_mut(id.0 as usize)
+            .and_then(Option::take)
+            .is_some();
+        if removed {
+            self.len -= 1;
+            self.dirty = true;
+        }
+        removed
+    }
+
+    fn coord(&self, v: f32, origin: f32) -> usize {
+        // Saturating cast: below the origin (or NaN) gives 0, far above gives the last cell.
+        (((v - origin) * self.inverse_cell).floor().max(0.0) as usize).min(self.side - 1)
+    }
+
+    fn cell(&self, p: Point) -> usize {
+        self.coord(p.y, self.origin.y) * self.side + self.coord(p.x, self.origin.x)
+    }
+
+    /// Sorts every entity into its cell. Allocates only when the number of entities grows.
+    pub fn rebuild(&mut self) {
+        self.start.fill(0);
+        self.cell_of.clear();
+        for p in self.positions.iter().flatten() {
+            let c = self.cell(*p);
+            self.cell_of.push(c as u32);
+            self.start[c + 1] += 1;
+        }
+        for c in 1..self.start.len() {
+            self.start[c] += self.start[c - 1];
+        }
+        self.xs.resize(self.len, 0.0);
+        self.ys.resize(self.len, 0.0);
+        self.ids.resize(self.len, 0);
+        // Scatter, using start[c] as a cursor, then shift the cursors back by one cell.
+        let present = self
+            .positions
+            .iter()
+            .enumerate()
+            .filter_map(|(id, p)| p.map(|p| (id, p)));
+        for ((id, p), &c) in present.zip(&self.cell_of) {
+            let j = self.start[c as usize] as usize;
+            self.xs[j] = p.x;
+            self.ys[j] = p.y;
+            self.ids[j] = id as u32;
+            self.start[c as usize] += 1;
+        }
+        for c in (1..self.start.len()).rev() {
+            self.start[c] = self.start[c - 1];
+        }
+        self.start[0] = 0;
+        self.dirty = false;
+    }
+}
+
+impl Nearby for DenseGrid {
+    /// # Panics
+    ///
+    /// In debug builds, if the grid changed since the last [`DenseGrid::rebuild`].
+    fn for_each_within(&self, center: Point, radius: f32, mut visit: impl FnMut(EntityId, Point, f32)) {
+        debug_assert!(!self.dirty, "DenseGrid queried before rebuild");
+        let radius_squared = radius * radius;
+        let x0 = self.coord(center.x - radius, self.origin.x);
+        let x1 = self.coord(center.x + radius, self.origin.x);
+        let y0 = self.coord(center.y - radius, self.origin.y);
+        let y1 = self.coord(center.y + radius, self.origin.y);
+        for y in y0..=y1 {
+            let row = y * self.side;
+            for j in self.start[row + x0] as usize..self.start[row + x1 + 1] as usize {
+                let position = Point::new(self.xs[j], self.ys[j]);
+                let distance_squared = center.distance_squared(position);
+                if distance_squared <= radius_squared {
+                    visit(EntityId(self.ids[j]), position, distance_squared);
+                }
+            }
+        }
+    }
+
+    fn id_bound(&self) -> usize {
+        self.positions.len()
     }
 }
 
@@ -317,13 +547,15 @@ impl VisibilityChanges {
     }
 }
 
-/// The entities one viewer currently sees.
+/// The entities one viewer currently sees, as one bit per entity id (IM-2: the sorted lists this replaces were
+/// most of the visibility cost in a crowd).
 #[derive(Debug, Default, Clone)]
 pub struct VisibleSet {
-    /// Current members, sorted by id.
+    bits: Vec<u64>,
+    /// Scratch for the next update's bits, kept to avoid an allocation per update.
+    next: Vec<u64>,
+    /// The members in id order, rebuilt from the bits on every update.
     members: Vec<EntityId>,
-    /// Scratch buffer for the next members, kept to avoid an allocation per update.
-    next: Vec<EntityId>,
 }
 
 impl VisibleSet {
@@ -342,7 +574,9 @@ impl VisibleSet {
     /// Whether `id` is visible.
     #[must_use]
     pub fn contains(&self, id: EntityId) -> bool {
-        self.members.binary_search(&id).is_ok()
+        self.bits
+            .get(id.0 as usize / 64)
+            .is_some_and(|word| word & (1 << (id.0 % 64)) != 0)
     }
 
     /// Number of visible entities.
@@ -360,59 +594,54 @@ impl VisibleSet {
     /// Recomputes the set for a viewer at `viewer_position` and writes what entered and left into `changes`
     /// (cleared first). `viewer` itself is never a member; pass `None` for a viewer that is not an entity,
     /// such as a spectator camera.
-    pub fn update(
+    pub fn update<I: Nearby + ?Sized>(
         &mut self,
-        grid: &SpatialGrid,
+        index: &I,
         viewer: Option<EntityId>,
         viewer_position: Point,
         config: &VisibilityConfig,
         changes: &mut VisibilityChanges,
     ) {
         changes.clear();
+        let words = index.id_bound().div_ceil(64).max(self.bits.len());
+        self.bits.resize(words, 0);
+        self.next.clear();
+        self.next.resize(words, 0);
         let enter_squared = config.enter_radius() * config.enter_radius();
-        let members = &self.members;
-        let next = &mut self.next;
-        next.clear();
-        grid.for_each_within(
+        let (bits, next) = (&self.bits, &mut self.next);
+        index.for_each_within(
             viewer_position,
             config.leave_radius(),
             |id, _, distance_squared| {
                 if Some(id) == viewer {
                     return;
                 }
+                let (word, bit) = (id.0 as usize / 64, 1u64 << (id.0 % 64));
                 // Within the leave radius: members stay, others need to be within the enter radius.
-                if distance_squared <= enter_squared || members.binary_search(&id).is_ok() {
-                    next.push(id);
+                if let (Some(old), Some(new)) = (bits.get(word), next.get_mut(word))
+                    && (distance_squared <= enter_squared || old & bit != 0)
+                {
+                    *new |= bit;
                 }
             },
         );
-        next.sort_unstable();
-        diff_sorted(&self.members, &self.next, changes);
-        std::mem::swap(&mut self.members, &mut self.next);
+        self.members.clear();
+        for (word, (&old, &new)) in self.bits.iter().zip(&self.next).enumerate() {
+            let base = (word * 64) as u32;
+            push_bits(&mut changes.entered, base, new & !old);
+            push_bits(&mut changes.left, base, old & !new);
+            push_bits(&mut self.members, base, new);
+        }
+        std::mem::swap(&mut self.bits, &mut self.next);
     }
 }
 
-/// Fills `changes` with the ids in `new` but not in `old` (entered) and in `old` but not in `new` (left).
-fn diff_sorted(old: &[EntityId], new: &[EntityId], changes: &mut VisibilityChanges) {
-    let (mut i, mut j) = (0, 0);
-    while i < old.len() && j < new.len() {
-        match old[i].cmp(&new[j]) {
-            std::cmp::Ordering::Less => {
-                changes.left.push(old[i]);
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                changes.entered.push(new[j]);
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                i += 1;
-                j += 1;
-            }
-        }
+/// Appends the id of every set bit of `word`, lowest first; bit `i` is id `base + i`.
+fn push_bits(out: &mut Vec<EntityId>, base: u32, mut word: u64) {
+    while word != 0 {
+        out.push(EntityId(base + word.trailing_zeros()));
+        word &= word - 1;
     }
-    changes.left.extend_from_slice(&old[i..]);
-    changes.entered.extend_from_slice(&new[j..]);
 }
 
 #[cfg(test)]
@@ -563,6 +792,75 @@ mod tests {
             expected.sort_unstable();
             assert_eq!(found, expected, "round {round}");
             assert_eq!(grid.len(), positions.len());
+        }
+    }
+
+    #[test]
+    fn dense_grid_queries_match_brute_force_including_outside_the_bounds() {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let bounds = MapBounds {
+            min: Point::new(-300.0, -300.0),
+            size: 600.0,
+        };
+        let mut grid = DenseGrid::new(bounds, 50.0);
+        let mut positions: Vec<Option<Point>> = vec![None; 300];
+        for round in 0..20 {
+            for i in 0..300u32 {
+                // Some of them up to 100 m beyond the bounds on every side.
+                let p = Point::new(
+                    next_random(&mut state) * 800.0 - 400.0,
+                    next_random(&mut state) * 800.0 - 400.0,
+                );
+                if round > 0 && i % 7 == round % 7 {
+                    assert_eq!(grid.remove(EntityId(i)), positions[i as usize].is_some());
+                    positions[i as usize] = None;
+                } else {
+                    grid.upsert(EntityId(i), p);
+                    positions[i as usize] = Some(p);
+                }
+            }
+            grid.rebuild();
+            let center = Point::new(next_random(&mut state) * 800.0 - 400.0, 0.0);
+            let radius = next_random(&mut state) * 300.0;
+            let mut found = Vec::new();
+            Nearby::for_each_within(&grid, center, radius, |id, _, _| found.push(id));
+            found.sort_unstable();
+            let expected: Vec<EntityId> = positions
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.is_some_and(|p| center.distance_squared(p) <= radius * radius))
+                .map(|(i, _)| EntityId(i as u32))
+                .collect();
+            assert_eq!(found, expected, "round {round}");
+            assert_eq!(grid.len(), positions.iter().flatten().count());
+        }
+    }
+
+    /// The server's grid and the IM-1 grid give every viewer the same set and the same changes.
+    #[test]
+    fn visible_sets_are_the_same_on_both_grids() {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let (mut dense, mut hashed) = (DenseGrid::default(), SpatialGrid::default());
+        let mut sets = vec![(VisibleSet::new(), VisibleSet::new()); 50];
+        let (mut a, mut b) = (VisibilityChanges::default(), VisibilityChanges::default());
+        let mut points: Vec<Point> = (0..400)
+            .map(|_| Point::new(next_random(&mut state) * 1000.0, next_random(&mut state) * 1000.0))
+            .collect();
+        for _ in 0..30 {
+            for (i, p) in points.iter_mut().enumerate() {
+                p.x += next_random(&mut state) * 40.0 - 20.0;
+                p.y += next_random(&mut state) * 40.0 - 20.0;
+                dense.upsert(EntityId(i as u32), *p);
+                hashed.upsert(EntityId(i as u32), *p);
+            }
+            dense.rebuild();
+            for (viewer, (on_dense, on_hashed)) in sets.iter_mut().enumerate() {
+                let (id, at) = (EntityId(viewer as u32), points[viewer]);
+                on_dense.update(&dense, Some(id), at, &config(), &mut a);
+                on_hashed.update(&hashed, Some(id), at, &config(), &mut b);
+                assert_eq!(a, b);
+                assert_eq!(on_dense.members(), on_hashed.members());
+            }
         }
     }
 
