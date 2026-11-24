@@ -11,4 +11,4 @@ pub mod tick;
 
 pub use hecs;
 pub use metrics::{TickMetrics, TickStats};
-pub use tick::{TickConfig, TickConfigError, TickInfo, TickLoop};
+pub use tick::{Clock, SystemClock, TickConfig, TickConfigError, TickInfo, TickLoop};

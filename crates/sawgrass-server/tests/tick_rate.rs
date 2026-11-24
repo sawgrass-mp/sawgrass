@@ -1,12 +1,14 @@
-//! The tick loop keeps its rate under light load (SRV-1).
+//! The tick loop keeps its rate (SRV-1, SRV-2).
 //!
-//! These tests sleep in real time. Bounds allow for a busy CI machine: the loop must never run fast, and may
-//! run at most a quarter slower than its rate.
+//! The schedule tests run on a simulated clock, so their bounds are exact and a busy CI machine cannot fail
+//! them. One test runs on the real clock to check that the loop really sleeps: it must never run fast, and
+//! its upper bound only catches a loop that hangs.
 
 use std::ops::ControlFlow;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sawgrass_server::{TickConfig, TickLoop};
+use sawgrass_server::{Clock, TickConfig, TickLoop};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Position([f32; 3]);
@@ -17,24 +19,58 @@ struct Velocity([f32; 3]);
 /// Players in one world, the architecture target.
 const ENTITIES: usize = 4096;
 
-/// Runs `tick_loop` for `ticks` ticks and returns the wall time it took.
-fn run_ticks(tick_loop: &mut TickLoop, ticks: u64) -> Duration {
-    let start = Instant::now();
-    tick_loop.run(|l| {
+/// A simulated clock: time moves only when the loop sleeps or a test calls [`SimClock::advance`]. Clones
+/// share the same time, so systems and hooks can spend simulated time.
+#[derive(Debug, Clone)]
+struct SimClock {
+    origin: Instant,
+    elapsed: Arc<Mutex<Duration>>,
+}
+
+impl SimClock {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            elapsed: Arc::new(Mutex::new(Duration::ZERO)),
+        }
+    }
+
+    /// Simulated time since the clock was created.
+    fn elapsed(&self) -> Duration {
+        *self.elapsed.lock().expect("clock lock")
+    }
+
+    /// Spends `by` of simulated time, as work would.
+    fn advance(&self, by: Duration) {
+        *self.elapsed.lock().expect("clock lock") += by;
+    }
+}
+
+impl Clock for SimClock {
+    fn now(&self) -> Instant {
+        self.origin + self.elapsed()
+    }
+
+    fn sleep_until(&mut self, deadline: Instant) {
+        let mut elapsed = self.elapsed.lock().expect("clock lock");
+        *elapsed = (*elapsed).max(deadline - self.origin);
+    }
+}
+
+/// A `between` hook that stops the loop after `ticks` ticks.
+fn stop_after(ticks: u64) -> impl FnMut(&mut TickLoop) -> ControlFlow<()> {
+    move |l| {
         if l.tick() >= ticks {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
         }
-    });
-    start.elapsed()
+    }
 }
 
-#[test]
-fn keeps_rate_with_4096_moving_entities() {
-    let config = TickConfig::new(50).expect("valid rate");
-    let interval = config.interval();
-    let mut tick_loop = TickLoop::new(config);
+/// A loop at 50 Hz with `ENTITIES` entities and a movement system.
+fn moving_world() -> TickLoop {
+    let mut tick_loop = TickLoop::new(TickConfig::new(50).expect("valid rate"));
     for i in 0..ENTITIES {
         let x = i as f32;
         tick_loop
@@ -49,25 +85,11 @@ fn keeps_rate_with_4096_moving_entities() {
             }
         }
     });
+    tick_loop
+}
 
-    let ticks = 50;
-    let elapsed = run_ticks(&mut tick_loop, ticks);
-    let expected = interval * u32::try_from(ticks).expect("small");
-    assert!(
-        elapsed >= expected,
-        "ran fast: {ticks} ticks in {elapsed:?}, expected {expected:?}"
-    );
-    assert!(
-        elapsed <= expected * 5 / 4,
-        "ran slow: {ticks} ticks in {elapsed:?}, expected {expected:?}"
-    );
-
-    let stats = tick_loop.metrics().stats();
-    assert_eq!(stats.ticks, ticks);
-    assert_eq!(stats.window, 50);
-    assert!(stats.p99 < interval, "light load overran the tick: {stats}");
-
-    // Every entity moved exactly `ticks` fixed steps, whatever the wall time.
+/// Every entity moved exactly one simulated second of fixed steps, whatever the wall time.
+fn assert_moved_one_second(tick_loop: &mut TickLoop) {
     let mut checked = 0;
     for (pos, _) in tick_loop.world_mut().query_mut::<(&Position, &Velocity)>() {
         assert!(
@@ -81,28 +103,94 @@ fn keeps_rate_with_4096_moving_entities() {
 }
 
 #[test]
+fn keeps_rate_with_4096_moving_entities() {
+    let mut tick_loop = moving_world();
+    let interval = tick_loop.config().interval();
+    let mut clock = SimClock::new();
+    let work = clock.clone();
+    // Each tick costs a tenth of the interval.
+    tick_loop.add_system("work", move |_, _| work.advance(interval / 10));
+
+    let ticks = 50;
+    tick_loop.run_with_clock(&mut clock, stop_after(ticks));
+    assert_eq!(clock.elapsed(), interval * 50);
+
+    let stats = tick_loop.metrics().stats();
+    assert_eq!((stats.ticks, stats.window, stats.overruns), (ticks, 50, 0));
+    assert_eq!(stats.p99, interval / 10);
+    assert!(stats.within_budget(), "{stats}");
+    assert_moved_one_second(&mut tick_loop);
+}
+
+#[test]
 fn slow_tick_is_counted_and_not_made_up_in_a_burst() {
-    let config = TickConfig::new(50).expect("valid rate");
-    let interval = config.interval();
-    let mut tick_loop = TickLoop::new(config);
+    let mut tick_loop = TickLoop::new(TickConfig::new(50).expect("valid rate"));
+    let interval = tick_loop.config().interval();
+    let mut clock = SimClock::new();
+    let work = clock.clone();
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let log = starts.clone();
     // The first tick takes four intervals; the rest are instant.
     tick_loop.add_system("stall once", move |_, info| {
+        log.lock().expect("log lock").push(work.elapsed());
         if info.tick == 0 {
-            std::thread::sleep(interval * 4);
+            work.advance(interval * 4);
         }
     });
 
-    let ticks = 10;
-    let elapsed = run_ticks(&mut tick_loop, ticks);
+    tick_loop.run_with_clock(&mut clock, stop_after(10));
     // Without catch-up: 4 intervals for the stall, then 9 more ticks at the normal rate.
-    let expected = interval * 13;
+    assert_eq!(clock.elapsed(), interval * 13);
+    let starts = starts.lock().expect("log lock").clone();
+    let expected: Vec<Duration> = std::iter::once(Duration::ZERO)
+        .chain((4..13).map(|n| interval * n))
+        .collect();
+    assert_eq!(starts, expected, "missed ticks were run back to back");
+    assert_eq!(tick_loop.metrics().overruns(), 1);
+}
+
+#[test]
+fn between_hook_time_counts_in_the_tick() {
+    let mut tick_loop = TickLoop::new(TickConfig::new(50).expect("valid rate"));
+    let interval = tick_loop.config().interval();
+    let mut clock = SimClock::new();
+    let work = clock.clone();
+    tick_loop.add_system("systems", move |_, _| work.advance(interval / 2));
+
+    let hook = clock.clone();
+    let mut stop = stop_after(10);
+    tick_loop.run_with_clock(&mut clock, |l| {
+        // Applying input before the tick takes 60% of the interval.
+        hook.advance(interval * 3 / 5);
+        stop(l)
+    });
+
+    let stats = tick_loop.metrics().stats();
+    assert_eq!(stats.p99, interval * 11 / 10, "{stats}");
+    assert_eq!(stats.overruns, 10);
+    assert!(!stats.within_budget());
+}
+
+#[test]
+fn real_clock_sleeps_between_ticks() {
+    let mut tick_loop = moving_world();
+    let interval = tick_loop.config().interval();
+    let ticks = 50;
+    let start = Instant::now();
+    tick_loop.run(stop_after(ticks));
+    let elapsed = start.elapsed();
+
+    let expected = interval * 50;
     assert!(
         elapsed >= expected,
-        "missed ticks were run back to back: {elapsed:?}, expected {expected:?}"
+        "ran fast: {ticks} ticks in {elapsed:?}, expected {expected:?}"
     );
+    // Generous on purpose: the simulated-clock tests check the schedule exactly; this one only rules out a
+    // loop that never returns.
     assert!(
-        elapsed <= expected * 5 / 4,
-        "ran slow: {elapsed:?}, expected {expected:?}"
+        elapsed < expected + Duration::from_secs(30),
+        "ran far too slow: {ticks} ticks in {elapsed:?}, expected {expected:?}"
     );
-    assert_eq!(tick_loop.metrics().overruns(), 1);
+    assert_eq!(tick_loop.metrics().ticks(), ticks);
+    assert_moved_one_second(&mut tick_loop);
 }
