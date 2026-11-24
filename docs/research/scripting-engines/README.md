@@ -10,7 +10,8 @@ script must not hang the tick or take the server down.
 
 ## Short answer
 
-**We recommend Luau with native code generation (mlua's `luau-jit`).** It passed every isolation test, including
+**We recommend Luau with native code generation (mlua's `luau-jit`); the maintainer adopted it on 2026-11-24
+([ADR 0005](../../adr/0005-luau-scripting.md)).** It passed every isolation test, including
 a long call into the string library that Lua 5.4 and LuaJIT cannot interrupt, it caps memory exactly, it is built
 for untrusted code, and it adds 3 MB to the server, built from source. It is not the fastest: V8 and WebAssembly
 ran the roleplay workloads 1.7 to 12 times faster and called the host 3 to 15 times more cheaply. Both of them
