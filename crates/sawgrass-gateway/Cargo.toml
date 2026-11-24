@@ -17,7 +17,10 @@ sawgrass-protocol = { path = "../sawgrass-protocol" }
 tokio = { version = "1.54.1", features = ["time"] }
 
 [dev-dependencies]
-# Self-signed certificates for the integration tests, generated at run time so no key is committed.
+# Self-signed certificates for the integration tests, generated at run time so no key is committed. rcgen pulls
+# in `time`, pinned in Cargo.lock at 0.3.47 or later for RUSTSEC-2026-0009. That version needs Rust 1.88, so
+# `cargo test` here needs 1.88 while the workspace declares 1.85 (#28); the gateway itself still builds on 1.85.
+# Do not let an update resolve `time` back to 0.3.45 or earlier.
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 

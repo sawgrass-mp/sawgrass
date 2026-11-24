@@ -117,3 +117,62 @@ async fn packets_on_the_wrong_channel_are_rejected() {
     ));
     gateway.close();
 }
+
+/// A bare quinn connection to the gateway, without the Sawgrass handshake, to act as a misbehaving client.
+async fn raw_client(addr: std::net::SocketAddr, roots: RootCertStore) -> quinn::Connection {
+    use quinn::rustls;
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![sawgrass_gateway::ALPN.to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC TLS");
+    let mut endpoint = quinn::Endpoint::client(([127, 0, 0, 1], 0).into()).expect("endpoint");
+    endpoint.set_default_client_config(quinn::ClientConfig::new(std::sync::Arc::new(crypto)));
+    endpoint
+        .connect(addr, "localhost")
+        .expect("connect")
+        .await
+        .expect("QUIC handshake")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_grants_one_stream_and_no_more() {
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    let (server, connection) = tokio::join!(accept_one(&gateway), async {
+        let connection = raw_client(addr, roots).await;
+        let (mut send, mut recv) = connection.open_bi().await.expect("event stream");
+        let mut hello = sawgrass_gateway::MAGIC.to_vec();
+        hello.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        send.write_all(&hello).await.expect("hello");
+        let mut welcome = [0u8; 4];
+        recv.read_exact(&mut welcome).await.expect("welcome");
+        connection
+    });
+    let _server = server.expect("server handshake");
+
+    // The gateway grants no credit for a second bidirectional stream or any unidirectional one, so opening them
+    // waits forever instead of making the gateway buffer data nobody reads.
+    let wait = std::time::Duration::from_millis(300);
+    assert!(tokio::time::timeout(wait, connection.open_bi()).await.is_err());
+    assert!(tokio::time::timeout(wait, connection.open_uni()).await.is_err());
+    gateway.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bad_magic_is_refused() {
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    let (server, ()) = tokio::join!(accept_one(&gateway), async {
+        let connection = raw_client(addr, roots).await;
+        let (mut send, _recv) = connection.open_bi().await.expect("stream");
+        send.write_all(b"HTTP/1.1").await.expect("hello");
+        // Keep the connection open until the gateway has judged the hello.
+        let _ = connection.closed().await;
+    });
+    assert!(matches!(server, Err(Error::BadHandshake)), "{server:?}");
+    gateway.close();
+}

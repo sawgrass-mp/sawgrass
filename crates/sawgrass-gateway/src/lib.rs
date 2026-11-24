@@ -43,15 +43,28 @@ pub const MAX_EVENT_LEN: usize = 64 * 1024;
 /// How long a peer may take to complete the handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Transport settings for both sides, from the NET-3 measurements (`docs/research/network-transport`): a 30 s
-/// idle timeout so thousands of clients have time to connect, a keep-alive every 5 s, and a 1 MiB datagram
-/// receive buffer so a burst of snapshots is not dropped.
-fn transport() -> Arc<quinn::TransportConfig> {
+/// Flow-control window per stream and per connection: one [`MAX_EVENT_LEN`] event with room for a few more in
+/// flight. It bounds what a peer can make the other side buffer on streams.
+const RECEIVE_WINDOW: u32 = 256 * 1024;
+
+/// Transport settings, from the NET-3 measurements (`docs/research/network-transport`): a 30 s idle timeout so
+/// thousands of clients have time to connect and a keep-alive every 5 s.
+///
+/// Limits fail closed, because the gateway faces the internet: a client may open exactly one bidirectional stream
+/// (the event stream) and no unidirectional ones, the gateway opens none, and stream and connection windows are
+/// [`RECEIVE_WINDOW`]. The datagram receive buffer is 1 MiB on the client, so a burst of snapshots is not dropped,
+/// and 64 KiB on the gateway, where a client sends only small state packets.
+fn transport(gateway: bool) -> Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
+    let (peer_bidi, datagram_buffer) = if gateway { (1u32, 64 * 1024) } else { (0, 1 << 20) };
     config
         .max_idle_timeout(Some(quinn::IdleTimeout::from(VarInt::from_u32(30_000))))
         .keep_alive_interval(Some(Duration::from_secs(5)))
-        .datagram_receive_buffer_size(Some(1 << 20));
+        .max_concurrent_bidi_streams(peer_bidi.into())
+        .max_concurrent_uni_streams(0u32.into())
+        .stream_receive_window(RECEIVE_WINDOW.into())
+        .receive_window(RECEIVE_WINDOW.into())
+        .datagram_receive_buffer_size(Some(datagram_buffer));
     Arc::new(config)
 }
 
@@ -189,7 +202,7 @@ impl Gateway {
         tls.alpn_protocols = vec![ALPN.to_vec()];
         let crypto = QuicServerConfig::try_from(tls).map_err(|e| Error::Io(std::io::Error::other(e)))?;
         let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-        config.transport_config(transport());
+        config.transport_config(transport(true));
         let endpoint = Endpoint::server(config, addr).map_err(Error::Io)?;
         Ok(Self { endpoint })
     }
@@ -270,7 +283,7 @@ pub async fn connect(
     };
     let mut endpoint = Endpoint::client(local).map_err(Error::Io)?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport());
+    config.transport_config(transport(false));
     endpoint.set_default_client_config(config);
 
     let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
@@ -285,11 +298,16 @@ pub async fn connect(
         send.write_all(&hello).await?;
         let mut welcome = [0u8; 4];
         recv.read_exact(&mut welcome).await?;
+        let gateway = u32::from_le_bytes(welcome);
+        if !is_compatible(gateway) {
+            connection.close(VERSION_REFUSED, &PROTOCOL_VERSION.to_le_bytes());
+            return Err(Error::VersionRefused { gateway });
+        }
         Ok(Session {
             connection,
             send,
             recv,
-            peer_version: u32::from_le_bytes(welcome),
+            peer_version: gateway,
         })
     })
     .await;
