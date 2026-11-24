@@ -1,0 +1,12 @@
+# Load client for the SpacetimeDB ledger module, for the comparison in ../README.md. Not part of the Sawgrass
+# workspace: `spacetimedb-sdk` is under the Business Source License, which `deny.toml` does not allow.
+[package]
+name = "ledger_client"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+spacetimedb-sdk = "=2.16.1"
+
+[workspace]

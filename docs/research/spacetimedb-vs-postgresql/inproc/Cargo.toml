@@ -1,0 +1,13 @@
+# The money ledger kept in memory by the server process itself, with an append-only log on disk, for the
+# comparison in ../README.md. Standard library only. Not part of the Sawgrass workspace.
+[package]
+name = "inproc_ledger"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace]
