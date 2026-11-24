@@ -121,3 +121,8 @@ end
 function fail()
   error("boom")
 end
+
+-- One long call into the C library: a backtracking pattern that cannot match. No script code runs while it does.
+function slow_builtin()
+  return string.find(string.rep("a", 50000), ".-.-.-.-.-b")
+end

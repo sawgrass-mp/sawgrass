@@ -1,7 +1,7 @@
 //! Scripting engine comparison for roleplay logic (task SCRIPT-1). One engine per build, chosen by a cargo feature;
 //! `../run.py` builds each and runs the suites in fresh processes. Prints one JSON object per result line.
 //!
-//! Usage: scripting-bench verify | speed [--no-limits] | latency | memory | isolation <spin|bomb|recurse|fail>
+//! Usage: scripting-bench verify | speed [--no-limits] | latency | memory | isolation <spin|bomb|recurse|fail|slow_builtin>
 
 mod host;
 #[cfg(any(feature = "luau", feature = "lua54", feature = "luajit"))]
@@ -343,7 +343,8 @@ fn peak_rss() -> usize {
 fn isolation(case: &str) {
     host::arm(Duration::from_secs(10));
     let (mut e, _world) = new_engine(true);
-    let budget = if case == "spin" {
+    // The endless loop and the long library call get a 10 ms deadline; the others are stopped by their limits.
+    let budget = if case == "spin" || case == "slow_builtin" {
         Duration::from_millis(10)
     } else {
         Duration::from_secs(10)

@@ -20,10 +20,10 @@ ROWS = [
     ("luajit", "LuaJIT", "JIT on: an endless loop is never stopped"),
     ("luau-jit", "Luau, native code", "recommended: mlua with luau-jit"),
     ("luau", "Luau, interpreter", "mlua, the roadmap's proposal"),
-    ("luajit-interp", "LuaJIT, JIT off", "what makes LuaJIT stoppable"),
-    ("lua54", "Lua 5.4", "mlua"),
+    ("luajit-interp", "LuaJIT, JIT off", "still hangs inside string.find"),
+    ("lua54", "Lua 5.4", "hangs inside string.find"),
     ("quickjs", "JavaScript, QuickJS-ng", "rquickjs"),
-    ("rhai", "Rhai", "pure Rust; no total memory cap"),
+    ("rhai", "Rhai", "pure Rust; limits per value, not in total"),
 ]
 RECOMMENDED = "luau-jit"
 
@@ -40,15 +40,17 @@ def main():
     speed = {k: statistics.median(v) for k, v in runs.items()}
     iso = {(r["engine"], r["case"]): r for r in load("isolation")}
 
-    W, x0, bar_w = 900, 330, 330
+    W, x0, bar_w = 960, 330, 330
     lo, hi = 0.5, 500.0  # log axis, milliseconds
     parts = []
     y = 44
     parts.append(f'<text x="28" y="{y}" class="h">Script time per tick for {PLAYERS:,} players</text>')
     parts.append(f'<text x="28" y="{y + 24}" class="s">One zone check per player (64 zones) on one core, limits on; '
                  f'log scale, the dashed line is the whole {TICK_MS} ms tick.</text>')
-    y += 50
-    parts.append(f'<text x="{W - 28}" y="{y}" class="s" text-anchor="end">stops loop · caps memory</text>')
+    y += 62
+    for i, head in enumerate(("loop", "library call", "memory")):
+        parts.append(f'<text x="{W - 170 + i * 66}" y="{y}" class="s" text-anchor="middle">{head}</text>')
+    parts.append(f'<text x="{W - 104}" y="{y - 18}" class="s" text-anchor="middle">stops or caps</text>')
     y += 22
 
     def x_of(ms):
@@ -60,6 +62,7 @@ def main():
         ms = speed[(engine, "zone")] * PLAYERS / 1e6
         chosen = engine == RECOMMENDED
         stops = iso[(engine, "spin")]["outcome"] == "error"
+        builtin = iso[(engine, "slow_builtin")]["outcome"]
         caps = iso[(engine, "bomb")].get("memory_capped", False)
         parts.append(f'<text x="28" y="{y + 8}" class="l">{label}</text>')
         parts.append(f'<text x="28" y="{y + 25}" class="n">{note}</text>')
@@ -68,12 +71,15 @@ def main():
         parts.append(f'<rect x="{x0}" y="{y}" width="{x_of(ms) - x0:.1f}" height="12" rx="6" fill="{fill}"/>')
         cls = "p" if chosen else "v"
         parts.append(f'<text x="{x0 + bar_w + 12}" y="{y + 11}" class="{cls}">{ms:,.1f} ms</text>')
-        for i, ok in enumerate((stops, caps)):
-            cx = W - 120 + i * 62
-            mark, c = ("✓", "ok") if ok else ("✗", "bad")
+        marks = [stops, None if builtin == "not applicable" else builtin == "error", caps]
+        for i, ok in enumerate(marks):
+            cx = W - 170 + i * 66
+            mark, c = {True: ("✓", "ok"), False: ("✗", "bad"), None: ("–", "n")}[ok]
             parts.append(f'<text x="{cx}" y="{y + 12}" class="{c}" text-anchor="middle">{mark}</text>')
+        lib = {True: "stops a long library call", False: "does not stop a long library call",
+               None: "no library call to test"}[marks[1]]
         labels.append(f"{label}: {ms:.1f} ms, {'stops' if stops else 'does not stop'} an endless loop, "
-                      f"{'caps' if caps else 'does not cap'} memory")
+                      f"{lib}, {'caps' if caps else 'does not cap'} memory")
         y += 40
     tx = x_of(TICK_MS)
     parts.append(f'<line x1="{tx:.1f}" x2="{tx:.1f}" y1="{top - 6}" y2="{y - 22}" stroke="#a6ff4d" '

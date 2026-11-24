@@ -20,7 +20,10 @@ BENCH = HERE / "bench"
 GUEST = HERE / "guest"
 RESULTS = HERE / "results"
 ENGINES = ["luau", "luau-jit", "lua54", "luajit", "luajit-interp", "quickjs", "v8", "wasm", "rhai"]
-CASES = ["spin", "bomb", "recurse", "fail"]
+CASES = ["spin", "bomb", "recurse", "fail", "slow_builtin"]
+# Engines with no long-running library call to test: the WebAssembly guest has no host library, and Rhai no
+# regular expressions or pattern matching.
+NO_BUILTIN = {"wasm", "rhai"}
 CPU = 2
 ISOLATION_TIMEOUT = 30
 # Crates whose versions the page cites, read from bench/Cargo.lock and guest/Cargo.lock.
@@ -98,6 +101,11 @@ def isolation():
     rows = []
     for e in ENGINES:
         for case in CASES:
+            if case == "slow_builtin" and e in NO_BUILTIN:
+                rows.append({"suite": "isolation", "engine": e, "case": case, "outcome": "not applicable",
+                             "message": "no pattern matching or regular expressions in the library",
+                             "usable_after": True})
+                continue
             try:
                 p, out = run(e, ["isolation", case], timeout=ISOLATION_TIMEOUT, preexec=limited)
                 if out:

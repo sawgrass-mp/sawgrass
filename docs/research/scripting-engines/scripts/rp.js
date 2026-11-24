@@ -112,3 +112,9 @@ function recurse(n) {
 function fail() {
   throw new Error("boom");
 }
+
+// One long call into the regular-expression engine: a backtracking pattern that cannot match, the same as the
+// Lua pattern ".-.-.-.-.-b". No script code runs while it does.
+function slow_builtin() {
+  return /.*?.*?.*?.*?.*?b/.test("a".repeat(50000));
+}

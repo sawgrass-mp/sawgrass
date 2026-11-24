@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::sync::Once;
 
 const SOURCE: &str = include_str!("../../scripts/rp.js");
-const FUNCTIONS: [&str; 11] = [
+const FUNCTIONS: [&str; 12] = [
     "noop",
     "host_loop",
     "echo",
@@ -19,6 +19,7 @@ const FUNCTIONS: [&str; 11] = [
     "bomb",
     "recurse",
     "fail",
+    "slow_builtin",
 ];
 
 static INIT: Once = Once::new();

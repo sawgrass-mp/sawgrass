@@ -262,25 +262,28 @@ Full results, method, licences, the reasoning for each option and how to reprodu
 Game modes are scripts that server owners and modders write, so the engine decides how much roleplay logic fits in a
 tick and whether one broken script can hang or crash the server. We ran the same roleplay resource (a zone check per
 player, chat commands that move money, a payday, an inventory) in nine engine setups and tried to break each with an
-endless loop, endless allocation, endless recursion and a thrown error.
+endless loop, a long call into the string library, endless allocation, endless recursion and a thrown error.
 
-<p align="center"><img src="docs/assets/scripting.svg" alt="Script time per tick for 4096 players, one zone check per player: WebAssembly 0.8 ms, V8 1.0, LuaJIT 1.2 (does not stop an endless loop), Luau with native code 6.5, Luau interpreter 15.8, LuaJIT without JIT 11.0, Lua 5.4 26.3, QuickJS-ng 37.7, Rhai 282.5 (no total memory cap)" width="100%"></p>
+<p align="center"><img src="docs/assets/scripting.svg" alt="Script time per tick for 4096 players, one zone check per player: WebAssembly 0.8 ms, V8 1.0, LuaJIT 1.2 (stops neither an endless loop nor a long library call), Luau with native code 6.5, Luau interpreter 15.8, LuaJIT without JIT 11.0 and Lua 5.4 26.3 (neither stops a long library call), QuickJS-ng 37.7, Rhai 282.5 (no total memory cap)" width="100%"></p>
 
-**We recommend Luau with native code**; the language is partly taste, so the maintainer decides between Luau,
-JavaScript or TypeScript on V8, and WebAssembly.
+**We recommend Luau with native code**; the choice is partly taste and partly what the client runtime allows, so
+the maintainer decides between Luau, JavaScript or TypeScript on V8, and WebAssembly.
 
-| Engine | Zone check | Host call | Endless loop | Memory cap | Why or why not |
+| Engine | Zone check | Host call | Stops a script | Memory cap | Why or why not |
 |---|---:|---:|---|---|---|
-| WebAssembly (wasmtime) | 0.18 µs | 5 ns | stopped | exact | Fastest and best isolated, but authors must compile their code. |
-| JavaScript, V8 | 0.25 µs | 23 ns | stopped | soft | Fast; 46 MB binary, 1.5 MB per instance, and its memory cap needs an `unsafe` callback. |
-| LuaJIT | 0.30 µs | 36 ns | **hangs** | exact | Hooks do not run in compiled code, so an endless loop is never stopped. |
-| **Luau, native code** | **1.59 µs** | **74 ns** | **stopped** | **exact** | **Recommended**: every isolation test passed with an interrupt callback alone; sandbox made for game scripts; 3 MB. |
-| Lua 5.4, QuickJS-ng | 6.4 to 9.2 µs | 69 to 144 ns | stopped | exact | 3 to 6 times slower than Luau with native code on compute, nothing it lacks. |
-| Rhai | 69 µs | 279 ns | stopped | none | 4 to 43 times slower than Luau, no cap on total memory. |
+| WebAssembly (wasmtime) | 0.18 µs | 5 ns | yes | exact | Fastest and best isolated, but authors must compile their code (a judgement, not a measurement). |
+| JavaScript, V8 | 0.25 µs | 23 ns | yes | soft | Fast; 46 MB binary, 1.5 MB per instance, and its memory cap needs an `unsafe` callback. |
+| LuaJIT | 0.30 µs | 36 ns | **no** | exact | Its hook never runs in compiled code or inside a library call: an endless loop or a backtracking `string.find` hangs it. |
+| **Luau, native code** | **1.59 µs** | **74 ns** | **yes** | **exact** | **Recommended**: passed every isolation test, the long library call included; sandbox made for game scripts; 3 MB. |
+| Lua 5.4 | 6.4 µs | 69 ns | **no** | exact | A backtracking `string.find` hangs it past any deadline; four times slower than Luau on the zone check. |
+| QuickJS-ng | 9.2 µs | 144 ns | yes | exact | 3 to 6 times slower than Luau with native code, nothing it lacks. |
+| Rhai | 69 µs | 279 ns | yes | none | 4 to 43 times slower than Luau, no cap on total memory. |
 
 - Event-driven roleplay logic is cheap on all of them but Rhai: a chat command took 2.3 µs in Luau, 0.6 µs in V8.
   Work for every player on every tick is where V8 and WebAssembly pull ahead, 1.7 to 12 times.
-- Every engine survived deep recursion and a thrown error, and stayed usable after each stopped script.
+- Every engine survived deep recursion and a thrown error, and stayed usable after each stopped script. Luau
+  checks its deadline inside the pattern matcher; other long library calls (`table.sort` of a huge table) were not
+  tested.
 - Caveats: one 4-core VM; one core; our own workloads; the client (scripts inside the game on Windows, where a JIT
   may not be allowed) was not measured.
 
