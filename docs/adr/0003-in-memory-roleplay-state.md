@@ -85,8 +85,9 @@ What the measurements say:
   make us the owners of a storage engine: record format, checksums, torn-tail rules, snapshots, log rotation and
   corruption handling, each needing crash, power-cut and fuzz tests for good. It stays the planned optimisation: if
   measured load ever approaches what RocksDB delivers, a later ADR can put it behind the same trait.
-- **Fjall** is pure Rust with no C++ build and measured 43,836 (40,107 over five minutes) and passed the same crash tests. It is younger and far less deployed than
-  RocksDB, so it is the first replacement to reconsider once it has more production use, not the default now.
+- **Fjall** is pure Rust with no C++ build and measured 43,836 (40,107 over five minutes) and passed the same crash
+  tests. It is younger and far less deployed than RocksDB, so it is the first replacement to reconsider once it has more
+  production use, not the default now.
 - **LMDB** is mature and simple, but slower here at 64 callers (32,941 over five minutes), needs its map size
   set in advance and is opened through an `unsafe` call.
 - **redb and SQLite `FULL`** were slower (29,142 and 24,042). SQLite with `synchronous=NORMAL` is faster but can
@@ -123,5 +124,6 @@ with BOT-2 load.
 
 ## Not measured yet
 
-Hardware larger than 4 cores, a real power cut, memory use, the cost of the copy to a second machine, runs longer
-than five minutes, RocksDB tuning, and inventory, property and factions. All figures are single runs on one VM, which varied by up to about 20%.
+Hardware larger than 4 cores, a real power cut, memory use, the cost of the copy to a second machine, runs longer than
+five minutes, RocksDB tuning, and inventory, property and factions. All figures are single runs on one VM, which varied
+by up to about 20%.
