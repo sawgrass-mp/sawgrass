@@ -10,7 +10,7 @@ use sawgrass_bots::walker::Area;
 use sawgrass_bots::{BotConfig, Joined, run};
 use sawgrass_gateway::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sawgrass_gateway::{Gateway, RootCertStore};
-use sawgrass_server::net::{self, NetId, PlayerState};
+use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState};
 use sawgrass_server::{TickConfig, TickLoop};
 use tokio::time::Instant;
 
@@ -38,7 +38,7 @@ fn position(tick_loop: &TickLoop, id: u32) -> Option<[f32; 3]> {
 async fn bots_move_on_the_server_and_see_each_other() {
     let (gateway, roots) = gateway();
     let addr = gateway.local_addr().expect("addr");
-    let mut players = net::listen(gateway, false);
+    let mut players = net::listen(gateway, ListenConfig::default());
     let mut tick_loop = TickLoop::new(TickConfig::default());
     tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
 
