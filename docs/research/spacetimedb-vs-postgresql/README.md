@@ -233,8 +233,13 @@ after 4 seconds (202,488 operations stored, 202,426 acknowledged):
 | None | Starts; 202,488 operations, invariants hold |
 | One byte changed in the middle of the log | Start-up refused: "Corruption: checksum mismatch" |
 | Log cut 30 bytes short | Starts; the incomplete last batch (62 operations, never acknowledged) is dropped, invariants hold |
+| One byte changed 10 bytes before the end, inside the last batch | Start-up refused: "Corruption: checksum mismatch" |
 
-That is the same rule our own log follows, implemented and maintained by RocksDB.
+This is stricter than our own log: a last record that is complete in length but fails its checksum is refused,
+not dropped, even though here it was never acknowledged. A power cut that leaves such a record stops the server
+until an operator acts, with nothing acknowledged lost. The operator restores from the second machine's copy; ADR
+0003 rules out restarting in RocksDB's more lenient `PointInTimeRecovery` mode, which after damage in the middle
+of the log would silently drop acknowledged operations.
 
 **Restart after a short run**, page cache dropped: RocksDB 1.17 s for 1,269,388 operations (104 MB), LMDB 0.60 s
 for 886,233 (81 MB), redb 0.68 s for 712,429 (114 MB), SQLite `FULL` 0.23 s for 303,867 (31 MB), SQLite `NORMAL`

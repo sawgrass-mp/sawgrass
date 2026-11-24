@@ -142,7 +142,8 @@ queries.
 - Speed comes from the design, not the database: one writer with state in memory and one disk flush per batch was
   2 to 20 times faster than any database server.
 - In 21 kill -9 tests under load (our own log, RocksDB, Fjall, LMDB, redb, SQLite), no confirmed transfer was lost.
-  RocksDB refused to start on a log damaged in the middle and dropped only an unconfirmed, cut-off last batch.
+  RocksDB dropped only an unconfirmed, cut-off last batch, and refused to start on any damaged record, even the
+  last one; then an operator restores from the second machine's copy.
 - Not ranked: SQLite's fast mode (`synchronous=NORMAL`) can lose confirmed transfers on a power cut, and TigerBeetle
   could only run in development mode here, without the Direct I/O it relies on.
 - Caveats: one 4-core VM; single runs with up to 20% spread; process kills, not power cuts; the copy to a second
