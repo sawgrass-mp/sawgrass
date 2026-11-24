@@ -56,7 +56,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # The maintainer's own pull requests claim their task and get the `protected` label when they touch tier 3 paths.
+  # The maintainer's own pull requests claim their task; any pull request that touches tier 3 paths gets the
+  # `protected` label. Labelling a pull request through the issues API needs `pull-requests: write`.
   link:
     if: github.event_name == 'pull_request_target' || github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -64,7 +65,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
