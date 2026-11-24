@@ -15,8 +15,10 @@ The rules catch three patterns seen in public pull requests to similar projects:
 
 A task grants scope in the `### Scope` section of its issue, with backticked items: paths (`scripts/x.py`, a
 directory as `docs/assets/`, or a glob) and, after `Allows:`, constructs by name (`schedule`, `secrets`, `shell`).
-Scope counts only on an open task labelled `ready`, opened by a maintainer and claimed by (assigned to) the pull
-request's author, so an outside contributor can neither widen a task nor borrow another one's scope.
+Scope counts only on an open task opened by a maintainer. For a pull request from anyone else, the task must also be
+labelled `ready` and claimed by (assigned to) the pull request's author, so an outside contributor can neither
+widen a task nor borrow another one's scope. A maintainer's own pull request from a branch of this repository needs
+no label or claim: the maintainer's agents work through the maintainer's account, and the merge is the gate.
 """
 import fnmatch
 import json
@@ -28,8 +30,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "reviewer"))
 import policy  # noqa: E402
 
-# Authors whose issues can grant scope. Only people with write access to the repository have these associations.
-MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 WORKFLOW_PATHS = (".github/workflows/*", ".github/actions/*")
 
@@ -143,15 +143,17 @@ def evaluate(pr, files, issue, base_lines):
     author = (pr.get("user") or {}).get("login")
     task_ok = (issue is not None
                and issue.get("state") == "open"
-               and "ready" in {label["name"] for label in issue.get("labels", [])}
-               and issue.get("author_association") in MAINTAINER_ASSOCIATIONS
-               and author in {a["login"] for a in issue.get("assignees") or []})
+               and policy.is_maintainer(issue.get("user"))
+               and (policy.maintainer_pr(pr)
+                    or ("ready" in {label["name"] for label in issue.get("labels", [])}
+                        and author in {a["login"] for a in issue.get("assignees") or []})))
     paths, allows = scope_of(issue.get("body")) if task_ok else (set(), set())
     if issue is None:
         warnings.append((None, "No linked task (`Closes #N`): nothing grants scope, so protected paths fail."))
     elif not task_ok:
-        warnings.append((None, f"Task #{issue.get('number')} is not open, `ready`, opened by a maintainer and "
-                               "claimed by this pull request's author, so its scope grants nothing."))
+        warnings.append((None, f"Task #{issue.get('number')} is not open and opened by a maintainer, or (for "
+                               "an outside pull request) not `ready` and claimed by its author, so its scope grants "
+                               "nothing."))
 
     for f in files:
         name, status, patch = f["filename"], f.get("status"), f.get("patch")
