@@ -18,6 +18,7 @@
   <a href="#how-it-fits-together">Architecture</a> ·
   <a href="#storage-measured">Storage</a> ·
   <a href="#network-transport-measured">Transport</a> ·
+  <a href="#packet-serialization-measured">Serialization</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#contributing">Contributing</a>
 </p>
@@ -182,6 +183,35 @@ movement and snapshots, streams for reliable events.
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/network-transport](docs/research/network-transport/).
+
+## Packet serialization, measured
+
+Every snapshot and event is encoded on one side and decoded on the other, so the format decides how many bytes a
+gateway sends and what hostile bytes can do to the server. We encoded the game's own messages (a 100-entity
+snapshot, client state, a chat line, a script event) in five formats, timed them, and fed each 400,000 random and
+corrupted inputs.
+
+<p align="center"><img src="docs/assets/serialization.svg" alt="Snapshot of 100 entities: postcard 1,985 bytes and 8.0 microseconds to encode and decode; current hand-written 2,309 bytes, 2.8 microseconds; bitcode 2,413, 0.8; rkyv 2,848, 0.5; FlatBuffers 2,856, 0.6" width="100%"></p>
+
+**We chose postcard**, with the quantized values `sawgrass-protocol` already defines.
+
+| Format | Snapshot, 100 entities | Encode + decode | Why or why not |
+|---|---:|---:|---|
+| **postcard** | **1,985 B** | **8.0 µs** | **Chosen**: smallest on every message, stable documented wire format, plain serde derive. |
+| Current hand-written | 2,309 B | 2.8 µs | 16% larger, and every new message needs its own encoder and decoder. |
+| bitcode | 2,413 B | 0.8 µs | Fast, but larger here and its format may change between major versions. |
+| rkyv (validated) | 2,848 B | 0.5 µs | Fastest, zero-copy, but 43% larger snapshots and up to 3.7 times larger events. |
+| FlatBuffers (verified) | 2,856 B | 0.6 µs | Zero-copy across languages, which we do not need; largest messages and a code generator. |
+
+- Bandwidth is what limits a gateway: at 4096 players postcard saves about 27 MB/s of outgoing traffic over the
+  current code, and its extra encode and decode time costs about 0.3 cores across all gateways.
+- No format panicked or ran out of memory on any of the 400,000 hostile inputs. Every format accepts some
+  corrupted packets as valid, so integrity comes from QUIC's authenticated encryption.
+- Caveats: one 4-core VM; single-threaded microbenchmarks on one pinned core with warm caches; delta compression
+  and bit packing, which shrink snapshots more than any format, were not measured.
+
+Full results, method, licences, the reasoning for each option and how to reproduce:
+[docs/research/packet-serialization](docs/research/packet-serialization/).
 
 ## How it is built
 

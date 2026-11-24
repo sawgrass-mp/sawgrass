@@ -1,0 +1,5 @@
+{"suite": "fuzz", "format": "current", "inputs": 400000, "rejected": 356775, "accepted": 43225, "panicked": 0, "slowest_us": 254.5, "at": "2026-11-24T13:38:56"}
+{"suite": "fuzz", "format": "bitcode", "inputs": 400000, "rejected": 363138, "accepted": 36862, "panicked": 0, "slowest_us": 114.1, "at": "2026-11-24T13:38:56"}
+{"suite": "fuzz", "format": "postcard", "inputs": 400000, "rejected": 310314, "accepted": 89686, "panicked": 0, "slowest_us": 190.7, "at": "2026-11-24T13:38:56"}
+{"suite": "fuzz", "format": "rkyv", "inputs": 400000, "rejected": 350731, "accepted": 49269, "panicked": 0, "slowest_us": 62.0, "at": "2026-11-24T13:38:56"}
+{"suite": "fuzz", "format": "flatbuffers", "inputs": 400000, "rejected": 307007, "accepted": 92993, "panicked": 0, "slowest_us": 151.9, "at": "2026-11-24T13:38:56"}

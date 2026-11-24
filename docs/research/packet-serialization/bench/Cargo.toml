@@ -1,0 +1,20 @@
+[package]
+name = "serialization-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+# Standalone: not part of the Sawgrass workspace, so its dependencies never reach the project's graph.
+[workspace]
+
+[dependencies]
+sawgrass-protocol = { path = "../../../../crates/sawgrass-protocol" }
+serde = { version = "1", features = ["derive"] }
+bitcode = "0.6"
+postcard = { version = "1", features = ["alloc"] }
+rkyv = "0.8"
+flatbuffers = "25.12"
+
+[profile.release]
+debug = "line-tables-only"
