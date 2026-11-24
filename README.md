@@ -13,6 +13,11 @@
 </p>
 
 <p align="center">
+  <a href="https://t.me/sawgrass_mp"><img src="https://img.shields.io/badge/Telegram-@sawgrass__mp-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram: @sawgrass_mp"></a>
+  <a href="https://x.com/sawgrass_mp"><img src="https://img.shields.io/badge/X-@sawgrass__mp-000000?style=for-the-badge&logo=x&logoColor=white" alt="X: @sawgrass_mp"></a>
+</p>
+
+<p align="center">
   <a href="#where-the-project-is">Status</a> ·
   <a href="#progress">Progress</a> ·
   <a href="#how-it-fits-together">Architecture</a> ·
@@ -23,7 +28,8 @@
   <a href="#scripting-engines-measured">Scripting</a> ·
   <a href="#voice-chat-measured">Voice</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
-  <a href="#contributing">Contributing</a>
+  <a href="#contributing">Contributing</a> ·
+  <a href="#community">Community</a>
 </p>
 
 ---
@@ -375,6 +381,18 @@ accepted. Read [CONTRIBUTING.md](CONTRIBUTING.md); agents start with
 [AGENTS.md](AGENTS.md). Pick an issue labelled
 [`ready`](https://github.com/sawgrass-mp/sawgrass/issues?q=is%3Aissue+is%3Aopen+label%3Aready+-label%3Aclaimed),
 comment `/claim`, and open a draft pull request. Security issues go through [SECURITY.md](SECURITY.md).
+
+## Community
+
+News, progress updates and announcements are posted on the project's official channels:
+
+| Channel | Link |
+|---|---|
+| **Telegram** | [t.me/sawgrass_mp](https://t.me/sawgrass_mp) |
+| **X** | [x.com/sawgrass_mp](https://x.com/sawgrass_mp) |
+
+These are the only official accounts. Questions about the code, bug reports and proposals go to
+[GitHub issues](https://github.com/sawgrass-mp/sawgrass/issues).
 
 ## Licence
 
