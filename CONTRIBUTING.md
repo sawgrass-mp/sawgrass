@@ -80,7 +80,8 @@ request, before the code that depends on it.
 - One task per pull request, ideally under 400 changed lines (added plus deleted).
 - Declare the model (`Model: Claude Opus 5.5` or `Model: Claude Fable`; the maintainer's own pull requests are
   declared once in the rules above) and say what you ran.
-- Review: CI first, then a maintainer listed in `.github/CODEOWNERS`. Squash merge only.
+- Review: CI first, then a maintainer listed in `.github/CODEOWNERS`. Squash merge only. The review agent merges
+  the maintainer's own pull requests once CI is green and its review has no blocking finding.
 
 ## Licence
 

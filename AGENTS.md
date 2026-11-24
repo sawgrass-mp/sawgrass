@@ -125,4 +125,6 @@ CI also runs `cargo deny check` (licences, advisories, allowed sources).
   larger work into several tasks. For docs, tests and `resources/` the review flags anything over 400.
 - Fill in the template: `Closes #N`, `Depends on: #M` if any, what and why, what you ran with results, and the
   `Model:` line (`Model: Claude Opus 5.5` or `Model: Claude Fable`; not needed from the maintainer's account).
-- Only maintainers merge. Do not ask for a merge in comments; answer review comments with code or a reason.
+- Only maintainers merge, and the reviewer merges the maintainer's own pull requests that pass review and CI
+  (docs/maintainers.md, "Review agent"). Do not ask for a merge in comments; answer review comments with code or
+  a reason.
