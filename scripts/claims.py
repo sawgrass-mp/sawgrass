@@ -170,9 +170,11 @@ def decide_link(pr, issue):
 
 
 def link(gh, pr):
-    """Label any open pull request `protected` while it changes tier 3 paths; claim the task of a maintainer's."""
+    """Claim the task of a maintainer's open pull request; label any open one `protected` while it changes tier 3
+    paths. The claim comes first, so a failed label cannot block it."""
     if pr.get("state") != "open":
         return
+    claim_linked(gh, pr)
     files = list(gh.pages(f"/pulls/{pr['number']}/files", {}))
     paths = [p for f in files for p in (f["filename"], f.get("previous_filename")) if p]
     protected = any(policy.file_tier(p) == 3 for p in paths)
@@ -184,6 +186,9 @@ def link(gh, pr):
         except urllib.error.HTTPError as err:
             if err.code != 404:
                 raise
+
+
+def claim_linked(gh, pr):
     if not policy.maintainer_pr(pr):
         return
     number = policy.linked_issue(pr.get("body"))
@@ -226,6 +231,21 @@ def expire(gh, now):
         print(f"released #{number}")
 
 
+def link_all(gh):
+    """`link` for every open pull request. One failure does not stop the others; any failure fails the run."""
+    failed = []
+    for pr in list(gh.pages("/pulls", {"state": "open"})):
+        try:
+            link(gh, pr)
+        except urllib.error.HTTPError as err:
+            print(f"#{pr['number']}: {err.code} {err.reason}", file=sys.stderr)
+            failed.append(pr["number"])
+    if failed:
+        print("failed: " + ", ".join(f"#{n}" for n in failed), file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv):
     if argv not in (["command"], ["expire"], ["link-all"]) and not (len(argv) == 2 and argv[0] == "link"
                                                                     and argv[1].isdigit()):
@@ -235,8 +255,7 @@ def main(argv):
     if argv[0] == "link":
         link(gh, gh.call("GET", f"/pulls/{argv[1]}"))
     elif argv == ["link-all"]:
-        for pr in list(gh.pages("/pulls", {"state": "open"})):
-            link(gh, pr)
+        return link_all(gh)
     elif argv == ["command"]:
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
             handle_command(gh, json.load(f))

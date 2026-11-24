@@ -114,6 +114,28 @@ class MaintainerClaims(unittest.TestCase):
         self.assertEqual(gh.calls, [("POST", "/issues/50/labels", {"labels": ["protected"]})])
 
 
+class LinkAll(unittest.TestCase):
+    def test_one_failure_does_not_stop_the_rest(self):
+        import urllib.error
+        seen = []
+
+        class Fake:
+            def pages(self, path, query):
+                return [{"number": 1}, {"number": 2}, {"number": 3}]
+
+        def fake_link(gh, pr):
+            seen.append(pr["number"])
+            if pr["number"] == 2:
+                raise urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+
+        original, claims.link = claims.link, fake_link
+        try:
+            self.assertEqual(claims.link_all(Fake()), 1)
+        finally:
+            claims.link = original
+        self.assertEqual(seen, [1, 2, 3])
+
+
 class Expiry(unittest.TestCase):
     def test_boundary(self):
         start = claims.parse_time("2026-11-20T10:00:00Z")
