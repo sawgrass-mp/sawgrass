@@ -1,9 +1,0 @@
-# Tasks a maintainer approved in advance. scripts/dispatch.py labels an issue `ready` when its title starts with
-# one of these IDs, no other issue uses the ID, and its scope touches no protected (tier 3) path. See
-# docs/maintainers.md, "Task dispatcher". This file is tier 3: only a maintainer's task and merge change it.
-# One ID per line; `#` starts a comment.
-
-NET-2   # Client-to-gateway connection over QUIC (#3)
-BOT-1   # Headless bot client (#6)
-BOT-2   # Load report for N bots (#7)
-DOC-1   # Wire format in architecture.md (#13)

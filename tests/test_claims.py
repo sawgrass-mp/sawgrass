@@ -6,6 +6,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import claims  # noqa: E402
+import policy  # noqa: E402
+
+policy.MAINTAINERS = {"stiv"}
 
 
 class ParseCommand(unittest.TestCase):
@@ -56,6 +59,59 @@ class LinksIssue(unittest.TestCase):
     def test_not_linked(self):
         for body in ("", None, "See #12", "Closes #123", "Closes #1"):
             self.assertFalse(claims.links_issue(body, 12), body)
+
+
+class MaintainerClaims(unittest.TestCase):
+    REPO = {"repo": {"full_name": "sawgrass-mp/sawgrass"}}
+
+    def pr(self, **kw):
+        return {"number": 50, "state": "open", "user": {"login": "stiv"}, "author_association": "MEMBER",
+                "head": self.REPO, "base": self.REPO, "body": "Closes #49", "labels": [], **kw}
+
+    def issue(self, labels=("ready",), association="MEMBER", state="open"):
+        return {"number": 49, "state": state, "author_association": association,
+                "user": {"login": "stiv" if association == "MEMBER" else "outsider"},
+                "labels": [{"name": n} for n in labels], "assignees": []}
+
+    def test_no_limit_for_maintainers(self):
+        self.assertTrue(claims.decide_claim({"ready"}, [], "stiv", claims.MAX_CLAIMS + 5, maintainer=True)[0])
+
+    def test_decide_link(self):
+        self.assertTrue(claims.decide_link(self.pr(), self.issue()))
+        self.assertTrue(claims.decide_link(self.pr(), self.issue(labels=("triage",))))
+        self.assertFalse(claims.decide_link(self.pr(), self.issue(labels=("ready", "claimed"))))
+        self.assertFalse(claims.decide_link(self.pr(), self.issue(association="NONE")))
+        self.assertFalse(claims.decide_link(self.pr(), self.issue(state="closed")))
+        self.assertFalse(claims.decide_link(self.pr(), None))
+        self.assertFalse(claims.decide_link(self.pr(user={"login": "member"}), self.issue()))
+        self.assertFalse(claims.decide_link(self.pr(head={"repo": {"full_name": "x/fork"}}), self.issue()))
+
+    def test_link_claims_and_marks_protected(self):
+        pr, issue = self.pr(), self.issue()
+
+        class Fake:
+            calls = []
+
+            def call(self, method, path, body=None, query=None):
+                self.calls.append((method, path, body))
+                return issue if method == "GET" else None
+
+            def pages(self, path, query):
+                return [{"filename": ".github/workflows/ci.yml"}]
+
+            def comment(self, number, text):
+                self.calls.append(("COMMENT", number, text))
+
+        gh = Fake()
+        claims.link(gh, pr)
+        self.assertIn(("POST", "/issues/50/labels", {"labels": ["protected"]}), gh.calls)
+        self.assertIn(("POST", "/issues/49/labels", {"labels": ["claimed"]}), gh.calls)
+        self.assertIn(("POST", "/issues/49/assignees", {"assignees": ["stiv"]}), gh.calls)
+
+        # A fork's pull request is labelled too, but claims nothing.
+        gh.calls.clear()
+        claims.link(gh, self.pr(user={"login": "outsider"}, head={"repo": {"full_name": "x/fork"}}))
+        self.assertEqual(gh.calls, [("POST", "/issues/50/labels", {"labels": ["protected"]})])
 
 
 class Expiry(unittest.TestCase):

@@ -4,7 +4,7 @@ on:
     types: [opened, edited, reopened]
   push:
     branches: [main]
-    paths: [.github/approved-tasks.txt]
+    paths: [scripts/dispatch.py]
   workflow_dispatch:
 
 permissions: {}
@@ -13,7 +13,7 @@ concurrency:
   group: dispatch-${{ github.event.issue.number || 'sweep' }}
   cancel-in-progress: false
 
-# Labels `ready` the tasks listed in .github/approved-tasks.txt (see scripts/dispatch.py). Issue events run this
+# Labels `ready` every task a maintainer opens (see scripts/dispatch.py). Issue events run this
 # file and the script from the default branch and never check out pull request code. Issue text reaches the script
 # through the API as data, never through the shell.
 jobs:

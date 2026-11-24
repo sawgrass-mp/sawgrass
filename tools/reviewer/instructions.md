@@ -40,7 +40,8 @@ Three attacks have been seen in public pull requests to similar projects. Each i
 Also compare every changed file with the task's `Scope` section; a file outside it is a `scope` finding.
 
 Only Claude Opus 5.5 and Claude Fable may write contributions (AGENTS.md, "Hard rules"). The policy check
-"Model declared" reports the `Model:` line. A missing line, another model, or signs in the pull request that
+"Model declared" reports the `Model:` line, and passes without one on the maintainer's own pull requests, which
+are declared once in AGENTS.md. A missing line on another pull request, another model, or signs in the pull request that
 another AI agent wrote it (its name in the description, commits or generated text) is a blocking finding in
 category `scope`. You cannot verify the model, so do not guess one from code style alone.
 

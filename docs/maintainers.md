@@ -73,22 +73,35 @@ Required status checks are matched by name. A pull request that adds a workflow 
 the real guard (a new workflow is a tier 3 path), but check the run's workflow name ("PR Guard") before merging
 anything that touches `.github/`.
 
-## Task dispatcher
+## Automatic bookkeeping for the maintainer's agents
 
-`.github/workflows/dispatch.yml` runs `scripts/dispatch.py` when an issue is opened, edited or reopened, and on
-every open issue when `.github/approved-tasks.txt` changes on `main`. It labels a task `ready` and removes `triage`
-only when the title starts with an approved ID that no other issue uses, a maintainer opened it, and its scope has
-no protected (tier 3) path, no item that covers one (`crates/`, `*`) and no `Allows:`. Otherwise it leaves the task
-in `triage` and explains why in one comment, so you see what needs your decision.
+The maintainer's agents work through the maintainer's account, so the bookkeeping for their work is automatic.
+"Maintainer" here means a login listed in `MAINTAINERS` in `tools/reviewer/policy.py` (tier 3), not a GitHub
+author association, which an organization member or a read-only collaborator also has.
 
-- **Approve tasks once** by listing their IDs in `.github/approved-tasks.txt`. The file is tier 3, so a change to it
-  needs your own task with that file in its scope, and your merge.
-- **Protected tasks** (CI, rules, the reviewer, client, launcher) are never dispatched. Label them `ready` by hand.
-- **Edits are re-checked.** If a task the dispatcher labelled stops qualifying, it removes `ready` and adds `triage`
-  back, even when claimed, so a widened scope cannot pass `pr-guard`. It never touches a `ready` you added.
-- **Labels come from `github-actions[bot]`.** The issue's events show who added each `ready`. While agents work
-  through a maintainer's account, they could still add `ready` by hand; the dispatcher only removes the reason to.
-  Moving agents to their own account without triage access closes that gap.
+- **`ready`.** `.github/workflows/dispatch.yml` runs `scripts/dispatch.py` when an issue is opened, edited or
+  reopened. It labels `ready` (and removes `triage`) every open issue a maintainer opened whose title starts with a
+  task ID no other maintainer's issue uses, unless its scope names a protected (tier 3) path, an item that covers
+  one, or `Allows:`. Protected tasks stay in `triage` so that nobody else can `/claim` them; the maintainer's own
+  pull request does not need `ready`. Label one by hand only to hand it to an outside contributor. Issues from
+  other accounts stay in `triage` too. Each task left there gets one comment saying why.
+- **Claims.** A pull request the maintainer's account opens from a branch of this repository claims the task it
+  closes (`scripts/claims.py link`, in `.github/workflows/claims.yml`), with no `/claim` and no two-claim limit.
+- **`pr-guard`.** On such a pull request the linked task's scope counts without `ready` or a claim. The scope check
+  itself stays: a protected path still fails unless the task's `### Scope` names it.
+- **Model.** Such a pull request needs no `Model:` line; AGENTS.md declares the model for the maintainer's account.
+- **`protected` label.** The same job labels every open pull request, from any account, `protected` while it
+  changes a tier 3 path (CI, rules, scripts, the reviewer, client, launcher), so the pull request list shows which
+  ones to read closely before merging.
+
+Outside contributors keep every gate: a maintainer labels their task `ready`, they `/claim` it (two at a time),
+declare the model, and `pr-guard` requires the claim.
+
+What this gives up: any agent on the maintainer's account can open a task that names CI or rule files in its scope
+and have its own pull request passed by `pr-guard` with no human step. Trust follows the account that opens the
+pull request: code an agent copies into its branch from elsewhere takes the maintainer's path too. What remains is the required CI, the
+reviewer's comment, the `protected` label and the maintainer's merge. Read every `protected` pull request before
+merging it. Moving agents to their own account without write access restores the label and claim gates.
 
 ## Review agent
 
