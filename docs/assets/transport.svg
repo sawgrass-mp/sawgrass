@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="642" viewBox="0 0 880 642" role="img" aria-label="QUIC (quinn): p99 102/151/202 ms, 0.77 cores at 1,000 players; GameNetworkingSockets: p99 161/221/313 ms, 0.56 cores at 1,000 players; ENet (rusty_enet): p99 100/151/1096 ms, 0.18 cores at 1,000 players; renet (netcode): p99 341/643/844 ms, 0.99 cores at 1,000 players; Plain UDP: p99 n/a, 0.10 cores at 1,000 players">
+<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#14e1f0"/><stop offset="1" stop-color="#7cf000"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:13px;fill:#8fb3a6}.l{font-size:15px;font-weight:600;fill:#e8fff4}.n{font-size:12px;fill:#7d9a90}.p{font-size:14px;font-weight:700;fill:#a6ff4d}.v{font-size:14px;font-weight:600;fill:#cfe9df}.t{font-size:11px}</style>
+<rect width="880" height="642" rx="16" fill="#060a08"/>
+<rect x="1" y="1" width="878" height="640" rx="15" fill="none" stroke="#1d3b2f"/>
+<text x="28" y="44" class="h">Reliable events under packet loss</text>
+<text x="28" y="68" class="s">p99 delivery time of an event, 40 ms round trip, 1% / 5% / 10% loss each way. Lower is better.</text>
+<text x="28" y="118" class="l">QUIC (quinn)</text>
+<text x="28" y="135" class="n">chosen: encrypted, multi-threaded</text>
+<rect x="330" y="106" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="106" width="41.0" height="8" rx="4" fill="url(#g)"/>
+<text x="852" y="114" class="p t" text-anchor="end">1%: 102 ms</text>
+<rect x="330" y="118" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="118" width="60.4" height="8" rx="4" fill="url(#g)"/>
+<text x="852" y="126" class="p t" text-anchor="end">5%: 151 ms</text>
+<rect x="330" y="130" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="130" width="80.7" height="8" rx="4" fill="url(#g)"/>
+<text x="852" y="138" class="p t" text-anchor="end">10%: 202 ms</text>
+<text x="28" y="166" class="l">GameNetworkingSockets</text>
+<text x="28" y="183" class="n">encrypted; C++ library</text>
+<rect x="330" y="154" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="154" width="64.3" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="162" class="v t" text-anchor="end">1%: 161 ms</text>
+<rect x="330" y="166" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="166" width="88.4" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="174" class="v t" text-anchor="end">5%: 221 ms</text>
+<rect x="330" y="178" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="178" width="125.3" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="186" class="v t" text-anchor="end">10%: 313 ms</text>
+<text x="28" y="214" class="l">ENet (rusty_enet)</text>
+<text x="28" y="231" class="n">no encryption; 4,095 per host</text>
+<rect x="330" y="202" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="202" width="40.0" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="210" class="v t" text-anchor="end">1%: 100 ms</text>
+<rect x="330" y="214" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="214" width="60.6" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="222" class="v t" text-anchor="end">5%: 151 ms</text>
+<rect x="330" y="226" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="226" width="400.0" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="234" class="v t" text-anchor="end">10%: 1,096 ms+</text>
+<text x="28" y="262" class="l">renet (netcode)</text>
+<text x="28" y="279" class="n">encrypted; 1,024 per server</text>
+<rect x="330" y="250" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="250" width="136.4" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="258" class="v t" text-anchor="end">1%: 341 ms</text>
+<rect x="330" y="262" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="262" width="257.1" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="270" class="v t" text-anchor="end">5%: 643 ms</text>
+<rect x="330" y="274" width="400" height="8" rx="4" fill="#13201b"/>
+<rect x="330" y="274" width="337.8" height="8" rx="4" fill="#3f8f7a"/>
+<text x="852" y="282" class="v t" text-anchor="end">10%: 844 ms</text>
+<text x="28" y="310" class="l">Plain UDP</text>
+<text x="28" y="327" class="n">floor: no reliability, no encryption</text>
+<text x="330" y="318" class="n">no reliable delivery</text>
+<text x="28" y="364" class="h">Server CPU with 1,000 players</text>
+<text x="28" y="388" class="s">Cores used by the server at 20 Hz: 2 x 1,000-byte snapshots down, 64-byte state up, one event a second. Lower is better.</text>
+<text x="28" y="434" class="l">QUIC (quinn)</text>
+<text x="28" y="451" class="n">4,096 players: 1.94 cores, all delivered</text>
+<rect x="330" y="426" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="426" width="256.3" height="12" rx="6" fill="url(#g)"/>
+<text x="852" y="437" class="p" text-anchor="end">0.77</text>
+<text x="28" y="474" class="l">GameNetworkingSockets</text>
+<text x="28" y="491" class="n">4,096 players: not established on this 4-core VM</text>
+<rect x="330" y="466" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="466" width="187.0" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="477" class="v" text-anchor="end">0.56</text>
+<text x="28" y="514" class="l">ENet (rusty_enet)</text>
+<text x="28" y="531" class="n">4,096 players: 0.80 cores, all delivered</text>
+<rect x="330" y="506" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="506" width="61.0" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="517" class="v" text-anchor="end">0.18</text>
+<text x="28" y="554" class="l">renet (netcode)</text>
+<text x="28" y="571" class="n">4,096 players: not established on this 4-core VM</text>
+<rect x="330" y="546" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="546" width="330.3" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="557" class="v" text-anchor="end">0.99</text>
+<text x="28" y="594" class="l">Plain UDP</text>
+<text x="28" y="611" class="n">4,096 players: 0.43 cores, all delivered</text>
+<rect x="330" y="586" width="400" height="12" rx="6" fill="#13201b"/>
+<rect x="330" y="586" width="35.0" height="12" rx="6" fill="#3f8f7a"/>
+<text x="852" y="597" class="v" text-anchor="end">0.10</text>
+</svg>
