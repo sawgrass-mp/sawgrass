@@ -9,9 +9,10 @@
 //! rebuilds the spatial grid, recomputes each player's visible set and sends each player a whole snapshot of
 //! the entities in it, split into datagrams of at most [`SNAPSHOT_MAX_ENTITIES`] states.
 //!
-//! The tick thread does not hand datagrams to quinn itself (task NET-9). It writes every datagram of a tick into
-//! chunks of [`ARENA_CHUNK`] bytes, reused once the gateway has sent them, and passes the whole tick to one task
-//! on the gateway runtime in a single [`Batch`]. That task hands each datagram to its connection. So the tick
+//! Each player's visible set and datagrams are built by its own [`View`], on a rayon pool of
+//! [`ListenConfig::tick_threads`] threads (task SRV-7). The tick thread does not hand datagrams to quinn itself
+//! (task NET-9): each view writes its datagrams into buffers it reuses once the gateway has sent them, and the
+//! tick passes all of them to one task on the gateway runtime in a single [`Batch`]. That task hands each datagram to its connection. So the tick
 //! wakes the gateway once per tick instead of once per datagram (BOT-3 measured 22% of the tick thread in those
 //! wake-ups) and allocates no buffer per datagram. At most [`OUTBOX_TICKS`] batches wait for the gateway; if it
 //! falls further behind, the tick's snapshots are dropped and counted rather than queued.
@@ -30,18 +31,18 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use hecs::{Entity, World};
+use rayon::prelude::*;
 use sawgrass_gateway::{Datagrams, Gateway, Session};
-use sawgrass_protocol::game::{
-    ClientEvent, ClientState, SNAPSHOT_MAX_ENTITIES, ServerEvent, ServerStats, encode_snapshot,
-};
+use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, ServerStats};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
-use crate::interest::{DenseGrid, EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
+use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::slots::{Slot, Slots};
+use crate::snapshot::View;
 
 /// The network id of a player's entity, the `id` in snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,10 +58,6 @@ const EVENT_QUEUE: usize = 16;
 
 /// Ticks of snapshots that may wait for the gateway's send task before a tick's snapshots are dropped.
 const OUTBOX_TICKS: usize = 2;
-
-/// Size of each chunk the tick writes datagrams into. A chunk is freed once every datagram cut from it has been
-/// sent, so a tick allocates one chunk per this many bytes instead of one buffer per datagram.
-pub const ARENA_CHUNK: usize = 64 * 1024;
 
 /// One tick's datagrams for the gateway's send task: each packet with the index of its connection in `senders`.
 #[derive(Debug, Default)]
@@ -97,6 +94,8 @@ pub struct ListenConfig {
     pub stats_to_clients: bool,
     /// Connections, handshakes included, above which new ones are refused.
     pub max_players: usize,
+    /// Threads that build players' snapshots in parallel. 1 builds them on the tick thread.
+    pub tick_threads: usize,
 }
 
 impl Default for ListenConfig {
@@ -105,6 +104,7 @@ impl Default for ListenConfig {
         Self {
             stats_to_clients: false,
             max_players: 4096,
+            tick_threads: 1,
         }
     }
 }
@@ -157,11 +157,16 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         by_connection: std::collections::HashMap::new(),
         grid: DenseGrid::default(),
         visibility: VisibilityConfig::default(),
-        changes: VisibilityChanges::default(),
+        pool: (config.tick_threads > 1)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(config.tick_threads)
+                    .thread_name(|i| format!("tick-{i}"))
+                    .build()
+                    .ok()
+            })
+            .flatten(),
         states: Vec::new(),
-        scratch: Vec::new(),
-        packet: Vec::new(),
-        arena: BytesMut::new(),
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
@@ -258,8 +263,7 @@ struct Player {
     sender: Datagrams,
     events: tokio_mpsc::Sender<Vec<u8>>,
     inbox: Arc<Inbox>,
-    visible: VisibleSet,
-    sequence: u16,
+    view: View,
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
@@ -274,14 +278,10 @@ pub struct Players {
     by_connection: std::collections::HashMap<u32, Slot>,
     grid: DenseGrid,
     visibility: VisibilityConfig,
-    changes: VisibilityChanges,
+    /// Builds the views in parallel; `None` for one thread.
+    pool: Option<rayon::ThreadPool>,
     /// The wire state of every placed player, by slot index.
     states: Vec<Option<EntityState>>,
-    scratch: Vec<EntityState>,
-    /// One datagram being encoded, before it is copied into `arena`.
-    packet: Vec<u8>,
-    /// Where this tick's datagrams are written; each is split off and frozen when complete.
-    arena: BytesMut,
     outbox: tokio_mpsc::Sender<Batch>,
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
@@ -358,8 +358,7 @@ impl Players {
                         sender,
                         events,
                         inbox,
-                        visible: VisibleSet::new(),
-                        sequence: 0,
+                        view: View::new(),
                     });
                 }
                 Inbound::Leave { id } => {
@@ -405,45 +404,30 @@ impl Players {
     }
 
     fn send_snapshots(&mut self, tick: u32) {
+        let (grid, states, config) = (&self.grid, &self.states[..], &self.visibility);
+        let build = |player: &mut Player| {
+            player
+                .view
+                .build(player.slot.index as usize, grid, states, config, tick);
+        };
+        match &self.pool {
+            Some(pool) => pool.install(|| {
+                self.players
+                    .par_iter_mut()
+                    .filter_map(Option::as_mut)
+                    .for_each(build);
+            }),
+            None => self.players.iter_mut().flatten().for_each(build),
+        }
         let mut batch = self.recycle.try_recv().unwrap_or_default();
         for player in self.players.iter_mut().flatten() {
-            let Some(own) = &self.states[player.slot.index as usize] else {
-                continue;
-            };
-            let [x, y, _] = own.position.to_metres();
-            player.visible.update(
-                &self.grid,
-                Some(EntityId(player.slot.index)),
-                Point::new(x, y),
-                &self.visibility,
-                &mut self.changes,
-            );
-            self.scratch.clear();
-            self.scratch.extend(
-                player
-                    .visible
-                    .members()
-                    .iter()
-                    .filter_map(|id| self.states[id.0 as usize].as_ref()),
-            );
             let sender = batch.senders.len() as u32;
-            batch.senders.push(player.sender.clone());
-            // At least one datagram: an empty snapshot still tells the client the tick advanced.
-            let datagrams = self.scratch.len().div_ceil(SNAPSHOT_MAX_ENTITIES).max(1);
-            for i in 0..datagrams {
-                let start = i * SNAPSHOT_MAX_ENTITIES;
-                let chunk = &self.scratch[start..(start + SNAPSHOT_MAX_ENTITIES).min(self.scratch.len())];
-                self.packet.clear();
-                write_header(&mut self.packet, PacketKind::Snapshot, player.sequence, tick);
-                player.sequence = player.sequence.wrapping_add(1);
-                if encode_snapshot(chunk, &mut self.packet).is_err() {
-                    continue;
-                }
-                if self.arena.capacity() < self.packet.len() {
-                    self.arena.reserve(ARENA_CHUNK.max(self.packet.len()));
-                }
-                self.arena.extend_from_slice(&self.packet);
-                batch.packets.push((sender, self.arena.split().freeze()));
+            let before = batch.packets.len();
+            batch
+                .packets
+                .extend(player.view.out().map(|packet| (sender, packet)));
+            if batch.packets.len() > before {
+                batch.senders.push(player.sender.clone());
             }
         }
         if self.outbox.try_send(batch).is_err() {
