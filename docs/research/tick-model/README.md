@@ -1,7 +1,7 @@
 # Tick models for the world server: what we measured and what we chose
 
 Measured 2026-11-24 on the project's own tick loop (SRV-1, SRV-2) and interest management (IM-1), with rayon
-1.12.0, hecs 0.11.2 and bevy_ecs 0.20.1. Task: SRV-3 (#69).
+1.12.0, hecs 0.11.2 and bevy_ecs 0.20.1. Task: SRV-4 (#69).
 
 The question: how should the world server run a tick so that 4096 players fit, at 30 Hz and at 60 Hz, with a
 p99 tick under the budget of architecture.md (70% of the interval: 23.3 ms at 30 Hz, 11.7 ms at 60 Hz), and what
@@ -12,7 +12,8 @@ happens when players crowd into one place, as they do at any roleplay event?
 **We chose to keep the current loop on hecs and run each system's per-player work in parallel with rayon
 ("players in parallel"), with effects on other players collected and applied in one serial, ordered phase.** On
 4 cores, at 4096 players and 30 Hz, it cut tick p99 in the crowd from 46.3 ms (twice the budget) to 12.6 ms
-(half of it), and raised the players that fit in the budget there from 2,048 to 5,120. It ends every tick in exactly the same
+(half of it), and raised the players that fit in the budget there from 2,048 to 5,120 (one sweep run per count, so a count
+near the limit can pass or fail by noise). It ends every tick in exactly the same
 world as the one-thread loop. Zones in parallel were as fast while players were spread out and no faster than one
 thread once a quarter of them gathered in one place; bevy_ecs was 30 to 40% slower with a worse tail and brings 61
 crates and proc macros. See [What we chose and why](#what-we-chose-and-why).
@@ -21,7 +22,7 @@ crates and proc macros. See [What we chose and why](#what-we-chose-and-why).
 
 4096 players at 30 Hz, tick p50 / p99 in ms (p99 is the median of three runs, their range in brackets):
 
-| Model | Spread over 8 km | City, 3 km | Crowd: city + 1,024 at one event | CPU per tick, city / crowd | Players within budget, city / crowd |
+| Model | Spread over 8 km | City, 3 km | Crowd: city + 1,024 at one event | CPU per tick, city / crowd | Players within budget, city / crowd (one run per count) |
 |---|---:|---:|---:|---:|---:|
 | Current loop (hecs, one thread) | 4.0 / 7.1 (6.9–8.9) | 10.1 / 18.7 (15.5–19.7) | 29.2 / **46.3** (41.7–48.7) | 10.8 / 30.4 ms | 4,096 / 2,048 |
 | Plain arrays, one thread | 4.1 / 7.3 (6.4–11.3) | 9.4 / 15.7 (15.5–16.3) | 27.8 / 42.4 (39.4–42.8) | 9.8 / 29.3 ms | 5,120 / 2,048 |

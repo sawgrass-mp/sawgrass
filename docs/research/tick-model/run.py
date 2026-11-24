@@ -1,4 +1,4 @@
-"""Runs the SRV-3 tick model measurements and writes results/<suite>.jsonl.
+"""Runs the SRV-4 tick model measurements and writes results/<suite>.jsonl.
 
 Usage: python3 -I run.py [check] [headline] [scaling] [sweep]   (all when none is named)
 

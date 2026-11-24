@@ -1,4 +1,4 @@
-//! Tick model benchmark (SRV-3): runs one model of the world tick at a fixed rate and reports tick durations.
+//! Tick model benchmark (SRV-4): runs one model of the world tick at a fixed rate and reports tick durations.
 //!
 //!     tick-bench run <model> <scenario> <players> <rate_hz> <threads> <seconds> [unpaced]
 //!     tick-bench check <scenario> <players> <rate_hz> <threads> <ticks>

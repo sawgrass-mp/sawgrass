@@ -361,7 +361,7 @@ in a city, and with a quarter of them at one event.
 **We chose to keep hecs and run each system's per-player work in parallel with rayon**, applying effects on other
 players in one serial, ordered phase, at 30 Hz.
 
-| 4096 players, 30 Hz, 4 cores | City p99 | Crowd p99 | Players within budget, crowd | Why or why not |
+| 4096 players, 30 Hz, 4 cores | City p99 | Crowd p99 | Players within budget, crowd (one run per count) | Why or why not |
 |---|---:|---:|---:|---|
 | Current loop (hecs, one thread) | 18.7 ms | 46.3 ms | 2,048 | Every crowd tick over the 23.3 ms budget. |
 | Plain arrays, one thread | 15.7 ms | 42.4 ms | 2,048 | Up to 7% faster than hecs: not worth a rewrite. |
