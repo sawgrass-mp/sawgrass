@@ -10,7 +10,15 @@ publish.workspace = true
 
 [dependencies]
 hecs = { version = "0.11", default-features = false, features = ["std"] }
+bytes = "1"
+sawgrass-gateway = { path = "../sawgrass-gateway" }
 sawgrass-protocol = { path = "../sawgrass-protocol" }
+# The gateway runs on tokio (quinn's runtime) next to the tick thread.
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+# Self-signed certificates for the network tests, as in the gateway's tests (which explain the `time` pin).
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 
 [[bench]]
 name = "visibility"

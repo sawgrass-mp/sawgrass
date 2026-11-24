@@ -1,0 +1,9 @@
+{"suite": "size", "engine": "luau", "stripped_bytes": 2319160, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "luau-jit", "stripped_bytes": 3108952, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "lua54", "stripped_bytes": 973448, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "luajit", "stripped_bytes": 1227240, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "luajit-interp", "stripped_bytes": 1227432, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "quickjs", "stripped_bytes": 1717544, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "v8", "stripped_bytes": 48252848, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "wasm", "stripped_bytes": 11868424, "at": "2026-11-24T18:27:06"}
+{"suite": "size", "engine": "rhai", "stripped_bytes": 3853648, "at": "2026-11-24T18:27:06"}

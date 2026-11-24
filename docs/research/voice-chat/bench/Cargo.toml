@@ -1,0 +1,20 @@
+[package]
+name = "voice-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+# Standalone: not part of the Sawgrass workspace, so its dependencies never reach the project's graph.
+[workspace]
+
+[dependencies]
+opus = "0.3"
+quinn = "0.11"
+rcgen = "0.14"
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+bytes = "1"
+
+[profile.release]
+debug = "line-tables-only"
