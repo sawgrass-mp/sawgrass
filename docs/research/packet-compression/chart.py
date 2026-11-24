@@ -61,7 +61,7 @@ def main():
     bars([w for w, _ in wire], 2200, [f"{w:,.0f} B, {d:.0f} pkt" for w, d in wire])
 
     y += 22
-    head(f"Gateway CPU, {PLAYERS:,} players", "quinn sending these snapshots (measured) plus encoding and compressing them (measured on one core). Lower is better.")
+    head(f"Gateway CPU, {PLAYERS:,} players", "quinn sending them (measured; dictionary rows at zstd 3 sizes, within 1%) plus encoding at zstd 1 (one core).")
     y += 62
     cpu = []
     for enc, codec, label, _, _ in ROWS:

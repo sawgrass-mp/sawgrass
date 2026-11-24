@@ -218,8 +218,8 @@ The protocol version check at connection (`PROTOCOL_VERSION`) stays as it is.
   versions.
 - **No crash on hostile input we tried**: no panic, no runaway allocation, no stall in 400,000 random and corrupted
   inputs (not coverage-guided fuzzing; see [What was not measured](#what-was-not-measured)).
-- **Decoded strictly.** postcard's `from_bytes` ignores bytes after a valid packet, so the protocol decodes with
-  `take_from_bytes` and rejects any remainder, as the current code does: one encoding per packet, and no room for
+- **Decoded strictly.** postcard's `from_bytes` ignores bytes after a valid packet, so the protocol will decode
+  with `take_from_bytes` and reject any remainder, as the current code does: one encoding per packet, and no room for
   data smuggled after it.
 - **Little to maintain.** A serde derive on the message types replaces hand-written encode and decode for every new
   message, and keeps us free to change messages without writing byte offsets.

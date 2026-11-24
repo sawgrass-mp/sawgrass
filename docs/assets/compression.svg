@@ -26,7 +26,7 @@
 <rect x="300" y="226" width="129.0" height="12" rx="6" fill="#3f8f7a"/>
 <text x="852" y="237" class="v" text-anchor="end">710 B, 1 pkt</text>
 <text x="28" y="288" class="h">Gateway CPU, 2,048 players</text>
-<text x="28" y="312" class="s">quinn sending these snapshots (measured) plus encoding and compressing them (measured on one core). Lower is better.</text>
+<text x="28" y="312" class="s">quinn sending them (measured; dictionary rows at zstd 3 sizes, within 1%) plus encoding at zstd 1 (one core).</text>
 <text x="28" y="358" class="l">Whole snapshot (postcard)</text>
 <text x="28" y="375" class="n">today's NET-4 choice</text>
 <rect x="300" y="350" width="400" height="12" rx="6" fill="#13201b"/>

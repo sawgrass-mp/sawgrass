@@ -31,7 +31,8 @@ traffic, so it waits for the load-test bots (BOT-2). See [What we chose and why]
 
 "On the wire" adds 38 bytes of QUIC and 28 of IPv4 and UDP per datagram, and a 3-byte fragment header when a
 snapshot is split. Gateway CPU is quinn sending snapshots of that size to 2,048 players, measured, plus encoding
-them, measured on one core and added.
+them, measured on one core and added. For the two dictionary rows quinn was run with the zstd level 3 sizes
+(1,760 and 647 B), which are within 1% of level 1's, and the encoding cost added is level 1's.
 
 - **Delta encoding is what pays.** About two thirds of the 100 visible entities change between snapshots, but each
   change is a few centimetres, which takes 1 or 2 bytes instead of the whole value. The snapshot fits in one
@@ -45,7 +46,7 @@ them, measured on one core and added.
   matters more: 697 bytes at 40 ms, 863 at 200 ms, still one datagram.
 - **Small messages should not be compressed.** Every compressor made client states, chat lines and script events
   4 or 5 bytes larger.
-- **No decoder crashed** on 200,000 random and 200,000 corrupted packets per pipeline.
+- **No decoder crashed** on 100,000 random and 100,000 corrupted packets per pipeline.
 
 All figures come from one 4-core VM and a simulated world. Read [What was not measured](#what-was-not-measured)
 before relying on them.
@@ -75,6 +76,8 @@ baseline and 0.6 entered the view.
   entities that entered in full. Unchanged entities are not sent. Rotation differences are taken per 10-bit
   component when the largest component stays the same, otherwise the rotation is sent whole. A snapshot whose
   baseline is older than 32 ticks (1.6 s), or that has none, is sent against nothing, which is a full snapshot.
+  That happens when a player joins, or after a stall of more than 1.6 s, and a full snapshot of 100 entities takes
+  two datagrams; so the protocol still needs snapshot splitting, even though deltas fit in one.
 
 **The compressors** ([`codec.rs`](bench/src/codec.rs)), each on one packet at a time, since datagrams are lost
 independently and one must never need another to be decoded:
@@ -172,6 +175,9 @@ Delta snapshot size, mean (p99), bytes; every one fitted in one datagram:
 | 200 ms | 863 (989) | 863 (990) | 865 (993) | 868 (998) |
 | 100 ms, zstd 3 with dictionary | 652 (751) | 652 (754) | 655 (761) | 660 (773) |
 
+This suite records 30 s per cell, against 60 s for the size suite, so its 100 ms, no-loss cell (800 bytes) differs
+slightly from the size table's 793: a different stretch of the same simulated world.
+
 The baseline was on average 1, 3 and 5 ticks old at 40, 100 and 200 ms, and at 10% loss 0.2 ticks older. No
 snapshot lost its baseline (none was older than 1.6 s), because the client acknowledges again with every state it
 sends. A lost snapshot does not break the next one: that one is encoded against what the client acknowledged,
@@ -246,9 +252,11 @@ Per pipeline, 100,000 random and 100,000 corrupted packets:
 No random input was accepted by any pipeline. "Accepted" means a corrupted packet still decoded to some snapshot,
 with wrong values; QUIC's authenticated encryption drops any packet changed on the way, so on the wire these only
 come from a client or server that sends them on purpose. The delta decoder checks every count against the bytes
-left, every id against the baseline, every value against its range, and rejects bytes left over. The 2.8 ms is a
-single outlier in 200,000 (the slowest decode of the other delta pipelines was 0.26 to 0.86 ms), most likely the
-shared VM. This is random and mutation testing, not coverage-guided fuzzing; see below.
+left, every id against the baseline, every value against its integer type (i32 and i16 fields, 10-bit rotation
+parts; not against world bounds or the protocol's quantization range), and rejects bytes left over. The 2.8 ms is
+a single outlier in 200,000 (the slowest decode of the other delta pipelines was 0.26 to 0.86 ms). The decoder is
+linear in its input, so the shared VM is the likely cause, but the input was not recorded and this was not
+checked. This is random and mutation testing, not coverage-guided fuzzing; see below.
 
 ### Was the comparison fair?
 
@@ -297,10 +305,12 @@ NET-4 chose: postcard, uncompressed.
 - **Our own code, no new dependency**: about 300 lines that the protocol crate can own and test, including a
   decoder that rejects inconsistent packets.
 
-**zstd with a dictionary is the measured next step, not part of the choice yet.** It took another 19% off deltas
-(644 bytes, about 12 MB/s at 4096 players) for 3.2 µs more encoding per snapshot (about 0.26 cores across the
-gateways) and a C library in client and server. Its gain comes from a dictionary that learns the traffic, and the
-only traffic so far is simulated; once BOT-2 produces real packets, it should be trained on them and measured again.
+**zstd with a dictionary is the measured next step, not part of the choice yet.** At level 1 it took another 19%
+off deltas (644 bytes, about 12 MB/s at 4096 players) for 3.2 µs more encoding per snapshot (about 0.26 cores
+across the gateways) and a C library in client and server. Its gain comes from a dictionary that learns the
+traffic, and the only traffic so far is simulated; once BOT-2 produces real packets, it should be trained on them
+and measured again. The hostile-input and quinn runs here used level 3 with a dictionary, so level 1 also needs
+its own hostile-input run when it is adopted.
 
 ### Why not the others
 
@@ -308,7 +318,7 @@ only traffic so far is simulated; once BOT-2 produces real packets, it should be
 |---|---|---|
 | Whole snapshots, uncompressed (today) | 1,935 B in 2 datagrams | Twice the packets and 2.4 times the bytes of a delta, and more CPU. |
 | Whole + LZ4 | 1,927 B in 2 datagrams | Saves nothing on quantized values, costs 1.8 µs. |
-| Whole + zstd (with or without dictionary) | 1,757 to 1,783 B in 2 datagrams | 8 to 9% fewer bytes in as many datagrams, so quinn's CPU did not drop, and 7.7 to 26 µs more to encode: 2.05 cores in total at 2,048 players against 1.40 for delta. |
+| Whole + zstd (with or without dictionary) | 1,757 to 1,783 B in 2 datagrams | 8 to 9% fewer bytes in as many datagrams, so quinn's CPU did not drop, and 7.7 to 26 µs more to encode: 2.05 cores in total at 2,048 players (quinn at level 3 sizes, encoding at level 1) against 1.40 for delta. |
 | Delta + LZ4 | 799 B | Larger than delta alone. |
 | Delta + zstd, no dictionary | 698 B, 12 µs | 12% smaller than delta for three times its encoding time; with a dictionary it is smaller and faster. |
 | Delta + zstd with dictionary | 644 B, 7.2 µs | The best size, and the next thing to adopt; see above. |
