@@ -300,7 +300,8 @@ mod game_payloads {
         };
         let mut buf = [0; ClientState::SIZE + 1];
         assert_eq!(client.encode(&mut buf), Ok(19));
-        assert_eq!(ClientState::decode(&buf), Ok((client, &[0][..])));
+        assert_eq!(ClientState::decode(&buf[..19]), Ok(client));
+        assert_eq!(ClientState::decode(&buf), Err(DecodeError::TrailingBytes));
         assert_eq!(ClientState::decode(&buf[..18]), Err(DecodeError::Truncated));
         assert_eq!(client.encode(&mut [0; 18]), Err(EncodeError::BufferTooSmall));
     }
@@ -368,6 +369,7 @@ mod game_payloads {
         let mut out = Vec::new();
         ClientEvent::RequestStats.encode(&mut out);
         assert_eq!(ClientEvent::decode(&out), Ok(ClientEvent::RequestStats));
+        assert_eq!(ClientEvent::decode(&[128, 0]), Err(DecodeError::TrailingBytes));
         assert_eq!(ServerEvent::decode(&out), Err(DecodeError::UnknownEvent(128)));
         assert_eq!(ClientEvent::decode(&[1]), Err(DecodeError::UnknownEvent(1)));
     }

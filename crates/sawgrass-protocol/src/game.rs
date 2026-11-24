@@ -46,26 +46,27 @@ impl ClientState {
         Ok(w.pos)
     }
 
-    /// Reads a state from the start of `input` and returns it with the remaining bytes.
-    pub fn decode(input: &[u8]) -> Result<(Self, &[u8]), DecodeError> {
+    /// Reads a whole payload. Bytes after the state are an error: one encoding per packet (NET-4).
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader { input };
         let state = Self {
             position: Position::read(&mut r)?,
             velocity: Velocity::read(&mut r)?,
             rotation: Rotation::read(&mut r)?,
         };
-        Ok((state, r.input))
+        r.finish()?;
+        Ok(state)
     }
 }
 
 /// Appends a snapshot payload (count, then the states) to `out`. Fails if there are more than
 /// [`SNAPSHOT_MAX_ENTITIES`] states.
 pub fn encode_snapshot(states: &[EntityState], out: &mut Vec<u8>) -> Result<(), EncodeError> {
-    let count = u8::try_from(states.len()).map_err(|_| EncodeError::OutOfRange)?;
     if states.len() > SNAPSHOT_MAX_ENTITIES {
         return Err(EncodeError::OutOfRange);
     }
-    out.push(count);
+    // At most SNAPSHOT_MAX_ENTITIES (47), so it fits a byte.
+    out.push(states.len() as u8);
     let mut buf = [0; EntityState::SIZE];
     for state in states {
         state.encode(&mut buf)?;
@@ -74,17 +75,29 @@ pub fn encode_snapshot(states: &[EntityState], out: &mut Vec<u8>) -> Result<(), 
     Ok(())
 }
 
-/// Reads a snapshot payload and calls `visit` for each state. Returns the number of states.
+/// Reads a whole snapshot payload and calls `visit` for each state. Returns the number of states.
+///
+/// The length is checked first: a payload that is cut short, longer than its count says, or counts more than
+/// [`SNAPSHOT_MAX_ENTITIES`] is rejected before `visit` sees any state.
 pub fn decode_snapshot(input: &[u8], mut visit: impl FnMut(EntityState)) -> Result<usize, DecodeError> {
     let mut r = Reader { input };
     let [count] = r.array::<1>()?;
+    let count = usize::from(count);
+    if count > SNAPSHOT_MAX_ENTITIES {
+        return Err(DecodeError::OutOfRange);
+    }
+    match r.input.len().cmp(&(count * EntityState::SIZE)) {
+        std::cmp::Ordering::Less => return Err(DecodeError::Truncated),
+        std::cmp::Ordering::Greater => return Err(DecodeError::TrailingBytes),
+        std::cmp::Ordering::Equal => {}
+    }
     let mut rest = r.input;
     for _ in 0..count {
         let (state, tail) = EntityState::decode(rest)?;
         visit(state);
         rest = tail;
     }
-    Ok(usize::from(count))
+    Ok(count)
 }
 
 /// Tick-duration and traffic figures the server reports to load-test clients that ask for them.
@@ -165,11 +178,11 @@ impl ServerEvent {
         }
     }
 
-    /// Reads a payload. Bytes after the event are ignored.
+    /// Reads a whole payload. Bytes after the event are an error.
     pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader { input };
         let [code] = r.array::<1>()?;
-        match code {
+        let event = match code {
             JOINED => Ok(Self::Joined {
                 entity: u32::from_le_bytes(r.array()?),
                 tick_hz: u16::from_le_bytes(r.array()?),
@@ -206,7 +219,9 @@ impl ServerEvent {
                 }))
             }
             other => Err(DecodeError::UnknownEvent(other)),
-        }
+        }?;
+        r.finish()?;
+        Ok(event)
     }
 }
 
@@ -225,12 +240,14 @@ impl ClientEvent {
         }
     }
 
-    /// Reads a payload. Bytes after the event are ignored.
+    /// Reads a whole payload. Bytes after the event are an error.
     pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader { input };
-        match r.array::<1>()? {
-            [REQUEST_STATS] => Ok(Self::RequestStats),
-            [other] => Err(DecodeError::UnknownEvent(other)),
-        }
+        let event = match r.array::<1>()? {
+            [REQUEST_STATS] => Self::RequestStats,
+            [other] => return Err(DecodeError::UnknownEvent(other)),
+        };
+        r.finish()?;
+        Ok(event)
     }
 }

@@ -47,6 +47,10 @@ pub enum DecodeError {
     UnknownKind(u8),
     /// The event code byte is not a known event.
     UnknownEvent(u8),
+    /// A whole payload is followed by more bytes.
+    TrailingBytes,
+    /// A count or value lies outside what the format allows.
+    OutOfRange,
 }
 
 impl fmt::Display for EncodeError {
@@ -65,6 +69,8 @@ impl fmt::Display for DecodeError {
             Self::Truncated => f.write_str("input is truncated"),
             Self::UnknownKind(kind) => write!(f, "unknown packet kind {kind}"),
             Self::UnknownEvent(code) => write!(f, "unknown event code {code}"),
+            Self::TrailingBytes => f.write_str("bytes after the end of the payload"),
+            Self::OutOfRange => f.write_str("value is out of range"),
         }
     }
 }
@@ -202,6 +208,15 @@ pub(crate) struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    /// Fails if any input is left: a whole payload must end where its encoding does.
+    pub(crate) fn finish(&self) -> Result<(), DecodeError> {
+        if self.input.is_empty() {
+            Ok(())
+        } else {
+            Err(DecodeError::TrailingBytes)
+        }
+    }
+
     pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
         let (head, rest) = self
             .input
