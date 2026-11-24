@@ -6,9 +6,9 @@
 <rect width="880" height="478" rx="16" fill="#060a08"/>
 <rect x="1" y="1" width="878" height="476" rx="15" fill="none" stroke="#1d3b2f"/>
 <text x="28" y="44" class="h">Stage 1: Server without the game</text>
-<text x="28" y="68" class="s">56% of the planned tasks done, weighted by size</text>
+<text x="28" y="68" class="s">45% of the planned tasks done, weighted by size</text>
 <rect x="28" y="84" width="824" height="14" rx="7" fill="#13201b"/>
-<rect x="28" y="84" width="461.4" height="14" rx="7" fill="url(#g)"/>
+<rect x="28" y="84" width="370.8" height="14" rx="7" fill="url(#g)"/>
 <text x="28" y="146" class="l">Stage 0: Repository foundation</text>
 <text x="28" y="164" class="n">Rules, CI, claim bot, review agent</text>
 <rect x="360" y="136" width="380" height="10" rx="5" fill="#13201b"/>
@@ -18,16 +18,17 @@
 <text x="28" y="192" class="l">Stage 1: Server without the game</text>
 <text x="28" y="210" class="n">Gates: 1000 bots on one machine, then 4096</text>
 <rect x="360" y="182" width="380" height="10" rx="5" fill="#13201b"/>
-<rect x="360" y="182" width="190.0" height="10" rx="5" fill="url(#g)"/>
-<text x="360" y="210" class="n">3 of 6 tasks done</text>
-<text x="852" y="192" class="p" text-anchor="end">50%</text>
+<rect x="360" y="182" width="155.8" height="10" rx="5" fill="url(#g)"/>
+<text x="360" y="210" class="n">3 of 7 tasks done</text>
+<text x="852" y="192" class="p" text-anchor="end">41%</text>
 <text x="28" y="238" class="l">Stage 2: Roleplay base</text>
 <text x="28" y="256" class="n">PostgreSQL, scripting, characters, money, jobs</text>
 <rect x="360" y="228" width="380" height="10" rx="5" fill="#13201b"/>
-<text x="360" y="256" class="n">0 of 1 task done</text>
-<text x="852" y="238" class="p" text-anchor="end">0%</text>
+<rect x="360" y="228" width="45.6" height="10" rx="5" fill="url(#g)"/>
+<text x="360" y="256" class="n">1 of 4 tasks done</text>
+<text x="852" y="238" class="p" text-anchor="end">12%</text>
 <text x="28" y="284" class="l">Stage 3: Client in the game</text>
-<text x="28" y="302" class="n">Waits until the game boots on PC through Leonida</text>
+<text x="28" y="302" class="n">Waits until the game runs on PC through VIctory</text>
 <rect x="360" y="274" width="380" height="10" rx="5" fill="#13201b"/>
 <text x="360" y="302" class="n">waiting for the game</text>
 <text x="852" y="284" class="w" text-anchor="end">waiting</text>
@@ -44,7 +45,7 @@
 <text x="28" y="422" class="l">Tooling and docs</text>
 <text x="28" y="440" class="n">CI gates, review agent, documentation</text>
 <rect x="360" y="412" width="380" height="10" rx="5" fill="#13201b"/>
-<rect x="360" y="412" width="243.2" height="10" rx="5" fill="url(#g)"/>
-<text x="360" y="440" class="n">2 of 6 tasks done</text>
-<text x="852" y="422" class="p" text-anchor="end">64%</text>
+<rect x="360" y="412" width="212.8" height="10" rx="5" fill="url(#g)"/>
+<text x="360" y="440" class="n">6 of 15 tasks done</text>
+<text x="852" y="422" class="p" text-anchor="end">56%</text>
 </svg>
