@@ -75,10 +75,14 @@ def suite(name, stamp):
                         print(json.dumps(r), flush=True)
                         if r.get("p99_us", 1e12) > r.get("budget_us", 0):
                             break
-    with open(RESULTS / f"{name}.jsonl", "w") as out:
-        for r in rows:
-            r["at"] = stamp
-            out.write(json.dumps(r) + "\n")
+    # The sweep is written one file per rate, so that no results file is too large for a pull request's diff.
+    files = [(f"sweep-{rate}", [r for r in rows if r.get("rate_hz") == rate]) for rate in RATES] \
+        if name == "sweep" else [(name, rows)]
+    for file, part in files:
+        with open(RESULTS / f"{file}.jsonl", "w") as out:
+            for r in part:
+                r["at"] = stamp
+                out.write(json.dumps(r) + "\n")
 
 
 def main():

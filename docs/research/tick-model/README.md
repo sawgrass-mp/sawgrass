@@ -120,7 +120,8 @@ The clients run on the main thread between ticks, outside the timed tick (about 
   time the main thread spent simulating clients, divided by ticks. It includes time threads spend spinning
   while waiting for work.
 
-[`run.py`](run.py) runs everything with fixed arguments and writes [`results/`](results/).
+[`run.py`](run.py) runs everything with fixed arguments and writes [`results/`](results/) (the sweep as
+`sweep-30.jsonl` and `sweep-60.jsonl`).
 
 ## Results
 

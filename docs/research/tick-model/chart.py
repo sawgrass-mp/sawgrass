@@ -1,4 +1,4 @@
-"""Draws docs/assets/tick.svg from results/headline.jsonl and results/sweep.jsonl.
+"""Draws docs/assets/tick.svg from results/headline.jsonl and results/sweep-30.jsonl.
 
 Usage: python3 -I chart.py
 """
@@ -43,7 +43,7 @@ def main():
     for r in load("headline"):
         head[(r["rate_hz"], r["scenario"], r["model"])].append(r)
     sweep = defaultdict(list)
-    for r in load("sweep"):
+    for r in load(f"sweep-{RATE}"):
         sweep[(r["rate_hz"], r["scenario"], r["model"])].append(r)
     p99 = {m: statistics.median(r["p99_us"] for r in head[(RATE, "crowd", m)]) / 1000 for m, _, _ in ROWS}
     budget = head[(RATE, "crowd", "soa")][0]["budget_us"] / 1000
