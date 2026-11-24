@@ -292,6 +292,9 @@ players inside 60 m, and 512 standing on one spawn point.
 - The bitsets need dense entity slots that are cleared from every set before reuse; the server's ids today come
   from a counter that never reuses them, so the follow-up task adds slots first.
 - Caveats: simulated movement, players only, one shared 4-core VM, interest management alone, not the whole tick.
+- Checked with the load-test bots' movement: the dense grid was 1.8 to 2.8 times faster than today's code. In the real
+  server visible sets were a quarter of the tick in a crowd, so the grid alone is not enough there
+  ([load-test-bots](docs/research/load-test-bots/README.md)).
 
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/visibility-index](docs/research/visibility-index/).

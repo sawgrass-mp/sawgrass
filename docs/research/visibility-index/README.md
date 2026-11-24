@@ -350,6 +350,36 @@ choice into `interest.rs` depends on it:
 - Real crowds from the bots (BOT-2) being denser than 2,048 in 60 m, or the ranking cut becoming the main path:
   then 25 m cells, or a finer grid only where it is crowded.
 
+## Checked on the load-test bots
+
+BOT-3 ran the real server under the load-test bots ([load-test-bots](../load-test-bots/README.md)). The server
+still has the IM-1 grid, so the dense grid itself could not run there. Instead, two scenarios here, `bots-4km` and
+`bots-1500m`, move every player with the bots' own walker (`sawgrass_bots::walker`, seed 1, 8 hotspots), and
+`PLAYERS` sets their number to match a bot run. The suite `bots` of `run.py` runs today's code and the chosen dense
+grid with bit sets on one thread ([`results/bots.jsonl`](results/bots.jsonl)).
+
+**The harness matches the server.** With the bots' movement it found the same number of players in view as the real
+server reported to the bots: 75 and 142 at 1,000 and 2,000 players over 1.5 km, against 75 and 148 in the server. Its
+6.0 ms for today's code at 2,000 players over 1.5 km is in line with the server's own profile of that load, where
+visible sets took a quarter of a 28 ms tick (about 7 ms, hashing included).
+
+| Players | Square | In view | Today's code, p50 / p99 | Dense grid 50 m, bit sets, p50 / p99 | Faster |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 4 km | 21 | 0.76 / 0.89 ms | 0.43 / 0.48 ms | 1.8 times |
+| 2,000 | 4 km | 39 | 1.9 / 2.1 ms | 0.88 / 0.96 ms | 2.2 times |
+| 2,000 | 1.5 km | 142 | 6.0 / 6.6 ms | 2.4 / 2.6 ms | 2.5 times |
+| 3,000 | 1.5 km | 214 | 13.0 / 14.1 ms | 4.9 / 5.3 ms | 2.6 times |
+| 4,096 | 4 km | 80 | 6.7 / 7.3 ms | 2.9 / 3.2 ms | 2.3 times |
+| 4,096 | 1.5 km | 288 | 24.3 / 34.5 ms | 8.5 / 11.8 ms | 2.8 times |
+
+**The choice holds**: on the bots' movement the dense grid with bit sets is 1.8 to 2.8 times faster than today's
+code, the gain growing with the crowd, as in the simulated scenarios above. **But visible sets are not most of the
+real tick.** In the real server at 2,000 bots over 1.5 km the tick ran at p50 30 ms and overran; visible sets were a
+quarter of it, memory allocation another quarter and waking the gateway for each datagram about a fifth. The dense
+grid alone would take about 4 ms off that tick; a faster allocator took 13 ms off in the same runs
+([load-test-bots](../load-test-bots/README.md#allocators)). Adopting the grid stays worth it, and is not enough on
+its own for crowds of this size.
+
 ## Licences
 
 Checked against the manifests of the versions used. Sawgrass is AGPL-3.0, and #44 proposes MIT OR Apache-2.0.
@@ -369,6 +399,7 @@ All of these licences are in the allow list of `deny.toml`. The choice adds no d
 ```sh
 cd bench && cargo build --release && cd ..
 python3 -I run.py verify single threads repeat   # about 70 minutes on 4 cores
+python3 -I run.py bots                           # about 2 minutes, the load-test bots' movement
 python3 -I chart.py                              # redraws docs/assets/visibility.svg
 ```
 
