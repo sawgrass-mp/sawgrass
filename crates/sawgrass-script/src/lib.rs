@@ -22,7 +22,7 @@ mod host;
 mod resource;
 
 pub use guards::SORT_UNGUARDED;
-pub use host::{Host, LoadError, TickReport, load_resource};
+pub use host::{DEFAULT_STRIKES, Host, LoadError, TickReport, load_resource};
 pub use resource::{CallError, Event, Limits, Resource, Stats};
 
 /// How many interrupt calls pass between two reads of the clock.

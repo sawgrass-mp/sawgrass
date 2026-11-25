@@ -6,7 +6,7 @@
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
 //!                 [--max-players N] [--max-per-address N] [--tick-threads N]
-//!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]
+//!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N] [--script-strikes N]]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -28,6 +28,8 @@
 //! - `--resources DIR`: run every resource in `DIR` (a folder with a `resource.toml`) in the tick. A resource that
 //!   fails to load is reported and left out.
 //! - `--script-budget-ms N`: the time all resources together may take in one tick (default 8).
+//! - `--script-strikes N`: turn a resource off after N overruns in a row (default 5; 0 never does). `enable NAME`
+//!   on standard input turns it back on.
 
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
@@ -62,6 +64,7 @@ struct Args {
     stats_to_clients: bool,
     resources: Option<PathBuf>,
     script_budget: Duration,
+    script_strikes: u32,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -78,6 +81,7 @@ fn parse_args() -> Result<Args, String> {
         stats_to_clients: false,
         resources: None,
         script_budget: scripts::DEFAULT_BUDGET,
+        script_strikes: sawgrass_script::DEFAULT_STRIKES,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -126,6 +130,11 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--script-budget-ms: {e}"))?;
                 args.script_budget = Duration::from_millis(ms);
             }
+            "--script-strikes" => {
+                args.script_strikes = value("--script-strikes")?
+                    .parse()
+                    .map_err(|e| format!("--script-strikes: {e}"))?;
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -153,7 +162,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
                  [--net-threads N] [--max-players N] [--max-per-address N] [--tick-threads N] \
-                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]"
+                 [--stats-to-clients] [--resources DIR [--script-budget-ms N] [--script-strikes N]]"
             );
             return ExitCode::from(2);
         }
@@ -225,19 +234,32 @@ fn main() -> ExitCode {
 
     let report_every = u64::from(config.rate_hz()) * REPORT_EVERY_SECS;
     if let Some(dir) = &args.resources {
-        let (host, errors) = sawgrass_script::Host::load_dir(dir, sawgrass_script::Limits::default());
+        let (mut host, errors) = sawgrass_script::Host::load_dir(dir, sawgrass_script::Limits::default());
+        host.set_strike_limit(args.script_strikes);
         for e in &errors {
             eprintln!("sawgrass-server: {e}");
         }
         let names: Vec<&str> = host.resources().iter().map(|r| r.name()).collect();
         println!(
-            "resources: {} running ({}), {} failed, script budget {:?} per tick",
+            "resources: {} running ({}), {} failed, script budget {:?} per tick, off after {} strikes in a row",
             names.len(),
             names.join(", "),
             errors.len(),
-            args.script_budget
+            args.script_budget,
+            args.script_strikes
         );
-        let mut scripts = Scripts::new(host, roster.take(), args.script_budget, report_every);
+        // Operator commands from standard input; the thread ends when it closes.
+        let (commands, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lines() {
+                let Ok(line) = line else { break };
+                if commands.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut scripts =
+            Scripts::new(host, roster.take(), args.script_budget, report_every).with_commands(lines);
         tick_loop.add_system("scripts", move |_, info| scripts.run_tick(info));
     }
 

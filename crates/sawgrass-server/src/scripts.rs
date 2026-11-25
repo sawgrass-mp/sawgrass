@@ -1,7 +1,8 @@
 //! Resources in the tick (task SCRIPT-4): the `scripts` system runs after `net` and gives every resource the
 //! players who joined and left this tick, then the tick, within a script budget per tick (see
 //! [`sawgrass_script::Host::run_tick`]). Every `report_every` ticks it prints each resource's counters, last error
-//! and log.
+//! and log. A resource that keeps overrunning is turned off and printed at once; the operator turns it back on with
+//! `enable NAME` on the server's standard input (see [`Scripts::with_commands`]).
 
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -26,6 +27,7 @@ pub struct Scripts {
     left: Vec<u32>,
     worst: Duration,
     skipped: usize,
+    commands: Option<Receiver<String>>,
 }
 
 impl Scripts {
@@ -42,6 +44,32 @@ impl Scripts {
             left: Vec::new(),
             worst: Duration::ZERO,
             skipped: 0,
+            commands: None,
+        }
+    }
+
+    /// Takes operator commands, one per line, at the start of each tick: `enable NAME` turns a resource that was
+    /// turned off back on.
+    #[must_use]
+    pub fn with_commands(mut self, commands: Receiver<String>) -> Self {
+        self.commands = Some(commands);
+        self
+    }
+
+    fn run_commands(&mut self) {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        while let Ok(line) = commands.try_recv() {
+            match line.split_whitespace().collect::<Vec<_>>()[..] {
+                [] => {}
+                ["enable", name] => {
+                    if !self.host.enable(name) {
+                        println!("scripts: no resource {name:?} is turned off");
+                    }
+                }
+                _ => println!("scripts: unknown command {line:?}; `enable NAME` turns a resource back on"),
+            }
         }
     }
 
@@ -53,6 +81,7 @@ impl Scripts {
 
     /// The tick system.
     pub fn run_tick(&mut self, info: &TickInfo) {
+        self.run_commands();
         self.joined.clear();
         self.left.clear();
         if let Some(roster) = &self.roster {
@@ -69,6 +98,9 @@ impl Scripts {
             .run_tick(info.tick, dt, &self.joined, &self.left, self.budget);
         self.worst = self.worst.max(report.spent);
         self.skipped += report.skipped;
+        for notice in self.host.take_notices() {
+            println!("scripts: {notice}");
+        }
         if self.report_every > 0 && info.tick > 0 && info.tick % self.report_every == 0 {
             for line in self.report() {
                 println!("{line}");
@@ -88,12 +120,16 @@ impl Scripts {
         )];
         self.worst = Duration::ZERO;
         self.skipped = 0;
-        for r in self.host.resources_mut() {
+        let off: Vec<bool> = (0..self.host.resources().len())
+            .map(|i| self.host.is_off(i))
+            .collect();
+        for (r, off) in self.host.resources_mut().iter_mut().zip(off) {
             let s = r.stats();
             let mut line = format!(
-                "  {}: {} calls, {:.2?} busy, slowest {:.2?}, {} KiB, errors: {} deadline {} memory {} script, \
+                "  {}{}: {} calls, {:.2?} busy, slowest {:.2?}, {} KiB, errors: {} deadline {} memory {} script, \
                  skipped {}",
                 r.name(),
+                if off { " (off)" } else { "" },
                 s.calls,
                 s.busy,
                 s.slowest,
