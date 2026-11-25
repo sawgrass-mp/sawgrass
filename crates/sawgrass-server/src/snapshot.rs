@@ -17,6 +17,21 @@ use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
 
+/// Most entities in one player's snapshot (`docs/architecture.md`: "about 100–150 nearby, by priority"). When
+/// more are visible, the nearest are sent, and one already sent counts as [`KEEP_FACTOR`] times nearer, so an
+/// entity at the edge of the cut does not flicker in and out (IM-6).
+pub const SNAPSHOT_LIMIT: usize = 128;
+
+/// How much nearer an entity already in the last snapshot counts when the visible set is cut: 0.7 of its squared
+/// distance, so it stays until a newcomer is about 16% nearer than it.
+pub const KEEP_FACTOR: f32 = 0.7;
+
+/// How often a player's cut is ranked again, in ticks, when more is visible than [`SNAPSHOT_LIMIT`]. In between,
+/// the entities of its last snapshot that are still visible are sent again; players are spread over the ticks by
+/// slot. Ranking is a third of a crowded player's snapshot cost, and an entity entering a full view waits at most
+/// this many ticks.
+pub const RANK_EVERY: usize = 4;
+
 /// Ticks of history kept for baselines: 0.8 s at 20 Hz, several round trips.
 pub const HISTORY_TICKS: usize = 16;
 
@@ -60,6 +75,16 @@ pub struct View {
     /// The slots sent in each of the last ticks, with the tick.
     sent: Vec<(Option<u32>, Vec<u32>)>,
     states: Vec<EntityState>,
+    /// The slots of the last snapshot, one bit each, for the cut's hysteresis.
+    kept: Vec<u64>,
+    /// This build's candidates for the cut, in slot order: ranking key and slot.
+    ranked: Vec<(f32, u32)>,
+    /// The slots chosen for this snapshot, ascending.
+    chosen: Vec<u32>,
+    /// Scratch for finding the cut's threshold.
+    keys: Vec<f32>,
+    /// The tick of the last snapshot built.
+    last: Option<u32>,
     base: Vec<EntityState>,
     encoder: DeltaEncoder,
     payload: Vec<u8>,
@@ -82,6 +107,14 @@ impl View {
         &self.visible
     }
 
+    /// The slots in the last snapshot built, ascending.
+    #[must_use]
+    pub fn sent(&self) -> &[u32] {
+        self.last
+            .and_then(|t| self.sent.get(t as usize % HISTORY_TICKS))
+            .map_or(&[], |(_, slots)| slots)
+    }
+
     /// The datagrams of the last build, to be sent in order. Drained by the caller.
     pub fn out(&mut self) -> std::vec::Drain<'_, Bytes> {
         self.out.drain(..)
@@ -90,7 +123,7 @@ impl View {
     /// Recomputes the visible set of the player in slot `me` and encodes its snapshot for `tick`, whose states
     /// `history` must hold, against `ack`, the newest tick the client decoded (0 for none). Writes at least one
     /// datagram, since an empty snapshot still tells the client the tick advanced; nothing for a player not placed
-    /// yet. At most [`MAX_ENTITIES`] entities are sent, the lowest slots first.
+    /// yet. At most [`SNAPSHOT_LIMIT`] entities are sent, the nearest, with hysteresis.
     pub fn build(
         &mut self,
         me: usize,
@@ -115,17 +148,39 @@ impl View {
             config,
             &mut self.changes,
         );
+        let limit = SNAPSHOT_LIMIT.min(MAX_ENTITIES);
+        self.chosen.clear();
+        let previous = self.last.and_then(|t| self.sent.get(t as usize % HISTORY_TICKS));
+        if self.visible.len() <= limit {
+            // Everything visible fits: no ranking.
+            self.chosen.extend(self.visible.members().iter().map(|id| id.0));
+        } else if let Some((_, slots)) = previous.filter(|_| (tick as usize + me) % RANK_EVERY != 0) {
+            // Between rankings the cut stays: the entities of the last snapshot that are still visible.
+            let visible = &self.visible;
+            self.chosen
+                .extend(slots.iter().copied().filter(|&s| visible.contains(EntityId(s))));
+        } else {
+            self.rank(states, own, limit);
+        }
+        self.kept.iter_mut().for_each(|w| *w = 0);
         self.sent.resize_with(HISTORY_TICKS, Default::default);
         let slot = &mut self.sent[tick as usize % HISTORY_TICKS];
         slot.0 = Some(tick);
         slot.1.clear();
         self.states.clear();
-        for id in self.visible.members().iter().take(MAX_ENTITIES) {
-            if let Some(state) = states.get(id.0 as usize).copied().flatten() {
-                slot.1.push(id.0);
-                self.states.push(state);
+        for &id in &self.chosen {
+            let Some(state) = states.get(id as usize).copied().flatten() else {
+                continue;
+            };
+            let word = id as usize / 64;
+            if self.kept.len() <= word {
+                self.kept.resize(word + 1, 0);
             }
+            self.kept[word] |= 1 << (id % 64);
+            slot.1.push(id);
+            self.states.push(state);
         }
+        self.last = Some(tick);
         // Slots ascend, and so do wire ids (slot index in the high bits): the order the encoder needs.
         let base = baseline(&self.sent, history, tick, ack, &mut self.base);
         self.payload.clear();
@@ -157,6 +212,45 @@ impl View {
             self.lens.push(PacketHeader::SIZE + 1 + part.len());
         }
         cut_datagrams(&self.packet, &self.lens, &mut self.out);
+    }
+
+    /// Chooses the `limit` nearest visible entities into `chosen`, in slot order. One in the last snapshot counts as
+    /// [`KEEP_FACTOR`] times nearer. Ties at the cut go to the lowest slots, so the result does not depend on how
+    /// the candidates are ordered.
+    fn rank(&mut self, states: &[Option<EntityState>], own: EntityState, limit: usize) {
+        let own_cm = own.position.cm().map(|c| c as f32);
+        self.ranked.clear();
+        for id in self.visible.members() {
+            let Some(state) = states.get(id.0 as usize).copied().flatten() else {
+                continue;
+            };
+            let cm = state.position.cm();
+            let (dx, dy) = (cm[0] as f32 - own_cm[0], cm[1] as f32 - own_cm[1]);
+            let kept = self
+                .kept
+                .get(id.0 as usize / 64)
+                .is_some_and(|w| w & (1 << (id.0 % 64)) != 0);
+            self.ranked
+                .push(((dx * dx + dy * dy) * if kept { KEEP_FACTOR } else { 1.0 }, id.0));
+        }
+        if self.ranked.len() <= limit {
+            self.chosen.extend(self.ranked.iter().map(|r| r.1));
+            return;
+        }
+        // Find the key of the last one that makes the cut; everything below it goes, and of those equal to it the
+        // lowest slots. The candidates stay in slot order, so nothing is sorted.
+        self.keys.clear();
+        self.keys.extend(self.ranked.iter().map(|r| r.0));
+        let (_, &mut threshold, _) = self.keys.select_nth_unstable_by(limit - 1, f32::total_cmp);
+        let mut ties = limit - self.ranked.iter().filter(|r| r.0 < threshold).count();
+        for &(key, id) in &self.ranked {
+            if key < threshold || (key == threshold && ties > 0) {
+                if key == threshold {
+                    ties -= 1;
+                }
+                self.chosen.push(id);
+            }
+        }
     }
 }
 
@@ -361,12 +455,7 @@ mod tests {
             let mut out = Vec::new();
             decode_delta(&payload, tick, base, &mut out).expect("decode");
             let states = crowd.history.at(tick).expect("states");
-            let expected: Vec<EntityState> = view
-                .visible()
-                .members()
-                .iter()
-                .filter_map(|id| states[id.0 as usize])
-                .collect();
+            let expected: Vec<EntityState> = view.sent().iter().filter_map(|&s| states[s as usize]).collect();
             assert_eq!(out, expected, "tick {tick}");
             assert!(!out.iter().any(|s| s.id == 7));
             decoded[tick as usize % HISTORY_TICKS] = Some((tick, out));
@@ -378,6 +467,46 @@ mod tests {
             delta_bytes * 3 < whole_bytes,
             "delta {delta_bytes} B, whole {whole_bytes} B"
         );
+    }
+
+    /// More visible than the limit: the nearest are sent; one already sent stays until a newcomer is clearly nearer.
+    #[test]
+    fn the_cut_sends_the_nearest_and_does_not_flicker() {
+        let mut grid = DenseGrid::default();
+        let mut history = History::new();
+        let config = VisibilityConfig::default();
+        let mut view = View::new();
+        // The viewer in slot 0 at the origin, others 1 m apart from 1 m out.
+        let others = SNAPSHOT_LIMIT + 1;
+        let place = |grid: &mut DenseGrid, history: &mut History, tick: u32, far: f32| {
+            let mut states = vec![Some(state(0, [0.0, 0.0]))];
+            grid.upsert(EntityId(0), Point::new(0.0, 0.0));
+            for i in 1..=others {
+                let x = if i == others { far } else { i as f32 };
+                grid.upsert(EntityId(i as u32), Point::new(x, 0.0));
+                states.push(Some(state(i as u32, [x, 0.0])));
+            }
+            grid.rebuild();
+            history.record(tick, &states);
+        };
+        place(&mut grid, &mut history, 1, 150.0);
+        view.build(0, &grid, &history, &config, 1, 0);
+        let first: Vec<u32> = (1..=SNAPSHOT_LIMIT as u32).collect();
+        assert_eq!(view.sent(), &first[..]);
+        // The last one comes slightly nearer than the farthest sent: at the next ranking nothing changes.
+        let rank = RANK_EVERY as u32;
+        place(&mut grid, &mut history, rank, SNAPSHOT_LIMIT as f32 - 0.5);
+        view.build(0, &grid, &history, &config, rank, 0);
+        assert_eq!(view.sent(), &first[..]);
+        // Clearly nearer: it waits for the next ranking, then replaces the farthest.
+        place(&mut grid, &mut history, rank + 1, 100.5);
+        view.build(0, &grid, &history, &config, rank + 1, 0);
+        assert_eq!(view.sent(), &first[..]);
+        place(&mut grid, &mut history, 2 * rank, 100.5);
+        view.build(0, &grid, &history, &config, 2 * rank, 0);
+        let mut third: Vec<u32> = (1..SNAPSHOT_LIMIT as u32).collect();
+        third.push(others as u32);
+        assert_eq!(view.sent(), &third[..]);
     }
 
     #[test]
