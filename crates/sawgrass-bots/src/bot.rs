@@ -130,8 +130,9 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
-                // Bots simulate no vehicle until BOT-5.
-                Ok(ServerEvent::Ownership { .. }) | Err(_) => {}
+                // Bots simulate no vehicle until BOT-5, and an honest walker stays within the limits; a correction
+                // would show up in the server's counts.
+                Ok(ServerEvent::Ownership { .. } | ServerEvent::Corrected(_)) | Err(_) => {}
             }
         }
     });

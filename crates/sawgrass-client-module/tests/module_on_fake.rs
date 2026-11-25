@@ -275,3 +275,57 @@ fn stop_gives_the_runtime_back_with_every_failure() {
         "every other hook was still removed"
     );
 }
+
+/// Spawns entity 1, then on the next frame despawns it and spawns entity 2, which gets the same raw handle.
+struct Replace {
+    frames: u32,
+    events: Vec<CoreEvent>,
+}
+
+impl NetCore for Replace {
+    fn on_event(&mut self, event: &CoreEvent) {
+        self.events.push(event.clone());
+    }
+    fn on_frame(&mut self, _dt: f32, world: &mut World<'_>) {
+        match self.frames {
+            0 => world
+                .spawn(1, EntityKind::Vehicle, AssetId(5), pose(1.0))
+                .expect("spawned"),
+            1 => {
+                world.despawn(1).expect("despawned");
+                world
+                    .spawn(2, EntityKind::Vehicle, AssetId(5), pose(2.0))
+                    .expect("spawned");
+            }
+            _ => {}
+        }
+        self.frames += 1;
+    }
+}
+
+#[test]
+fn a_late_event_about_a_reused_handle_does_not_reach_the_new_entity() {
+    let mut module = Module::start(runtime(), &functions(), assets(BUILD_KEY)).expect("started");
+    let mut game = ReentrantGame {
+        inner: FakeGame::default(),
+        hooks: module.event_sink(),
+    };
+    let mut core = Replace {
+        frames: 0,
+        events: Vec::new(),
+    };
+    for _ in 0..3 {
+        module.frame(0.016, &mut game, &mut core).expect("frame");
+    }
+    let second = module.entities().handle(2).expect("entity 2 bound");
+    assert_eq!(second.generation, 2, "the raw handle of entity 1 was reused");
+    assert!(
+        game.inner.entities.contains_key(&second),
+        "entity 2 is neither removed as ambient nor lost"
+    );
+    assert!(
+        core.events.is_empty(),
+        "the removal of entity 1 is not reported as a loss of entity 2"
+    );
+    assert_eq!(module.ambient_removed, 0);
+}

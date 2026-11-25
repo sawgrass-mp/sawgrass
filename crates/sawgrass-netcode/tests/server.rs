@@ -12,8 +12,10 @@ use sawgrass_bots::walker::Area;
 use sawgrass_bots::{BotConfig, Joined, run};
 use sawgrass_gateway::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sawgrass_gateway::{Gateway, RootCertStore, connect};
-use sawgrass_netcode::interp::Sample;
+use sawgrass_netcode::interp::{Event, Sample};
+use sawgrass_netcode::local::Correction;
 use sawgrass_netcode::{Client, ClientConfig, Pose};
+use sawgrass_protocol::entity::EntityKind;
 use sawgrass_protocol::game::ServerEvent;
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader};
 use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState};
@@ -145,6 +147,7 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
     let mut shown: Vec<(f64, [f32; 3])> = Vec::new();
     let mut out: Vec<Sample> = Vec::new();
     let mut frame_count = 0usize;
+    let mut appeared = 0usize;
     while Instant::now() < stop {
         frames.tick().await;
         let now = start.elapsed().as_secs_f64();
@@ -154,7 +157,15 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
         client.remote(now, &mut out);
         if let (Some(render), Some(s)) = (client.render_tick(), out.iter().find(|s| s.id == bot.entity)) {
             shown.push((render, s.pose.position));
+            if s.event == Some(Event::Appeared) {
+                appeared += 1;
+            }
+            assert_eq!(s.info.kind, EntityKind::Player);
         }
+        assert!(
+            !client.removed().contains(&bot.entity),
+            "the bot never left the view"
+        );
         if client.clock().synced() {
             frame_count += 1;
         }
@@ -198,6 +209,7 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
         client.clock().jitter_secs() * 1000.0,
     );
     assert!(errors.len() > 100, "compared {} frames", errors.len());
+    assert_eq!(appeared, 1, "the bot is spawned once");
     // The bot was shown in almost every frame once the clock had a snapshot.
     assert!(
         shown.len() * 10 >= frame_count * 9,
@@ -206,4 +218,88 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
     );
     assert!(p50 < 0.05, "p50 {p50}");
     assert!(p95 < 0.30, "p95 {p95}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_move_is_corrected_back_to_where_the_server_holds_the_player() {
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    let mut players = net::listen(gateway, ListenConfig::default());
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let stop = Instant::now() + Duration::from_secs(4);
+    let ticks = std::thread::spawn(move || {
+        tick_loop
+            .run(|_| {
+                if std::time::Instant::now() < stop.into_std() {
+                    std::ops::ControlFlow::Continue(())
+                } else {
+                    std::ops::ControlFlow::Break(())
+                }
+            })
+            .expect("no system panicked");
+    });
+
+    let session = connect(addr, "localhost", roots, PROTOCOL_VERSION)
+        .await
+        .expect("connect");
+    let (datagrams, _events_out, mut events) = session.split();
+    let (entity, tick_hz) = loop {
+        let (_, event) = events.recv().await.expect("event");
+        if let Ok(ServerEvent::Joined { entity, tick_hz }) = ServerEvent::decode(&event[PacketHeader::SIZE..])
+        {
+            break (entity, tick_hz);
+        }
+    };
+    let mut client = Client::new(entity, tick_hz, ClientConfig::default());
+    let start = std::time::Instant::now();
+    let now = || start.elapsed().as_secs_f64();
+    // Events are read on their own task, as a game module would, and handed over each frame.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let reader = tokio::spawn(async move {
+        while let Ok((_, event)) = events.recv().await {
+            if event_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Stand at the spawn point for half a second, so the server accepts it, then jump 1 km in one frame, as a
+    // game teleport the server was not told about would.
+    let mut pose = Pose::at([0.0, 0.0, 30.0]);
+    let mut frames = tokio::time::interval(Duration::from_secs(1) / 60);
+    let mut correction = None;
+    while Instant::now() < stop && correction.is_none() {
+        frames.tick().await;
+        if now() > 0.5 {
+            pose = Pose::at([1000.0, 0.0, 30.0]);
+        }
+        if let Some(packet) = client.outgoing(now(), &pose) {
+            let _ = datagrams.send(Bytes::from(packet));
+        }
+        while let Ok(event) = event_rx.try_recv() {
+            if let Ok(ServerEvent::Corrected(state)) = ServerEvent::decode(&event[PacketHeader::SIZE..]) {
+                correction = client.corrected(&state, &pose);
+            }
+        }
+    }
+    reader.abort();
+    datagrams.close();
+    tokio::task::spawn_blocking(move || ticks.join().expect("tick thread"))
+        .await
+        .expect("join");
+
+    // 1 km is past the snap distance: the game module puts the player back where the server held it.
+    match correction {
+        Some(Correction::Snap(back)) => {
+            assert!(
+                back.position
+                    .iter()
+                    .zip([0.0, 0.0, 30.0])
+                    .all(|(a, b)| (a - b).abs() < 0.01),
+                "{back:?}"
+            );
+        }
+        other => panic!("expected a snap back, got {other:?}"),
+    }
 }

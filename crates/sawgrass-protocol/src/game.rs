@@ -300,6 +300,7 @@ const JOINED: u8 = 1;
 const STATS: u8 = 2;
 // 3 is taken by DB-8 (#162).
 const OWNERSHIP: u8 = 4;
+const CORRECTED: u8 = 5;
 const REQUEST_STATS: u8 = 128;
 
 /// An event from the server.
@@ -325,6 +326,10 @@ pub enum ServerEvent {
         /// Whether this client is its owner now.
         yours: bool,
     },
+    /// The server refused a state the client sent for this entity (its own player, or an entity it simulates)
+    /// and holds it here: the last state it accepted. The client moves the entity back. Sent only to the
+    /// entity's current owner, at most every few hundred milliseconds per entity.
+    Corrected(EntityState),
 }
 
 impl ServerEvent {
@@ -358,6 +363,13 @@ impl ServerEvent {
                 out.extend_from_slice(&entity.to_le_bytes());
                 out.push(*epoch);
                 out.push(u8::from(*yours));
+            }
+            Self::Corrected(state) => {
+                out.push(CORRECTED);
+                let mut buf = [0; EntityState::SIZE];
+                // The buffer is exactly one state long, so encoding cannot fail.
+                let _ = state.encode(&mut buf);
+                out.extend_from_slice(&buf);
             }
         }
     }
@@ -413,6 +425,11 @@ impl ServerEvent {
                     epoch,
                     yours: yours == 1,
                 })
+            }
+            CORRECTED => {
+                let (state, rest) = EntityState::decode(r.input)?;
+                r.input = rest;
+                Ok(Self::Corrected(state))
             }
             other => Err(DecodeError::UnknownEvent(other)),
         }?;

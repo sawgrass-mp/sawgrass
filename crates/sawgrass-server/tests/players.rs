@@ -2,7 +2,7 @@
 //! says it is, and sends each a snapshot with the other. A flood of states costs one slot, not a queue, and
 //! connections beyond the player cap are refused. Each connection is held to its rates: states beyond them are
 //! dropped, a sustained flood or an undecodable event closes the connection, and one address gets only so many
-//! connections. A client that teleports stays where it was.
+//! connections. A client that teleports stays where it was, and is told so.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -513,6 +513,29 @@ fn a_teleport_is_refused_and_counted() {
             >= 5
     };
     assert!(tick_until(&mut tick_loop, refused));
+    // The client is told where the server holds it, once for a burst of refusals well under the correction
+    // interval.
+    let (_, packet) = runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(2), client.recv_event()).await })
+        .expect("a correction in time")
+        .expect("event");
+    match ServerEvent::decode(&packet[PacketHeader::SIZE..]) {
+        Ok(ServerEvent::Corrected(state)) => {
+            assert_eq!(state.id, id);
+            assert_eq!(state.position.to_metres(), [10.0, 5.0, 30.0]);
+        }
+        other => panic!("expected Corrected, got {other:?}"),
+    }
+    assert_eq!(traffic.corrections.load(Ordering::Relaxed), 1);
+    // Refusals keep coming for 600 ms: one more correction per 250 ms at most.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(600) {
+        let _ = client.send_datagram(jump.clone());
+        tick_loop.run_tick();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let sent = traffic.corrections.load(Ordering::Relaxed);
+    assert!((2..=4).contains(&sent), "{sent} corrections");
     // A step it could have walked is taken.
     let step = state_packet(12.0);
     assert!(tick_until(&mut tick_loop, |t| {
