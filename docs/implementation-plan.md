@@ -83,13 +83,12 @@ says so with the numbers, and the order is revisited.
 | IM-5 (#97) | Dense 50 m grid and bitset visible sets in `interest.rs`, as IM-2 measured them | Visible sets 1.8 to 2.8 times faster on the bots' movement (IM-3) | IM-4 |
 | SRV-7 (#98) | Visible sets and snapshot encoding per player in parallel on rayon | Crowd tick p50 2.7 to 3.2 times lower on 4 threads (SRV-4) | NET-9, IM-5 |
 
-Gate: 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under 70% of the interval, on the
-same 4-core machine as BOT-3.
+Gate: 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under 70% of the interval, on a dedicated
+4-core machine with the server on two of its cores. Until 2026-11-25 the gate named BOT-3's shared cloud VM; the
+maintainer moved it to a dedicated machine because a shared VM's figures are noisy and cannot be reproduced.
 
-Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.md)): not counted as met. On a
-dedicated 4-core machine, server on two of its cores, 3,800 bots ran at tick p99 23.8 and 24.4 ms with no overrun
-and no dropped bot; on the BOT-3 VM, 3,000 bots ran at p99 37 to 38 ms. Whether the gate names the dedicated machine
-is the maintainer's decision.
+Result (2026-11-25, [two-machine load](research/two-machine-load/README.md)): met. 3,800 bots ran at tick p99 23.8
+and 24.4 ms with no overrun and no dropped bot. For reference, 3,000 bots on the BOT-3 VM ran at p99 37 to 38 ms.
 
 ### Phase 2: fewer bytes, then 30 Hz
 

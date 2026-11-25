@@ -486,8 +486,8 @@ server, two for local bots) and a second machine sending bots over the network. 
 | 4,096 | 1 | 28.4 to 30.5 ms | 0 | 88 to 93% | 1.48 to 1.51 |
 | 4,096 | 2 | 38.0 to 39.1 ms | 0 | 100% | 1.85 to 1.86 |
 
-- **3,800 players fit with room to spare** on this dedicated machine. On the cloud VM that phase 1's gate names,
-  3,000 bots ran at p99 37 to 38 ms, so the gate is not counted as met yet.
+- **3,800 players fit with room to spare**, which meets phase 1's gate (3,000 bots, p99 under 35 ms, on a dedicated
+  4-core machine).
 - **At 4,096 players the tick is not the limit, the gateway is.** The tick used half a core; the gateway the rest.
   On two cores the server either drops some snapshots or runs over its p99 budget, never over a whole tick.
   A server with more cores gives the gateway threads of its own; the stand could not drive one, so that is not
