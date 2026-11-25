@@ -27,7 +27,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// entities a client simulates after its own ([`game::OwnedState`]). Version 7 adds
 /// [`game::ServerEvent::Corrected`], the server's answer to a refused state.
 /// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]).
-pub const PROTOCOL_VERSION: u32 = 8;
+/// Version 9 is DB-8's (#162). Version 10 adds the seat requests ([`game::ClientEvent::EnterSeat`],
+/// [`game::ClientEvent::LeaveSeat`]).
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///

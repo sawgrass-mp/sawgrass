@@ -523,4 +523,24 @@ mod game_payloads {
         assert_eq!(ServerEvent::decode(&out), Err(DecodeError::UnknownEvent(128)));
         assert_eq!(ClientEvent::decode(&[1]), Err(DecodeError::UnknownEvent(1)));
     }
+
+    #[test]
+    fn seat_requests_round_trip_and_reject_bad_lengths() {
+        let enter = ClientEvent::EnterSeat {
+            vehicle: 0x0102_0304,
+            seat: 2,
+        };
+        for event in [enter, ClientEvent::LeaveSeat] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(ClientEvent::decode(&out), Ok(event));
+            let mut longer = out.clone();
+            longer.push(0);
+            assert_eq!(ClientEvent::decode(&longer), Err(DecodeError::TrailingBytes));
+        }
+        let mut out = Vec::new();
+        enter.encode(&mut out);
+        assert_eq!(out, [130, 4, 3, 2, 1, 2]);
+        assert_eq!(ClientEvent::decode(&out[..5]), Err(DecodeError::Truncated));
+    }
 }
