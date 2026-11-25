@@ -81,6 +81,11 @@ pub struct PlayerState(pub ClientState);
 /// `Stats` every few seconds, so a client that reads its stream never comes near it.
 const EVENT_QUEUE: usize = 16;
 
+/// Shortest time between two [`ServerEvent::Corrected`] for one entity. A client keeps sending refused states
+/// until the correction reaches it, one round trip later; one correction per round trip is enough, and the
+/// limit keeps a cheating client from filling its own event queue with them.
+const CORRECTION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Ticks of snapshots that may wait for the gateway's send task before a tick's snapshots are dropped.
 const OUTBOX_TICKS: usize = 2;
 
@@ -176,6 +181,8 @@ pub struct Traffic {
     pub refused_speed: AtomicU64,
     /// Client states refused as a move too long for the time since the last accepted one.
     pub refused_teleport: AtomicU64,
+    /// [`ServerEvent::Corrected`] events queued to clients after a refused state.
+    pub corrections: AtomicU64,
 }
 
 /// The address a connection counts against: an IPv4 address, or the /64 network of an IPv6 one, since one IPv6 host
@@ -487,6 +494,8 @@ struct Player {
     inbox: Arc<Inbox>,
     view: View,
     movement: Movement,
+    /// When this player's entity was last sent a [`ServerEvent::Corrected`].
+    corrected_at: Option<std::time::Instant>,
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
@@ -693,6 +702,7 @@ impl Players {
                         inbox,
                         view: View::new(),
                         movement: Movement::new(),
+                        corrected_at: None,
                     });
                 }
                 Inbound::Leave { id } => {
@@ -715,7 +725,8 @@ impl Players {
     }
 
     /// Takes each player's latest state, if a new one arrived and passes the movement checks, into the world, the
-    /// grid and the wire states. A refused state is counted and dropped: the player stays where it was.
+    /// grid and the wire states. A refused state is counted and dropped: the player stays where it was, and the
+    /// client is told where that is ([`ServerEvent::Corrected`], at most every [`CORRECTION_INTERVAL`]).
     fn apply_states(&mut self, world: &mut World, tick: u32) {
         let rules = &self.movement;
         let now = std::time::Instant::now();
@@ -730,6 +741,18 @@ impl Players {
                     Violation::Teleport => &self.traffic.refused_teleport,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
+                // Nothing to send before the first accepted state: the player is not in the world yet.
+                let held = self.states.get(player.slot.index as usize).copied().flatten();
+                let due = player
+                    .corrected_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= CORRECTION_INTERVAL);
+                if let (Some(held), true) = (held, due) {
+                    player.corrected_at = Some(now);
+                    let packet = event_packet(&ServerEvent::Corrected(held), u64::from(tick));
+                    if player.events.try_send(packet).is_ok() {
+                        self.traffic.corrections.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 continue;
             }
             let id = player.slot.wire_id();

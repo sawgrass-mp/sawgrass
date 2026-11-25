@@ -1,7 +1,7 @@
 //! The four parts together, behind the calls a game module (or a bot) makes.
 
 use sawgrass_protocol::game::ClientState;
-use sawgrass_protocol::{PacketHeader, PacketKind};
+use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 
 use crate::Pose;
 use crate::clock::{ClockConfig, ServerClock};
@@ -23,7 +23,8 @@ pub struct ClientConfig {
 /// The network state of one connected client.
 ///
 /// Each frame the game module passes the datagrams that arrived to [`Client::receive`], asks
-/// [`Client::remote`] where to show remote entities, applies [`Client::frame`]'s correction offset to the local
+/// [`Client::remote`] where to show remote entities (spawning those whose sample says
+/// [`Event::Appeared`](crate::interp::Event::Appeared) and removing those in [`Client::removed`]), applies [`Client::frame`]'s correction offset to the local
 /// player, and sends what [`Client::outgoing`] returns.
 #[derive(Debug)]
 pub struct Client {
@@ -72,10 +73,11 @@ impl Client {
     /// Takes one datagram from the server that arrived at local time `now`, in seconds. Returns the tick of the
     /// snapshot it completed.
     pub fn receive(&mut self, datagram: &[u8], now: f64) -> Result<u32, Skipped> {
-        let (tick, states) = self.receiver.push(datagram)?;
-        self.clock.observe(tick, now);
-        self.interp.insert(tick, states, Some(self.entity));
-        Ok(tick)
+        let snapshot = self.receiver.push(datagram)?;
+        self.clock.observe(snapshot.tick, now);
+        self.interp
+            .insert(snapshot.tick, snapshot.states, snapshot.infos, Some(self.entity));
+        Ok(snapshot.tick)
     }
 
     /// Writes the remote entities to show at local time `now` into `out`, cleared first, ascending by id. Empty
@@ -88,6 +90,13 @@ impl Client {
         }
     }
 
+    /// The remote entities that stopped being shown in the last [`Client::remote`] call, ascending: remove them from
+    /// the game.
+    #[must_use]
+    pub fn removed(&self) -> &[u32] {
+        self.interp.removed()
+    }
+
     /// The render tick of the last [`Client::remote`] call.
     #[must_use]
     pub fn render_tick(&self) -> Option<f64> {
@@ -95,11 +104,15 @@ impl Client {
     }
 
     /// Takes where the server holds the local player while the game has it at `current`.
-    ///
-    /// The server does not report this yet: it refuses a bad move silently and keeps the player where it was last
-    /// accepted. Until it sends that position this is called by nobody but tests; the follow-up task adds the event.
     pub fn correct(&mut self, current: &Pose, server: &Pose) -> Correction {
         self.local.correct(current, server)
+    }
+
+    /// Takes the state of a [`ServerEvent::Corrected`](sawgrass_protocol::game::ServerEvent::Corrected), the
+    /// server's answer to a refused state, while the game has the local player at `current`. `None` if the event is
+    /// for another entity: one this client simulates (a vehicle, an NPC), which the game module moves back itself.
+    pub fn corrected(&mut self, state: &EntityState, current: &Pose) -> Option<Correction> {
+        (state.id == self.entity).then(|| self.local.correct(current, &Pose::from_state(state)))
     }
 
     /// The offset to move the local player by this frame, `dt` seconds after the last, while a correction is being

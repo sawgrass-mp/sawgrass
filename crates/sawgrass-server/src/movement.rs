@@ -3,7 +3,8 @@
 //! Clients simulate their own movement (`docs/architecture.md`, "Authority"), so every state a client sends is a
 //! claim. [`Movement::check`] refuses a state outside the map, one faster than the speed limit, and a move longer
 //! than the player could have covered since its last accepted state. A refused state is not applied: the player
-//! stays where it last was, for everyone, and the refusal is counted by kind for admins.
+//! stays where it last was, for everyone, and the refusal is counted by kind for admins. The client is sent that
+//! last accepted state (`ServerEvent::Corrected`, from `net`) so it moves its player back.
 //!
 //! A move may be as long as the speed limit times the wall-clock time since the last accepted state, plus a
 //! slack for states that arrive bunched by network jitter. The slack is a purse of at most
