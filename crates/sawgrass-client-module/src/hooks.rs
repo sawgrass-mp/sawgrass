@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::game::{CameraPose, EntityKind, GameAsset, GameHandle, InputState};
+use crate::game::{CameraPose, EntityKind, GameAsset, GameHandle, GameShot, InputState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HookPoint {
@@ -30,10 +30,15 @@ pub enum HookPoint {
     CameraUpdate,
     /// Where the game decides what to stream in, so that the world loads around remote players too.
     StreamingUpdate,
+    /// Where the game resolves one pull of a trigger and what it hit, reported as [`GameEvent::Shot`].
+    ///
+    /// ASSUMPTION: one function sees the shooter, the weapon and every hit of the shot, a shotgun's pellets
+    /// included. If the hits come one by one, the adapter gathers them per shot before it pushes the event.
+    WeaponFire,
 }
 
 impl HookPoint {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Frame,
         Self::PedCreate,
         Self::PedRemove,
@@ -44,6 +49,7 @@ impl HookPoint {
         Self::InputPoll,
         Self::CameraUpdate,
         Self::StreamingUpdate,
+        Self::WeaponFire,
     ];
 
     /// The function table name of the hooked function.
@@ -59,6 +65,7 @@ impl HookPoint {
             Self::InputPoll => "input_poll",
             Self::CameraUpdate => "camera_update",
             Self::StreamingUpdate => "streaming_update",
+            Self::WeaponFire => "weapon_fire",
         }
     }
 }
@@ -77,6 +84,8 @@ pub enum GameEvent {
     },
     Input(InputState),
     Camera(CameraPose),
+    /// A ped fired once. Only the local player's shots are reported to the server.
+    Shot(GameShot),
 }
 
 /// Where hooks queue events. Cloning gives another handle to the same queue.

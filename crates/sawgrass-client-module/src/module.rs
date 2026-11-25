@@ -7,7 +7,9 @@ use std::fmt;
 
 use crate::assets::{AssetId, AssetTable};
 use crate::entity_pool::{BindError, EntityPool, NetId};
-use crate::game::{CameraPose, EntityKind, GameApi, GameError, InputState, Pose, SinglePlayerSystem};
+use crate::game::{
+    CameraPose, EntityKind, GameApi, GameError, GameShot, InputState, Pose, SinglePlayerSystem, Zone,
+};
 use crate::hooks::{EventSink, GameEvent, HookPoint};
 use crate::runtime::{HookHandle, HookRequest, Runtime, RuntimeError};
 use crate::table::{FunctionTable, ResolveError, ResolvedFunctions};
@@ -20,6 +22,25 @@ pub enum CoreEvent {
     /// The game removed an entity the server owns (streamed out, destroyed). The core decides whether to spawn it
     /// again.
     EntityLost(NetId),
+    /// The local player fired once.
+    Shot(ShotReport),
+}
+
+/// One of the local player's shots, in server ids and protocol asset ids.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShotReport {
+    pub weapon: AssetId,
+    pub from: [f32; 3],
+    /// The hits on entities the server knows; hits on anything else (the map, a prop) are left out.
+    pub hits: Vec<ShotHit>,
+}
+
+/// One hit of a [`ShotReport`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotHit {
+    pub target: NetId,
+    pub zone: Zone,
+    pub point: [f32; 3],
 }
 
 /// The network core's side of the module.
@@ -95,6 +116,16 @@ impl World<'_> {
         self.game.pose(self.game.local_player()?)
     }
 
+    /// The weapon in the local player's hand, [`AssetId::NONE`] when unarmed or when the asset table does not
+    /// name it (the server then takes the player as unarmed).
+    pub fn local_player_weapon(&self) -> AssetId {
+        self.game
+            .local_player()
+            .and_then(|ped| self.game.held_weapon(ped))
+            .and_then(|weapon| self.assets.asset_id(weapon))
+            .unwrap_or(AssetId::NONE)
+    }
+
     /// Moves the local player, to apply a correction from the server.
     pub fn set_local_player_pose(&mut self, pose: Pose) -> Result<(), WorldError> {
         let handle = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
@@ -148,6 +179,9 @@ pub struct Module<R: Runtime> {
     pool: EntityPool,
     events: EventSink,
     single_player_off: bool,
+    /// The local player's shots not reported: their weapon is not in the asset table, so the server could not
+    /// check them.
+    pub shots_dropped: u64,
     /// Peds and vehicles the game made by itself and the module removed. Entities that were already gone when the
     /// frame got to them (one of ours spawned and despawned within a frame, say) are not counted.
     pub ambient_removed: u64,
@@ -191,6 +225,7 @@ impl<R: Runtime> Module<R> {
             events: EventSink::default(),
             single_player_off: false,
             ambient_removed: 0,
+            shots_dropped: 0,
         })
     }
 
@@ -262,6 +297,14 @@ impl<R: Runtime> Module<R> {
                 }
                 GameEvent::Input(input) => core.on_event(&CoreEvent::Input(input)),
                 GameEvent::Camera(camera) => core.on_event(&CoreEvent::Camera(camera)),
+                GameEvent::Shot(shot) if game.local_player() == Some(shot.shooter) => {
+                    match self.shot_report(&shot) {
+                        Some(report) => core.on_event(&CoreEvent::Shot(report)),
+                        None => self.shots_dropped += 1,
+                    }
+                }
+                // Other peds' shots are the server's to show, from their own clients' reports.
+                GameEvent::Shot(_) => {}
             }
         }
         let mut world = World {
@@ -271,6 +314,26 @@ impl<R: Runtime> Module<R> {
         };
         core.on_frame(dt, &mut world);
         Ok(())
+    }
+
+    fn shot_report(&self, shot: &GameShot) -> Option<ShotReport> {
+        let weapon = self.assets.asset_id(shot.weapon)?;
+        let hits = shot
+            .hits
+            .iter()
+            .filter_map(|hit| {
+                Some(ShotHit {
+                    target: self.pool.net_id(hit.target)?,
+                    zone: hit.zone,
+                    point: hit.point,
+                })
+            })
+            .collect();
+        Some(ShotReport {
+            weapon,
+            from: shot.from,
+            hits,
+        })
     }
 
     /// Removes every hook and gives the runtime back, with the hooks it could not remove, if any.
