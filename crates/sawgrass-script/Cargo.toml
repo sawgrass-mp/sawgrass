@@ -1,0 +1,22 @@
+[package]
+name = "sawgrass-script"
+description = "The Luau runtime for Sawgrass resources (ADR 0005)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Luau with native code generation, as ADR 0005 decides. mlua always builds Luau from its vendored sources.
+mlua = { version = "0.12", features = ["luau-jit"] }
+# Resource manifests (`resource.toml`), read as a plain table: serde without its derive macros.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+
+[[bench]]
+name = "events"
+harness = false
+
+[lints]
+workspace = true
