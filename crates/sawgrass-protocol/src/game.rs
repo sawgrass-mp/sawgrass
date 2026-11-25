@@ -298,6 +298,8 @@ impl ServerStats {
 /// Event codes. The values are part of the wire format.
 const JOINED: u8 = 1;
 const STATS: u8 = 2;
+// 3 is taken by DB-8 (#162).
+const OWNERSHIP: u8 = 4;
 const CORRECTED: u8 = 5;
 const REQUEST_STATS: u8 = 128;
 
@@ -314,6 +316,16 @@ pub enum ServerEvent {
     /// Server figures, sent periodically to clients that sent [`ClientEvent::RequestStats`] when the server
     /// allows it.
     Stats(ServerStats),
+    /// The client now simulates `entity` (`yours`), or no longer does (ADR 0006, section 4). Its
+    /// [`OwnedState`]s for the entity must carry `epoch`; the server drops any other.
+    Ownership {
+        /// The entity's id.
+        entity: u32,
+        /// The entity's epoch from now on.
+        epoch: u8,
+        /// Whether this client is its owner now.
+        yours: bool,
+    },
     /// The server refused a state the client sent for this entity (its own player, or an entity it simulates)
     /// and holds it here: the last state it accepted. The client moves the entity back. Sent only to the
     /// entity's current owner, at most every few hundred milliseconds per entity.
@@ -345,6 +357,12 @@ impl ServerEvent {
                 }
                 out.extend_from_slice(&s.sent_bytes_per_sec.to_le_bytes());
                 out.extend_from_slice(&s.received_bytes_per_sec.to_le_bytes());
+            }
+            Self::Ownership { entity, epoch, yours } => {
+                out.push(OWNERSHIP);
+                out.extend_from_slice(&entity.to_le_bytes());
+                out.push(*epoch);
+                out.push(u8::from(*yours));
             }
             Self::Corrected(state) => {
                 out.push(CORRECTED);
@@ -395,6 +413,18 @@ impl ServerEvent {
                     sent_bytes_per_sec: u64::from_le_bytes(r.array()?),
                     received_bytes_per_sec: u64::from_le_bytes(r.array()?),
                 }))
+            }
+            OWNERSHIP => {
+                let entity = u32::from_le_bytes(r.array()?);
+                let [epoch, yours] = r.array::<2>()?;
+                if yours > 1 {
+                    return Err(DecodeError::OutOfRange);
+                }
+                Ok(Self::Ownership {
+                    entity,
+                    epoch,
+                    yours: yours == 1,
+                })
             }
             CORRECTED => {
                 let (state, rest) = EntityState::decode(r.input)?;

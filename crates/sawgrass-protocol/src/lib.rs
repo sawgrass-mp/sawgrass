@@ -26,7 +26,8 @@ pub use quant::{Position, Rotation, Velocity};
 /// carry the player's ped block ([`ped`]). Version 6 adds the vehicle block ([`vehicle`]) and the states of the
 /// entities a client simulates after its own ([`game::OwnedState`]). Version 7 adds
 /// [`game::ServerEvent::Corrected`], the server's answer to a refused state.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]).
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///
