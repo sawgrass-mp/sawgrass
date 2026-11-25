@@ -85,6 +85,8 @@ def one_run(server_bin, preload, cert_dir, count, area, secs, seed):
             str(server_bin), "--listen", ADDR,
             "--cert", str(cert_dir / "cert.der"), "--key", str(cert_dir / "key.der"),
             "--stats-to-clients", "--net-threads", "1",
+            # Every bot connects from this machine's one address, and the server allows 16 per address (NET-12).
+            "--max-per-address", str(count),
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

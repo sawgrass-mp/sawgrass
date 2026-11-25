@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
-//!                 [--max-players N] [--max-per-address N] [--tick-threads N]
+//!                 [--max-players N] [--max-per-address N] [--max-handshakes N] [--tick-threads N]
 //!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]
 //! ```
 //!
@@ -18,6 +18,7 @@
 //! - `--max-players N`: refuse connections beyond N (default 4096).
 //! - `--max-per-address N`: refuse connections beyond N from one IP address (default 16); load tests that run
 //!   every bot from one machine raise it.
+//! - `--max-handshakes N`: refuse new handshakes while N are in progress (default 1024).
 //! - `--tick-threads N`: threads that build players' snapshots in parallel during a tick (default: the cores the
 //!   gateway does not get; 1 builds them on the tick thread).
 //!
@@ -58,6 +59,7 @@ struct Args {
     net_threads: Option<usize>,
     max_players: usize,
     max_per_address: usize,
+    max_handshakes: usize,
     tick_threads: Option<usize>,
     stats_to_clients: bool,
     resources: Option<PathBuf>,
@@ -74,6 +76,7 @@ fn parse_args() -> Result<Args, String> {
         net_threads: None,
         max_players: net::ListenConfig::default().max_players,
         max_per_address: net::ListenConfig::default().limits.max_per_address,
+        max_handshakes: net::ListenConfig::default().limits.max_handshakes,
         tick_threads: None,
         stats_to_clients: false,
         resources: None,
@@ -111,6 +114,11 @@ fn parse_args() -> Result<Args, String> {
                 args.max_per_address = value("--max-per-address")?
                     .parse()
                     .map_err(|e| format!("--max-per-address: {e}"))?;
+            }
+            "--max-handshakes" => {
+                args.max_handshakes = value("--max-handshakes")?
+                    .parse()
+                    .map_err(|e| format!("--max-handshakes: {e}"))?;
             }
             "--tick-threads" => {
                 let n: usize = value("--tick-threads")?
@@ -152,7 +160,8 @@ fn main() -> ExitCode {
             eprintln!("sawgrass-server: {err}");
             eprintln!(
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
-                 [--net-threads N] [--max-players N] [--max-per-address N] [--tick-threads N] \
+                 [--net-threads N] [--max-players N] [--max-per-address N] [--max-handshakes N] \
+                 [--tick-threads N] \
                  [--stats-to-clients] [--resources DIR [--script-budget-ms N]]"
             );
             return ExitCode::from(2);
@@ -203,6 +212,7 @@ fn main() -> ExitCode {
                             tick_threads,
                             limits: Limits {
                                 max_per_address: args.max_per_address,
+                                max_handshakes: args.max_handshakes,
                                 ..Limits::default()
                             },
                             ..net::ListenConfig::default()

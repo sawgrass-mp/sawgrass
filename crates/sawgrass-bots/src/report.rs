@@ -64,10 +64,11 @@ pub fn render(from: &Sample, to: &Sample, server: Option<&ServerStats>, ctx: &Co
     let connected = to.connected.saturating_sub(to.dropped);
     let _ = writeln!(
         out,
-        "bots {connected}/{} connected ({} failed, {} dropped), period {:.0} s ending at {:.0} s",
+        "bots {connected}/{} connected ({} failed, {} dropped), {} connect retries, period {:.0} s ending at {:.0} s",
         ctx.bots,
         to.failed,
         to.dropped,
+        to.connect_retries,
         elapsed,
         to.at.as_secs_f64()
     );
@@ -113,13 +114,14 @@ pub fn render(from: &Sample, to: &Sample, server: Option<&ServerStats>, ctx: &Co
     let datagrams = rate(to.received_datagrams, from.received_datagrams);
     let entities = rate(to.received_entities, from.received_entities);
     let ticks = rate(to.ticks_seen, from.ticks_seen);
+    let decoded = rate(to.decoded_ticks, from.decoded_ticks);
     let _ = writeln!(
         out,
         "bots: down {:.2} kB/s per bot in {:.1} datagrams/s, {:.1} ticks/s with a snapshot, {:.1} entities per tick; up {:.2} kB/s per bot",
         rate(to.received_bytes, from.received_bytes) / n / 1000.0,
         datagrams / n,
         ticks / n,
-        if ticks > 0.0 { entities / ticks } else { 0.0 },
+        if decoded > 0.0 { entities / decoded } else { 0.0 },
         rate(to.sent_bytes, from.sent_bytes) / n / 1000.0,
     );
 
