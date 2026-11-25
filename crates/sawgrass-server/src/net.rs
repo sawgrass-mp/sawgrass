@@ -47,8 +47,10 @@ use hecs::{Entity, World};
 use rayon::prelude::*;
 use sawgrass_gateway::{Datagrams, Gateway, Session};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+use sawgrass_protocol::game::OwnedState;
 use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
+use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -56,6 +58,7 @@ use crate::TickInfo;
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
 use crate::movement::{Movement, MovementRules, Violation};
+use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
@@ -96,10 +99,18 @@ struct Batch {
     packets: Vec<(u32, Bytes)>,
 }
 
+/// The latest client state of a player: its own state, ped block and the states of what it simulates.
+#[derive(Debug, Default)]
+struct Pending {
+    state: Option<ClientState>,
+    ped: Option<PedBlock>,
+    owned: Vec<OwnedState>,
+}
+
 /// What one player's connection tasks leave for the tick thread. Each field holds the latest value only.
 #[derive(Debug, Default)]
 struct Inbox {
-    state: Mutex<Option<(ClientState, Option<PedBlock>)>>,
+    state: Mutex<Option<Pending>>,
     wants_stats: AtomicBool,
     /// The newest snapshot tick the client decoded completely, from the tick field of its client states' headers
     /// (0: none). The server uses it as the delta baseline only if it sent that tick to this player.
@@ -166,6 +177,12 @@ pub struct Traffic {
     /// Ownership events not sent because the player's event queue was full: that client's view of what it owns
     /// is stale until the next change. Should stay 0.
     pub lost_owner_events: AtomicU64,
+    /// Owned-entity states dropped because the sender does not own the entity, or not with that epoch.
+    pub refused_owned_stale: AtomicU64,
+    /// Owned-entity states refused by the movement checks.
+    pub refused_owned_movement: AtomicU64,
+    /// Owned-entity states refused because the entity is beyond the keep radius of its owner.
+    pub refused_owned_far: AtomicU64,
     /// Connections closed for a sustained flood of datagrams or events.
     pub closed_floods: AtomicU64,
     /// Connections closed for an event that is not a known [`ClientEvent`].
@@ -321,6 +338,11 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         peds: Vec::new(),
         spawned: Vec::new(),
         ownership: Ownership::new(),
+        entity_moves: Vec::new(),
+        budgets: Vec::new(),
+        property: Vec::new(),
+        owned_by: Vec::new(),
+        owned_pool: Vec::new(),
         ownership_rules: OwnershipRules {
             cap: OWNERSHIP_CAP,
             ..OwnershipRules::default()
@@ -427,6 +449,7 @@ async fn serve(
         }
     });
     let mut bucket = Bucket::for_states(&limits, Instant::now());
+    let mut owned = Vec::new();
     while let Ok((header, packet)) = datagrams.recv().await {
         traffic
             .received_bytes
@@ -445,10 +468,14 @@ async fn serve(
         if header.kind != PacketKind::ClientState {
             continue;
         }
-        if let Ok(state) = ClientState::decode_with_ped(&packet[PacketHeader::SIZE..])
+        if let Ok((state, ped)) = ClientState::decode_with_owned(&packet[PacketHeader::SIZE..], &mut owned)
             && let Ok(mut slot) = inbox.state.lock()
         {
-            *slot = Some(state);
+            let pending = slot.get_or_insert_with(Pending::default);
+            pending.state = Some(state);
+            pending.ped = ped;
+            // The tick thread's list comes back here next time, so neither side allocates per datagram.
+            std::mem::swap(&mut pending.owned, &mut owned);
             // The newest acknowledgement wins: a reordered datagram does not move it back.
             inbox.ack.fetch_max(header.tick, Ordering::Relaxed);
         }
@@ -525,6 +552,14 @@ pub struct Players {
     spawned: Vec<bool>,
     /// Who simulates each spawned entity.
     ownership: Ownership,
+    /// Each spawned entity's movement checks, its owners' damage budget, and whether it belongs to a player as
+    /// property, by slot.
+    entity_moves: Vec<Movement>,
+    budgets: Vec<DamageBudget>,
+    property: Vec<bool>,
+    /// This tick's owned-entity states, by the player slot that sent them, and emptied lists to reuse.
+    owned_by: Vec<(u32, Vec<OwnedState>)>,
+    owned_pool: Vec<Vec<OwnedState>>,
     ownership_rules: OwnershipRules,
     /// This tick's changes of owner, to tell the players about.
     owner_changes: Vec<Change>,
@@ -602,15 +637,24 @@ impl Players {
             self.peds.resize(index + 1, PedBlock::default());
             self.infos.resize(index + 1, Info::PLAYER);
             self.info_ticks.resize(index + 1, 0);
+            self.entity_moves.resize_with(index + 1, Movement::new);
+            self.budgets.resize(index + 1, DamageBudget::default());
+            self.property.resize(index + 1, false);
         }
     }
 
     /// Spawns an entity that is not a player (a vehicle, an NPC or an object; ADR 0006) with its info and
     /// kinematics, and returns its id, which snapshots carry from the next tick on. `None` if `info` is a player's,
-    /// the position is outside the map, or every slot is taken. The server's scripts and admin commands spawn
+    /// the position is outside the map, the speed is above the limit, or every slot is taken. The server's scripts and admin commands spawn
     /// through this; who simulates the entity is decided by its ownership (SRV-14).
     pub fn spawn(&mut self, info: Info, state: ClientState) -> Option<u32> {
-        if info.kind == EntityKind::Player || !self.movement.contains(&state) {
+        // The spawn is the first accepted state, so an owner's first state is checked against it.
+        let mut moves = Movement::new();
+        if info.kind == EntityKind::Player
+            || moves
+                .check(&self.movement, &state, std::time::Instant::now())
+                .is_err()
+        {
             return None;
         }
         let [x, y, _] = state.position.to_metres();
@@ -630,6 +674,9 @@ impl Players {
         self.spawned.resize(self.spawned.len().max(index + 1), false);
         self.spawned[index] = true;
         self.ownership.track(slot.index);
+        self.entity_moves[index] = moves;
+        self.budgets[index] = DamageBudget::default();
+        self.property[index] = false;
         Some(id)
     }
 
@@ -652,6 +699,16 @@ impl Players {
         self.infos[index] = Info::PLAYER;
         self.grid.remove(EntityId(slot.index));
         self.slots.free(slot)
+    }
+
+    /// Marks a spawned vehicle as belonging to a player as property, or to nobody: an owner's damage values are
+    /// then ignored for it (ADR 0006, section 5). Returns `false` for an id that is not a spawned entity.
+    pub fn set_property(&mut self, id: u32, belongs_to_a_player: bool) -> bool {
+        if self.spawned(id).is_none() {
+            return false;
+        }
+        self.property[(id >> 16) as usize] = belongs_to_a_player;
+        true
     }
 
     /// The info and state of an entity [`Players::spawn`] made.
@@ -810,7 +867,18 @@ impl Players {
         let rules = &self.movement;
         let now = std::time::Instant::now();
         for player in self.players.iter_mut().flatten() {
-            let Some((state, ped)) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
+            let pool = &mut self.owned_pool;
+            let owned_by = &mut self.owned_by;
+            let Some((state, ped)) = player.inbox.state.lock().ok().and_then(|mut s| {
+                let pending = s.as_mut()?;
+                let state = pending.state.take()?;
+                if !pending.owned.is_empty() {
+                    let mut list = pool.pop().unwrap_or_default();
+                    std::mem::swap(&mut pending.owned, &mut list);
+                    owned_by.push((player.slot.index, list));
+                }
+                Some((state, pending.ped.take()))
+            }) else {
                 continue;
             };
             if let Err(violation) = player.movement.check(rules, &state, now) {
@@ -848,6 +916,91 @@ impl Players {
                 velocity: state.velocity,
                 rotation: state.rotation,
             });
+        }
+        // Then what each player simulates, now that every player's own position is this tick's.
+        let mut owned = std::mem::take(&mut self.owned_by);
+        for (player, mut list) in owned.drain(..) {
+            for o in list.drain(..) {
+                self.apply_owned(player, &o, tick, now);
+            }
+            self.owned_pool.push(list);
+        }
+        self.owned_by = owned;
+    }
+
+    /// Takes one owned-entity state from the player in slot `player` if it owns the entity with that epoch, the
+    /// state passes the movement checks and the entity stays within the keep radius of the player (ADR 0006,
+    /// section 4). Its block is merged by [`crate::owned`]'s rules.
+    fn apply_owned(&mut self, player: u32, o: &OwnedState, tick: u32, now: std::time::Instant) {
+        let slot = o.id >> 16;
+        let index = slot as usize;
+        let owns =
+            self.spawned(o.id).is_some() && self.ownership.owner(slot) == Some((Some(player), o.epoch));
+        if !owns {
+            self.traffic.refused_owned_stale.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let [x, y, z] = o.state.position.to_metres();
+        let near = self
+            .states
+            .get(player as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|p| {
+                let [px, py, pz] = p.position.to_metres();
+                let r = self.ownership_rules.keep_radius;
+                (x - px).powi(2) + (y - py).powi(2) + (z - pz).powi(2) <= r * r
+            });
+        if !near {
+            self.traffic.refused_owned_far.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if self.entity_moves[index]
+            .check(&self.movement, &o.state, now)
+            .is_err()
+        {
+            self.traffic
+                .refused_owned_movement
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.states[index] = Some(EntityState {
+            id: o.id,
+            position: o.state.position,
+            velocity: o.state.velocity,
+            rotation: o.state.rotation,
+        });
+        self.grid.upsert(EntityId(slot), Point::new(x, y));
+        let info = self.infos[index];
+        let budget = &mut self.budgets[index];
+        let fields = match info.kind {
+            EntityKind::Vehicle => match (
+                VehicleBlock::from_fields(info.fields()),
+                VehicleBlock::from_fields(o.fields()),
+            ) {
+                (Ok(server), Ok(sent)) => Some(
+                    merge_vehicle(&server, &sent, self.property[index], budget, now)
+                        .to_fields()
+                        .to_vec(),
+                ),
+                _ => None,
+            },
+            EntityKind::Npc => match (
+                PedBlock::from_fields(info.fields()),
+                PedBlock::from_fields(o.fields()),
+            ) {
+                (Ok(server), Ok(sent)) => Some(merge_npc(&server, &sent, budget, now).to_fields().to_vec()),
+                _ => None,
+            },
+            // An object's state is its kinematics; a player is never spawned.
+            EntityKind::Object | EntityKind::Player => None,
+        };
+        if let Some(fields) = fields
+            && let Ok(merged) = Info::with_fields(info.kind, info.model, &fields)
+            && merged != info
+        {
+            self.infos[index] = merged;
+            self.info_ticks[index] = tick;
         }
     }
 
