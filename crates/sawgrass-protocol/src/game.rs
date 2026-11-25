@@ -81,7 +81,10 @@ impl ClientState {
         for o in owned {
             put_varint(out, u64::from(o.id));
             out.push(o.epoch);
-            o.state.encode(&mut buf)?;
+            if let Err(e) = o.state.encode(&mut buf) {
+                out.truncate(start);
+                return Err(e);
+            }
             out.extend_from_slice(&buf);
             put_fields(o.fields(), out);
         }
@@ -305,6 +308,7 @@ const OWNERSHIP: u8 = 4;
 const CORRECTED: u8 = 5;
 const ENVIRONMENT: u8 = 6;
 const DOOR: u8 = 7;
+const SEAT: u8 = 8;
 const REQUEST_STATS: u8 = 128;
 const PAY: u8 = 129;
 const ENTER_SEAT: u8 = 130;
@@ -338,6 +342,48 @@ impl PayResult {
             3 => Self::Invalid,
             4 => Self::Failed,
             5 => Self::Refused,
+            _ => return Err(DecodeError::OutOfRange),
+        })
+    }
+}
+
+/// How the server answered a [`ClientEvent::EnterSeat`] or [`ClientEvent::LeaveSeat`], in a [`ServerEvent::Seat`].
+/// The values are part of the wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SeatAnswer {
+    /// The player sits in the seat now; the driver's seat also makes it the vehicle's owner.
+    Granted = 0,
+    /// The player left the seat: on its request, or because the server took it out (it died, or the vehicle went).
+    Left = 1,
+    /// The id is not a spawned vehicle.
+    NotAVehicle = 2,
+    /// The seat index is past the vehicle's seats.
+    NoSuchSeat = 3,
+    /// Someone sits there.
+    Taken = 4,
+    /// The vehicle is locked.
+    Locked = 5,
+    /// The player is too far from the vehicle, has no position yet, or is dead.
+    CannotReach = 6,
+    /// The player already sits in a vehicle and must leave it first.
+    AlreadySeated = 7,
+    /// A request to leave from a player in no seat.
+    NotSeated = 8,
+}
+
+impl SeatAnswer {
+    fn from_code(code: u8) -> Result<Self, DecodeError> {
+        Ok(match code {
+            0 => Self::Granted,
+            1 => Self::Left,
+            2 => Self::NotAVehicle,
+            3 => Self::NoSuchSeat,
+            4 => Self::Taken,
+            5 => Self::Locked,
+            6 => Self::CannotReach,
+            7 => Self::AlreadySeated,
+            8 => Self::NotSeated,
             _ => return Err(DecodeError::OutOfRange),
         })
     }
@@ -387,6 +433,16 @@ pub enum ServerEvent {
     Environment(Environment),
     /// A door's state: every registered door on joining, then each change.
     Door(Door),
+    /// The answer to one of the player's seat requests, or the news that the server took it out of its seat
+    /// (ADR 0006, section 4). One for every [`ClientEvent::EnterSeat`] and [`ClientEvent::LeaveSeat`], in order.
+    Seat {
+        /// The vehicle's entity id: the one asked for, or the one left; 0 for [`SeatAnswer::NotSeated`].
+        vehicle: u32,
+        /// The seat index, 0 the driver's: the one asked for, or the one left.
+        seat: u8,
+        /// Granted, left, or why the request was refused.
+        answer: SeatAnswer,
+    },
 }
 
 impl ServerEvent {
@@ -441,6 +497,16 @@ impl ServerEvent {
             Self::Door(door) => {
                 out.push(DOOR);
                 door.write(out);
+            }
+            Self::Seat {
+                vehicle,
+                seat,
+                answer,
+            } => {
+                out.push(SEAT);
+                out.extend_from_slice(&vehicle.to_le_bytes());
+                out.push(*seat);
+                out.push(*answer as u8);
             }
         }
     }
@@ -509,6 +575,15 @@ impl ServerEvent {
             }
             ENVIRONMENT => Ok(Self::Environment(Environment::read(&mut r)?)),
             DOOR => Ok(Self::Door(Door::read(&mut r)?)),
+            SEAT => {
+                let vehicle = u32::from_le_bytes(r.array()?);
+                let [seat, answer] = r.array::<2>()?;
+                Ok(Self::Seat {
+                    vehicle,
+                    seat,
+                    answer: SeatAnswer::from_code(answer)?,
+                })
+            }
             other => Err(DecodeError::UnknownEvent(other)),
         }?;
         r.finish()?;
@@ -525,9 +600,9 @@ impl ServerEvent {
 pub enum ClientEvent {
     /// Ask for [`ServerEvent::Stats`]. A server started without load-test reporting ignores it.
     RequestStats,
-    /// Ask to sit in `seat` (0 the driver's) of `vehicle` (ADR 0006, section 4). The server decides; a granted
-    /// request shows as the player's ped block with motion "in vehicle", the vehicle and the seat. A refused one
-    /// changes nothing.
+    /// Ask to sit in `seat` (0 the driver's) of `vehicle` (ADR 0006, section 4). The server decides and answers with
+    /// [`ServerEvent::Seat`]: granted, or why not. Other players see a granted seat in the player's ped block
+    /// (motion "in vehicle", the vehicle and the seat); a refused request changes nothing.
     EnterSeat {
         /// The vehicle's entity id.
         vehicle: u32,
@@ -535,7 +610,8 @@ pub enum ClientEvent {
         seat: u8,
     },
     /// Ask to leave the seat the player sits in, or say that the vehicle's physics threw the player out. The
-    /// server always grants it.
+    /// server always grants it, answering [`SeatAnswer::Left`], or [`SeatAnswer::NotSeated`] if the player sat
+    /// nowhere.
     LeaveSeat,
     /// The client's player fired once, and what it hit (ADR 0006, section 5). Shots have their own rate limit,
     /// separate from the other events'.
