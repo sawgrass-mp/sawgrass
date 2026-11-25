@@ -45,6 +45,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
+use crate::movement::{Movement, MovementRules, Violation};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
 
@@ -95,7 +96,7 @@ enum Inbound {
 }
 
 /// How the server accepts players.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ListenConfig {
     /// Let clients ask for [`ServerStats`] (load tests); otherwise the request is ignored.
     pub stats_to_clients: bool,
@@ -103,6 +104,8 @@ pub struct ListenConfig {
     pub max_players: usize,
     /// Threads that build players' snapshots in parallel. 1 builds them on the tick thread.
     pub tick_threads: usize,
+    /// What a client's movement is checked against.
+    pub movement: MovementRules,
 }
 
 impl Default for ListenConfig {
@@ -112,6 +115,7 @@ impl Default for ListenConfig {
             stats_to_clients: false,
             max_players: 4096,
             tick_threads: 1,
+            movement: MovementRules::default(),
         }
     }
 }
@@ -127,6 +131,12 @@ pub struct Traffic {
     pub send_errors: AtomicU64,
     /// Ticks whose snapshots were dropped because the gateway had not sent the previous [`OUTBOX_TICKS`] yet.
     pub dropped_ticks: AtomicU64,
+    /// Client states refused by [`Movement::check`], all players together: outside the map.
+    pub refused_bounds: AtomicU64,
+    /// Client states refused for a velocity above the speed limit.
+    pub refused_speed: AtomicU64,
+    /// Client states refused as a move too long for the time since the last accepted one.
+    pub refused_teleport: AtomicU64,
 }
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
@@ -164,6 +174,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         by_connection: std::collections::HashMap::new(),
         grid: DenseGrid::default(),
         visibility: VisibilityConfig::default(),
+        movement: config.movement,
         pool: (config.tick_threads > 1)
             .then(|| {
                 rayon::ThreadPoolBuilder::new()
@@ -274,6 +285,7 @@ struct Player {
     events: tokio_mpsc::Sender<Vec<u8>>,
     inbox: Arc<Inbox>,
     view: View,
+    movement: Movement,
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
@@ -288,6 +300,8 @@ pub struct Players {
     by_connection: std::collections::HashMap<u32, Slot>,
     grid: DenseGrid,
     visibility: VisibilityConfig,
+    /// What every player's movement is checked against.
+    movement: MovementRules,
     /// Builds the views in parallel; `None` for one thread.
     pool: Option<rayon::ThreadPool>,
     /// The wire state of every placed player, by slot index.
@@ -371,6 +385,7 @@ impl Players {
                         events,
                         inbox,
                         view: View::new(),
+                        movement: Movement::new(),
                     });
                 }
                 Inbound::Leave { id } => {
@@ -389,12 +404,24 @@ impl Players {
         }
     }
 
-    /// Takes each player's latest state, if a new one arrived, into the world, the grid and the wire states.
+    /// Takes each player's latest state, if a new one arrived and passes the movement checks, into the world, the
+    /// grid and the wire states. A refused state is counted and dropped: the player stays where it was.
     fn apply_states(&mut self, world: &mut World) {
+        let rules = &self.movement;
+        let now = std::time::Instant::now();
         for player in self.players.iter_mut().flatten() {
             let Some(state) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
                 continue;
             };
+            if let Err(violation) = player.movement.check(rules, &state, now) {
+                let counter = match violation {
+                    Violation::Bounds => &self.traffic.refused_bounds,
+                    Violation::Speed => &self.traffic.refused_speed,
+                    Violation::Teleport => &self.traffic.refused_teleport,
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             let id = player.slot.wire_id();
             match player.entity {
                 Some(entity) => {

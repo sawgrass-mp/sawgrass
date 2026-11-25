@@ -1,6 +1,6 @@
 //! Clients connect through the in-process gateway: the server places each one in its world where the client
 //! says it is, and sends each a snapshot with the other. A flood of states costs one slot, not a queue, and
-//! connections beyond the player cap are refused.
+//! connections beyond the player cap are refused. A client that teleports stays where it was.
 
 use std::time::Duration;
 
@@ -257,4 +257,48 @@ fn connections_beyond_the_cap_are_refused() {
         let second = connect(addr, "localhost", roots, PROTOCOL_VERSION).await;
         assert!(second.is_err(), "second player admitted");
     });
+}
+
+#[test]
+fn a_teleport_is_refused_and_counted() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let traffic = players.traffic();
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    let spawn = state_packet(10.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(spawn.clone());
+        position_of(t, id) == Some([10.0, 5.0, 30.0])
+    }));
+    // 5 km away in one step: refused every time, and the player stays put.
+    let jump = state_packet(5000.0);
+    let refused = |t: &TickLoop| {
+        let _ = client.send_datagram(jump.clone());
+        assert_eq!(position_of(t, id), Some([10.0, 5.0, 30.0]));
+        traffic
+            .refused_teleport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 5
+    };
+    assert!(tick_until(&mut tick_loop, refused));
+    // A step it could have walked is taken.
+    let step = state_packet(12.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(step.clone());
+        position_of(t, id) == Some([12.0, 5.0, 30.0])
+    }));
 }

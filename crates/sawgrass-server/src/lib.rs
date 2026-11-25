@@ -9,6 +9,7 @@
 pub mod cpu;
 pub mod interest;
 pub mod metrics;
+pub mod movement;
 pub mod net;
 pub mod slots;
 pub mod snapshot;

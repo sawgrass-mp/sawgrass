@@ -172,6 +172,7 @@ fn main() -> ExitCode {
                             stats_to_clients: args.stats_to_clients,
                             max_players: args.max_players,
                             tick_threads,
+                            ..net::ListenConfig::default()
                         },
                     )
                 }
@@ -227,11 +228,15 @@ fn main() -> ExitCode {
                     received_bytes_per_sec: per_sec(received - last.4),
                 };
                 line += &format!(
-                    ", sent {} kB/s, received {} kB/s, send errors {}, dropped ticks {}",
+                    ", sent {} kB/s, received {} kB/s, send errors {}, dropped ticks {}, \
+                     refused states {} bounds {} speed {} teleport",
                     report.sent_bytes_per_sec / 1000,
                     report.received_bytes_per_sec / 1000,
                     traffic.send_errors.load(Ordering::Relaxed),
-                    traffic.dropped_ticks.load(Ordering::Relaxed)
+                    traffic.dropped_ticks.load(Ordering::Relaxed),
+                    traffic.refused_bounds.load(Ordering::Relaxed),
+                    traffic.refused_speed.load(Ordering::Relaxed),
+                    traffic.refused_teleport.load(Ordering::Relaxed)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);
