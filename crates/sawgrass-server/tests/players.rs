@@ -58,6 +58,30 @@ async fn joined(session: &mut Session) -> u32 {
     }
 }
 
+/// The next `n` seat answers `session` is sent (NET-21), as (vehicle, seat, answer), skipping other events.
+fn seat_answers(
+    runtime: &tokio::runtime::Runtime,
+    session: &mut Session,
+    n: usize,
+) -> Vec<(u32, u8, sawgrass_protocol::game::SeatAnswer)> {
+    let mut answers = Vec::new();
+    while answers.len() < n {
+        let (_, packet) = runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(2), session.recv_event()).await })
+            .expect("a seat answer in time")
+            .expect("event");
+        if let Ok(ServerEvent::Seat {
+            vehicle,
+            seat,
+            answer,
+        }) = ServerEvent::decode(&packet[PacketHeader::SIZE..])
+        {
+            answers.push((vehicle, seat, answer));
+        }
+    }
+    answers
+}
+
 /// Runs a tick every 10 ms on the test's thread until `done` holds or two seconds pass.
 fn tick_until(tick_loop: &mut TickLoop, mut done: impl FnMut(&TickLoop) -> bool) -> bool {
     for _ in 0..200 {
@@ -1410,6 +1434,32 @@ fn a_player_enters_drives_and_leaves_a_vehicle() {
     }));
     assert_eq!(traffic.seats_granted.load(Ordering::Relaxed), granted);
     assert_eq!(lock(&players).seat_of(me), None);
+    // NET-21: leaving from no seat is answered too; a car that is removed takes its passenger out.
+    ask(&mut a, ClientEvent::LeaveSeat);
+    assert!(lock(&players).set_locked(car, false));
+    ask(
+        &mut a,
+        ClientEvent::EnterSeat {
+            vehicle: car,
+            seat: 1,
+        },
+    );
+    assert!(tick_until(&mut tick_loop, |_| lock(&players).seat_of(me) == Some((car, 1))));
+    assert!(lock(&players).despawn(car));
+    // Every request was answered, in order, with what the server did and why.
+    use sawgrass_protocol::game::SeatAnswer;
+    assert_eq!(
+        seat_answers(&runtime, &mut a, 7),
+        [
+            (far_car, 0, SeatAnswer::CannotReach),
+            (car, 0, SeatAnswer::Granted),
+            (car, 0, SeatAnswer::Left),
+            (car, 1, SeatAnswer::Locked),
+            (0, 0, SeatAnswer::NotSeated),
+            (car, 1, SeatAnswer::Granted),
+            (car, 1, SeatAnswer::Left),
+        ]
+    );
 }
 
 /// SRV-16, ADR 0006 section 5: the server applies a hit only from a live shooter holding the weapon, at the fire
@@ -1576,6 +1626,12 @@ fn a_checked_hit_damages_and_kills() {
         (0, Motion::Dead)
     );
     assert_eq!(lock(&players).seat_of(id_b), None);
+    // NET-21: B is told it got the seat, and that it left it when it died.
+    use sawgrass_protocol::game::SeatAnswer;
+    assert_eq!(
+        seat_answers(&runtime, &mut b, 2),
+        [(car, 0, SeatAnswer::Granted), (car, 0, SeatAnswer::Left)]
+    );
     send(&b, 20.0, AssetId::NONE);
     for _ in 0..3 {
         tick_loop.run_tick();

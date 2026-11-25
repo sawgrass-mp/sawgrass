@@ -551,6 +551,40 @@ mod game_payloads {
     }
 
     #[test]
+    fn seat_answers_round_trip_and_reject_unknown_answers() {
+        let answers = [
+            SeatAnswer::Granted,
+            SeatAnswer::Left,
+            SeatAnswer::NotAVehicle,
+            SeatAnswer::NoSuchSeat,
+            SeatAnswer::Taken,
+            SeatAnswer::Locked,
+            SeatAnswer::CannotReach,
+            SeatAnswer::AlreadySeated,
+            SeatAnswer::NotSeated,
+        ];
+        for answer in answers {
+            let event = ServerEvent::Seat {
+                vehicle: 0x0102_0304,
+                seat: 1,
+                answer,
+            };
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(out, [8, 4, 3, 2, 1, 1, answer as u8]);
+            assert_eq!(ServerEvent::decode(&out), Ok(event));
+            assert_eq!(ServerEvent::decode(&out[..6]), Err(DecodeError::Truncated));
+            let mut longer = out.clone();
+            longer.push(0);
+            assert_eq!(ServerEvent::decode(&longer), Err(DecodeError::TrailingBytes));
+        }
+        assert_eq!(
+            ServerEvent::decode(&[8, 4, 3, 2, 1, 1, 9]),
+            Err(DecodeError::OutOfRange)
+        );
+    }
+
+    #[test]
     fn seat_requests_round_trip_and_reject_bad_lengths() {
         let enter = || ClientEvent::EnterSeat {
             vehicle: 0x0102_0304,

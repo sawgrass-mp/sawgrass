@@ -5,14 +5,16 @@
 //! legs, leaves it, sometimes sits a while in the passenger seat of the same parked vehicle, and walks on. The
 //! server changes owners as it moves, so a run sees seats taken and left and ownership handed over.
 //!
-//! A shooter fires at vehicles in the latest snapshot it decoded, at the positions that snapshot gave, so every
-//! hit of an honest bot passes the server's checks. It hits no player or NPC: the server has no respawn yet, so a
+//! A shooter fires at intact vehicles in the latest snapshot it decoded, at the positions that snapshot gave, so
+//! every hit of an honest bot passes the server's checks and changes something: a wrecked vehicle (body 0) takes
+//! no more damage, so a hit on it would measure only the checks (BOT-9). It hits no player or NPC: the server has no respawn yet, so a
 //! killed bot would stay dead and its later shots would be refused.
 
 use sawgrass_protocol::EntityState;
 use sawgrass_protocol::Position;
 use sawgrass_protocol::combat::{Hit, Shot, Zone};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+use sawgrass_protocol::vehicle::VehicleBlock;
 
 use crate::walker::{Rng, Walker};
 
@@ -174,6 +176,7 @@ impl Driver {
                 if *left > 0.0 && owned.contains(&vehicle) {
                     return Request::None;
                 }
+                walker.stop_driving();
                 self.phase = if self.rng.unit() < 0.5 {
                     Phase::Parked { vehicle }
                 } else {
@@ -207,7 +210,7 @@ impl Driver {
     }
 }
 
-/// A shot from `from` at up to [`HITS_PER_SHOT`] of the nearest vehicles in `seen` within [`SHOT_RANGE`], each hit
+/// A shot from `from` at up to [`HITS_PER_SHOT`] of the nearest intact vehicles in `seen` within [`SHOT_RANGE`], each hit
 /// at the position the snapshot gave; `None` when there is nothing to hit.
 #[must_use]
 pub fn shot_at_vehicles(seen: &Seen, from: [f32; 3]) -> Option<Shot> {
@@ -215,7 +218,10 @@ pub fn shot_at_vehicles(seen: &Seen, from: [f32; 3]) -> Option<Shot> {
         .entities
         .iter()
         .zip(&seen.infos)
-        .filter(|(_, info)| info.kind == EntityKind::Vehicle)
+        .filter(|(_, info)| {
+            info.kind == EntityKind::Vehicle
+                && VehicleBlock::from_fields(info.fields()).is_ok_and(|v| v.body > 0)
+        })
         .map(|(e, _)| (distance(from, e.position.to_metres()), e))
         .filter(|(d, _)| *d <= SHOT_RANGE)
         .collect();
@@ -242,7 +248,6 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 mod tests {
     use super::*;
     use crate::walker::Area;
-    use sawgrass_protocol::vehicle::VehicleBlock;
     use sawgrass_protocol::{Rotation, Velocity};
 
     fn entity(id: u32, at: [f32; 3]) -> EntityState {
@@ -341,6 +346,21 @@ mod tests {
             ],
             infos: vec![car(), car(), ped, car(), car()],
         };
+        // A wrecked vehicle takes no more damage, so the nearest one is passed over.
+        let wreck = Info::with_fields(
+            EntityKind::Vehicle,
+            AssetId(3),
+            &VehicleBlock {
+                body: 0,
+                ..VehicleBlock::INTACT
+            }
+            .to_fields(),
+        )
+        .expect("info");
+        let mut wrecked = seen.clone();
+        wrecked.infos[0] = wreck;
+        let shot = shot_at_vehicles(&wrecked, [0.0, 0.0, 30.0]).expect("a shot");
+        assert_eq!(shot.hits()[0].target, 4);
         let shot = shot_at_vehicles(&seen, [0.0, 0.0, 30.0]).expect("a shot");
         assert_eq!(shot.tick, 42);
         assert_eq!(shot.weapon, WEAPON);
