@@ -51,6 +51,7 @@ use sawgrass_protocol::game::OwnedState;
 use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::vehicle::VehicleBlock;
+use sawgrass_protocol::world::Door;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -62,6 +63,7 @@ use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
+use crate::world::WorldState;
 
 /// The network id of a player's entity, the `id` in snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,6 +90,10 @@ const EVENT_QUEUE: usize = 16 + 2 * OWNERSHIP_CAP as usize;
 /// Most lost ownership events kept to be sent again; beyond it they are only counted. Well above what one tick's
 /// changes of owner can lose.
 const MAX_OWNER_RETRIES: usize = 4096;
+
+/// Most world state events one player is sent in a tick while it is being sent the whole state: room is left in
+/// its event queue for the others.
+const WORLD_EVENTS_PER_TICK: usize = 16;
 
 /// Whether a lost ownership event for `player` still says what is true: "yours" while it owns the spawned entity
 /// with `epoch` (`owner` as [`Ownership::owner`] gives it), "not yours" while it does not own it.
@@ -222,6 +228,8 @@ pub struct Traffic {
     pub refused_teleport: AtomicU64,
     /// [`ServerEvent::Corrected`] events queued to clients after a refused state.
     pub corrections: AtomicU64,
+    /// World state changes that found a player's event queue full; that player is sent the whole state again.
+    pub lost_world_events: AtomicU64,
 }
 
 /// The address a connection counts against: an IPv4 address, or the /64 network of an IPv6 one, since one IPv6 host
@@ -372,6 +380,9 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         },
         owner_changes: Vec::new(),
         owner_retries: Vec::new(),
+        world: WorldState::default(),
+        world_changes: Vec::new(),
+        tick_dt: std::time::Duration::from_millis(50),
         tick: 0,
         infos: Vec::new(),
         info_ticks: Vec::new(),
@@ -552,6 +563,9 @@ struct Player {
     movement: Movement,
     /// When this player's entity was last sent a [`ServerEvent::Corrected`].
     corrected_at: Option<std::time::Instant>,
+    /// While this player is being sent the whole world state (on joining, or after a change found its event queue
+    /// full): 0 for the environment next, `n` for door `n - 1` next.
+    world_cursor: Option<usize>,
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
@@ -592,6 +606,11 @@ pub struct Players {
     /// Ownership events that found the player's event queue full, as (player slot, entity id, epoch, yours): sent
     /// again each tick while they still hold, so a lost event does not leave an entity without its simulator.
     owner_retries: Vec<(u32, u32, u8, bool)>,
+    /// The clock, the weather and the doors (SRV-17), and this tick's changes to send everyone.
+    world: WorldState,
+    world_changes: Vec<ServerEvent>,
+    /// The tick's length.
+    tick_dt: std::time::Duration,
     /// The tick being run, or the last one run.
     tick: u32,
     /// The info each slot sends, built from `peds`, and the tick it last changed at.
@@ -740,6 +759,81 @@ impl Players {
         true
     }
 
+    /// Sets the clock to `minute` of the day now, running at `rate` game minutes per real second (0 stops it), and
+    /// tells every player.
+    pub fn set_clock(&mut self, minute: f64, rate: f64) {
+        self.world.set_clock(self.tick, minute, rate);
+        self.world_changes.push(ServerEvent::Environment(
+            self.world.environment(self.tick, self.tick_dt),
+        ));
+    }
+
+    /// Sets the weather, turning from `weather` into `next` with `transition` (0 to 255) of the way done, and tells
+    /// every player.
+    pub fn set_weather(&mut self, weather: AssetId, next: AssetId, transition: u8) {
+        self.world
+            .set_weather(self.tick, self.tick_dt, weather, next, transition);
+        self.world_changes.push(ServerEvent::Environment(
+            self.world.environment(self.tick, self.tick_dt),
+        ));
+    }
+
+    /// Registers a door or changes it, and tells every player if anything changed.
+    pub fn set_door(&mut self, door: Door) {
+        if self.world.set_door(door) {
+            self.world_changes.push(ServerEvent::Door(door));
+        }
+    }
+
+    /// The world state as the server holds it.
+    #[must_use]
+    pub fn world(&self) -> &WorldState {
+        &self.world
+    }
+
+    /// Sends this tick's world changes to every player, and goes on with the players being sent the whole state, at
+    /// most [`WORLD_EVENTS_PER_TICK`] events each a tick. A change that finds a player's queue full starts that
+    /// player over with the whole state, so nobody is left with a stale door or clock.
+    fn send_world(&mut self) {
+        let tick = u64::from(self.tick);
+        let environment = ServerEvent::Environment(self.world.environment(self.tick, self.tick_dt));
+        for player in self.players.iter_mut().flatten() {
+            // Sent during a resend too, as a door the resend has passed would otherwise stay stale; not before it
+            // starts, as it sends the state as it is now.
+            let changes = if player.world_cursor == Some(0) {
+                &[][..]
+            } else {
+                &self.world_changes[..]
+            };
+            for change in changes {
+                if player.events.try_send(event_packet(change, tick)).is_err() {
+                    self.traffic.lost_world_events.fetch_add(1, Ordering::Relaxed);
+                    player.world_cursor = Some(0);
+                    break;
+                }
+            }
+            let Some(mut cursor) = player.world_cursor else {
+                continue;
+            };
+            let doors = self.world.doors();
+            for _ in 0..WORLD_EVENTS_PER_TICK {
+                let event = match cursor {
+                    0 => environment,
+                    n => match doors.get(n - 1) {
+                        Some(&door) => ServerEvent::Door(door),
+                        None => break,
+                    },
+                };
+                if player.events.try_send(event_packet(&event, tick)).is_err() {
+                    break;
+                }
+                cursor += 1;
+            }
+            player.world_cursor = (cursor <= doors.len()).then_some(cursor);
+        }
+        self.world_changes.clear();
+    }
+
     /// The info and state of an entity [`Players::spawn`] made.
     #[must_use]
     pub fn spawned(&self, id: u32) -> Option<(Info, EntityState)> {
@@ -750,6 +844,7 @@ impl Players {
 
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
         self.tick = info.tick as u32;
+        self.tick_dt = info.dt;
         self.apply_inbound(world, info);
         self.apply_states(world, info.tick as u32);
         self.grid.rebuild();
@@ -759,6 +854,7 @@ impl Players {
         // Every visible set has been recomputed without the players who left: their slots may be reused.
         self.slots.release();
         self.send_stats();
+        self.send_world();
     }
 
     /// The owner of a spawned entity and its epoch: `None` for an id that is not one, `Some((None, _))` while
@@ -892,6 +988,7 @@ impl Players {
                         view: View::new(),
                         movement: Movement::new(),
                         corrected_at: None,
+                        world_cursor: Some(0),
                     });
                 }
                 Inbound::Leave { id } => {

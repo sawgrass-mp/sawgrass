@@ -19,6 +19,7 @@ pub mod scripts;
 pub mod slots;
 pub mod snapshot;
 pub mod tick;
+pub mod world;
 
 pub use hecs;
 pub use metrics::{TickMetrics, TickStats};

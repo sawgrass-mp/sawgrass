@@ -15,6 +15,7 @@
 use crate::delta::{put_varint, take_varint};
 use crate::entity::MAX_FIELDS;
 use crate::ped::PedBlock;
+use crate::world::{Door, Environment};
 use crate::{
     DecodeError, EncodeError, EntityState, PacketHeader, Position, Reader, Rotation, Velocity, Writer,
 };
@@ -301,6 +302,8 @@ const STATS: u8 = 2;
 // 3 is taken by DB-8 (#162).
 const OWNERSHIP: u8 = 4;
 const CORRECTED: u8 = 5;
+const ENVIRONMENT: u8 = 6;
+const DOOR: u8 = 7;
 const REQUEST_STATS: u8 = 128;
 
 /// An event from the server.
@@ -334,6 +337,10 @@ pub enum ServerEvent {
     /// and holds it here: the last state it accepted. The client moves the entity back. Sent only to the
     /// entity's current owner, at most every few hundred milliseconds per entity.
     Corrected(EntityState),
+    /// The clock and the weather (ADR 0006, section 7): sent on joining and whenever the server changes them.
+    Environment(Environment),
+    /// A door's state: every registered door on joining, then each change.
+    Door(Door),
 }
 
 impl ServerEvent {
@@ -374,6 +381,14 @@ impl ServerEvent {
                 // The buffer is exactly one state long, so encoding cannot fail.
                 let _ = state.encode(&mut buf);
                 out.extend_from_slice(&buf);
+            }
+            Self::Environment(environment) => {
+                out.push(ENVIRONMENT);
+                environment.write(out);
+            }
+            Self::Door(door) => {
+                out.push(DOOR);
+                door.write(out);
             }
         }
     }
@@ -435,6 +450,8 @@ impl ServerEvent {
                 r.input = rest;
                 Ok(Self::Corrected(state))
             }
+            ENVIRONMENT => Ok(Self::Environment(Environment::read(&mut r)?)),
+            DOOR => Ok(Self::Door(Door::read(&mut r)?)),
             other => Err(DecodeError::UnknownEvent(other)),
         }?;
         r.finish()?;

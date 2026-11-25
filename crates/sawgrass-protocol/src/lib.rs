@@ -11,6 +11,7 @@ pub mod game;
 pub mod ped;
 pub mod quant;
 pub mod vehicle;
+pub mod world;
 
 use std::fmt;
 
@@ -26,8 +27,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// carry the player's ped block ([`ped`]). Version 6 adds the vehicle block ([`vehicle`]) and the states of the
 /// entities a client simulates after its own ([`game::OwnedState`]). Version 7 adds
 /// [`game::ServerEvent::Corrected`], the server's answer to a refused state.
-/// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]).
-pub const PROTOCOL_VERSION: u32 = 8;
+/// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]). Versions 9 to 11 are DB-8's (#162),
+/// SRV-15's (#201) and NET-20's (#206). Version 12 adds the world state events ([`world`]).
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///

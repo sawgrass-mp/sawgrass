@@ -523,4 +523,38 @@ mod game_payloads {
         assert_eq!(ServerEvent::decode(&out), Err(DecodeError::UnknownEvent(128)));
         assert_eq!(ClientEvent::decode(&[1]), Err(DecodeError::UnknownEvent(1)));
     }
+
+    #[test]
+    fn world_state_events_round_trip_and_reject_bad_values() {
+        use crate::entity::AssetId;
+        use crate::world::{Door, Environment};
+        let environment = ServerEvent::Environment(Environment {
+            tick: 900,
+            minute: 1439,
+            rate: 200,
+            weather: AssetId(3),
+            next_weather: AssetId(4),
+            transition: 128,
+        });
+        let door = ServerEvent::Door(Door {
+            id: AssetId(77),
+            locked: true,
+            open: 0,
+        });
+        for (event, size) in [(environment, 18), (door, 7)] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(out.len(), size);
+            assert_eq!(ServerEvent::decode(&out), Ok(event));
+            assert_eq!(ServerEvent::decode(&out[..size - 1]), Err(DecodeError::Truncated));
+        }
+        let mut out = Vec::new();
+        environment.encode(&mut out);
+        out[5..7].copy_from_slice(&1440u16.to_le_bytes());
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::OutOfRange));
+        let mut out = Vec::new();
+        door.encode(&mut out);
+        out[5] = 2;
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::OutOfRange));
+    }
 }
