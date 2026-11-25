@@ -14,6 +14,7 @@ use sawgrass_gateway::{Connector, Datagrams, RootCertStore, connect};
 use sawgrass_protocol::EntityState;
 use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta};
 use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent};
+use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity};
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -183,11 +184,9 @@ async fn send_states(
         };
         let mut packet = header(PacketKind::ClientState, sequence, ack.load(Ordering::Relaxed));
         sequence = sequence.wrapping_add(1);
-        let mut buf = [0; ClientState::SIZE];
-        if state.encode(&mut buf).is_err() {
+        if state.encode_with_ped(&ped_block(&walker), &mut packet).is_err() {
             continue;
         }
-        packet.extend_from_slice(&buf);
         let len = packet.len() as u64;
         if datagrams.send(Bytes::from(packet)).is_err() {
             return true;
@@ -260,6 +259,27 @@ fn client_state(walker: &Walker) -> Option<ClientState> {
         velocity: Velocity::from_metres_per_second(walker.velocity()).ok()?,
         rotation: Rotation::from_quaternion(walker.rotation()).ok()?,
     })
+}
+
+/// The bot's ped block: standing while it pauses, otherwise moving by its speed, so the server relays block
+/// changes as a crowd of real players would make them.
+fn ped_block(walker: &Walker) -> PedBlock {
+    let [vx, vy, _] = walker.velocity();
+    let speed = vx.hypot(vy);
+    let motion = if speed < 0.1 {
+        Motion::Idle
+    } else if speed < 2.5 {
+        Motion::Walk
+    } else if speed < 10.0 {
+        Motion::Run
+    } else {
+        // The walker's driving legs; a bot drives no vehicle until BOT-5.
+        Motion::Sprint
+    };
+    PedBlock {
+        motion,
+        ..PedBlock::default()
+    }
 }
 
 pub(crate) fn header(kind: PacketKind, sequence: u16, tick: u32) -> Vec<u8> {
