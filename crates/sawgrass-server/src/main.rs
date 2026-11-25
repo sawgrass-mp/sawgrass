@@ -6,7 +6,7 @@
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
 //!                 [--max-players N] [--max-per-address N] [--tick-threads N]
-//!                 [--stats-to-clients]
+//!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -25,6 +25,9 @@
 //! while the snapshot pool works, so gateway and tick threads together are one per core. Giving only one of the
 //! options gives the other the rest of the cores.
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
+//! - `--resources DIR`: run every resource in `DIR` (a folder with a `resource.toml`) in the tick. A resource that
+//!   fails to load is reported and left out.
+//! - `--script-budget-ms N`: the time all resources together may take in one tick (default 8).
 
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
@@ -36,6 +39,7 @@ use std::time::{Duration, Instant};
 use sawgrass_protocol::game::ServerStats;
 use sawgrass_server::limits::Limits;
 use sawgrass_server::net::{self, NetId};
+use sawgrass_server::scripts::{self, Scripts};
 use sawgrass_server::{TickConfig, TickLoop, cpu};
 
 /// jemalloc for every allocation in the process (SRV-5; BOT-3 halved the crowd's tick p99 with it).
@@ -56,6 +60,8 @@ struct Args {
     max_per_address: usize,
     tick_threads: Option<usize>,
     stats_to_clients: bool,
+    resources: Option<PathBuf>,
+    script_budget: Duration,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -70,6 +76,8 @@ fn parse_args() -> Result<Args, String> {
         max_per_address: net::ListenConfig::default().limits.max_per_address,
         tick_threads: None,
         stats_to_clients: false,
+        resources: None,
+        script_budget: scripts::DEFAULT_BUDGET,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -111,6 +119,13 @@ fn parse_args() -> Result<Args, String> {
                 args.tick_threads = Some(n.max(1));
             }
             "--stats-to-clients" => args.stats_to_clients = true,
+            "--resources" => args.resources = Some(value("--resources")?.into()),
+            "--script-budget-ms" => {
+                let ms: u64 = value("--script-budget-ms")?
+                    .parse()
+                    .map_err(|e| format!("--script-budget-ms: {e}"))?;
+                args.script_budget = Duration::from_millis(ms);
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -138,7 +153,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
                  [--net-threads N] [--max-players N] [--max-per-address N] [--tick-threads N] \
-                 [--stats-to-clients]"
+                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]"
             );
             return ExitCode::from(2);
         }
@@ -157,6 +172,7 @@ fn main() -> ExitCode {
     let mut runtime = None;
     let mut network = None;
     let mut shutdown = None;
+    let mut roster = None;
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let (threads, tick_threads) = split_cores(cores, args.net_threads, args.tick_threads);
@@ -202,11 +218,29 @@ fn main() -> ExitCode {
         network = Some((players.traffic(), players.stats_slot()));
         shutdown = Some(players.shutdown());
         let mut players = players;
+        roster = Some(players.roster());
         tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
         runtime = Some(rt);
     }
 
     let report_every = u64::from(config.rate_hz()) * REPORT_EVERY_SECS;
+    if let Some(dir) = &args.resources {
+        let (host, errors) = sawgrass_script::Host::load_dir(dir, sawgrass_script::Limits::default());
+        for e in &errors {
+            eprintln!("sawgrass-server: {e}");
+        }
+        let names: Vec<&str> = host.resources().iter().map(|r| r.name()).collect();
+        println!(
+            "resources: {} running ({}), {} failed, script budget {:?} per tick",
+            names.len(),
+            names.join(", "),
+            errors.len(),
+            args.script_budget
+        );
+        let mut scripts = Scripts::new(host, roster.take(), args.script_budget, report_every);
+        tick_loop.add_system("scripts", move |_, info| scripts.run_tick(info));
+    }
+
     let main_tid = std::process::id();
     let mut last = (
         Instant::now(),

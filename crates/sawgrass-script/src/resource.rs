@@ -111,6 +111,8 @@ pub struct Stats {
     /// The longest single call. It can pass the deadline inside a built-in the interrupt does not reach (see
     /// [`crate::guards`]).
     pub slowest: Duration,
+    /// Tick events skipped because the host's script budget for that tick was spent.
+    pub skipped_ticks: u64,
 }
 
 /// The deadline the interrupt callback enforces. Only the thread calling into the resource touches it; it is
@@ -186,6 +188,7 @@ pub struct Resource {
     log: Log,
     limits: Limits,
     stats: Stats,
+    last_error: Option<CallError>,
 }
 
 impl Resource {
@@ -264,6 +267,7 @@ impl Resource {
             log,
             limits,
             stats: Stats::default(),
+            last_error: None,
         };
         for (path, source) in sources {
             resource.clock.arm(limits.load_deadline);
@@ -292,6 +296,22 @@ impl Resource {
         self.stats
     }
 
+    /// The most recent failed call's error.
+    #[must_use]
+    pub fn last_error(&self) -> Option<&CallError> {
+        self.last_error.as_ref()
+    }
+
+    pub(crate) fn skip_tick(&mut self) {
+        self.stats.skipped_ticks += 1;
+    }
+
+    /// Whether the resource has a handler for this event.
+    #[must_use]
+    pub fn listens(&self, event: &Event) -> bool {
+        self.counts[event.index()].load(Relaxed) > 0
+    }
+
     /// Bytes its Luau instance holds now.
     #[must_use]
     pub fn memory_used(&self) -> usize {
@@ -311,11 +331,16 @@ impl Resource {
     /// deadline. A handler's script error does not stop the later handlers; a deadline or memory error does. The
     /// first error is returned.
     pub fn dispatch(&mut self, event: Event) -> Result<(), CallError> {
-        if self.counts[event.index()].load(Relaxed) == 0 {
+        self.dispatch_within(event, self.limits.deadline)
+    }
+
+    /// [`Self::dispatch`] with a deadline no longer than `budget`.
+    pub fn dispatch_within(&mut self, event: Event, budget: Duration) -> Result<(), CallError> {
+        if !self.listens(&event) {
             return Ok(());
         }
         let start = Instant::now();
-        self.clock.arm(self.limits.deadline);
+        self.clock.arm(self.limits.deadline.min(budget));
         let result = match event {
             Event::Tick { tick, dt } => self.call_all(event.name(), (tick, dt)),
             Event::PlayerJoin(p) | Event::PlayerLeave(p) => self.call_all(event.name(), p),
@@ -326,11 +351,13 @@ impl Resource {
         self.stats.calls += 1;
         self.stats.busy += took;
         self.stats.slowest = self.stats.slowest.max(took);
-        match &result {
-            Ok(()) => {}
-            Err(CallError::Deadline) => self.stats.deadlines += 1,
-            Err(CallError::Memory) => self.stats.memory_errors += 1,
-            Err(CallError::Script(_)) => self.stats.script_errors += 1,
+        if let Err(e) = &result {
+            match e {
+                CallError::Deadline => self.stats.deadlines += 1,
+                CallError::Memory => self.stats.memory_errors += 1,
+                CallError::Script(_) => self.stats.script_errors += 1,
+            }
+            self.last_error = Some(e.clone());
         }
         result
     }
