@@ -31,12 +31,19 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// The next event that is not world state: every joining player is sent the clock, the weather and the doors
+/// (SRV-17), which these tests do not look at.
 async fn next_event(session: &mut Session) -> ServerEvent {
-    let (_, packet) = tokio::time::timeout(Duration::from_secs(5), session.recv_event())
-        .await
-        .expect("an event in time")
-        .expect("event");
-    ServerEvent::decode(&packet[PacketHeader::SIZE..]).expect("decodes")
+    loop {
+        let (_, packet) = tokio::time::timeout(Duration::from_secs(5), session.recv_event())
+            .await
+            .expect("an event in time")
+            .expect("event");
+        match ServerEvent::decode(&packet[PacketHeader::SIZE..]).expect("decodes") {
+            ServerEvent::Environment(_) | ServerEvent::Door(_) => {}
+            event => return event,
+        }
+    }
 }
 
 async fn joined(session: &mut Session) -> u32 {

@@ -13,6 +13,7 @@ pub mod ped;
 pub mod quant;
 pub mod recording;
 pub mod vehicle;
+pub mod world;
 
 use std::fmt;
 
@@ -31,8 +32,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]). Version 9 adds payments between
 /// players ([`game::ClientEvent::Pay`], [`game::ServerEvent::Paid`]). Version 10 adds the shot report
 /// ([`game::ClientEvent::Shot`], [`combat`]). Version 11 adds the seat requests
-/// ([`game::ClientEvent::EnterSeat`], [`game::ClientEvent::LeaveSeat`]).
-pub const PROTOCOL_VERSION: u32 = 11;
+/// ([`game::ClientEvent::EnterSeat`], [`game::ClientEvent::LeaveSeat`]). Version 12 adds the world state events
+/// ([`world`]).
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///
