@@ -1356,6 +1356,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sawgrass-netcode"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "rcgen",
+ "sawgrass-bots",
+ "sawgrass-gateway",
+ "sawgrass-protocol",
+ "sawgrass-server",
+ "tokio",
+]
+
+[[package]]
 name = "sawgrass-protocol"
 version = "0.0.0"
 
@@ -1377,6 +1390,7 @@ dependencies = [
  "rcgen",
  "sawgrass-gateway",
  "sawgrass-protocol",
+ "sawgrass-script",
  "sawgrass-store",
  "tikv-jemallocator",
  "tokio",
