@@ -223,6 +223,14 @@ class Marker(unittest.TestCase):
         client = next(r for r in rows if r[0]["name"] == "Client module in the game")
         self.assertEqual((client[2], client[3], client[4]), (0, "waiting for the game", "waiting"))
 
+    def test_a_step_that_needs_the_game_is_not_done_from_its_tasks(self):
+        plan = {**self.plan, "SRV-15": (5, "Sync on the server")}
+        items = [issue(1, "SRV-15: x", state="closed", reason="completed")]
+        rows = progress.step_rows(progress.collect(items, {}, plan), plan)
+        sync = next(r for r in rows if r[0]["name"] == "Sync in the game")
+        self.assertEqual((sync[2], sync[3], sync[4]), (100, progress.SERVER_READY, "waiting"))
+        self.assertIn("server ready", progress.render_svg(progress.collect(items, {}, plan), plan))
+
     def test_weighted_fill(self):
         rows = progress.step_rows(self.tasks("NET-1", "SRV-6"), self.plan)
         self.assertEqual((rows[2][2], rows[2][3]), (50, "1 of 2 done"))
