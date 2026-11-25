@@ -18,6 +18,7 @@ pub mod owned;
 pub mod ownership;
 pub mod recording;
 pub mod scripts;
+pub mod seats;
 pub mod slots;
 pub mod snapshot;
 pub mod tick;
