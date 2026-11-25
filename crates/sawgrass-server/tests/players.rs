@@ -545,6 +545,53 @@ fn a_teleport_is_refused_and_counted() {
     }));
 }
 
+/// The player list an operator reads: each connected player's id, address, position and refused states, filled
+/// only on the tick after it is asked for.
+#[test]
+fn the_player_list_shows_who_is_where() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let list = players.player_list();
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    // Not asked for: nothing is filled in.
+    tick_loop.run_tick();
+    assert!(list.take().is_empty());
+    let spawn = state_packet(10.0);
+    let jump = state_packet(5000.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(spawn.clone());
+        position_of(t, id) == Some([10.0, 5.0, 30.0])
+    }));
+    let _ = client.send_datagram(jump);
+    std::thread::sleep(Duration::from_millis(50));
+    tick_loop.run_tick();
+    list.request();
+    tick_loop.run_tick();
+    let views = list.take();
+    assert_eq!(views.len(), 1);
+    let view = views[0];
+    assert_eq!(view.id, id);
+    assert!(view.address.ip().is_loopback());
+    assert_eq!(view.position, Some([10.0, 5.0, 30.0]));
+    assert_eq!(view.refused.teleport, 1);
+    // Taken once: the next take is empty until asked again.
+    assert!(list.take().is_empty());
+}
+
 /// With `report_only`, a teleport is counted like a refusal but applied, and nobody is corrected: a first session
 /// with the game learns which limit is wrong without fighting it.
 #[test]

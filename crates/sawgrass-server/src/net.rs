@@ -57,7 +57,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::TickInfo;
 use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
-use crate::movement::{Movement, MovementRules, Violation};
+use crate::movement::{Movement, MovementRules, Violation, Violations};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
 use crate::slots::{Slot, Slots};
@@ -147,6 +147,7 @@ struct Inbox {
 enum Inbound {
     Join {
         id: u32,
+        address: SocketAddr,
         sender: Datagrams,
         events: tokio_mpsc::Sender<Vec<u8>>,
         inbox: Arc<Inbox>,
@@ -385,6 +386,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
+        player_list: Arc::default(),
         shutdown: Shutdown(shutdown),
         roster: None,
     }
@@ -427,11 +429,13 @@ async fn serve(
     stats_to_clients: bool,
     limits: Limits,
 ) {
+    let address = session.remote_address();
     let (datagrams, mut event_sender, mut event_receiver) = session.split();
     let (events_tx, mut events_rx) = tokio_mpsc::channel::<Vec<u8>>(EVENT_QUEUE);
     let inbox = Arc::new(Inbox::default());
     let join = Inbound::Join {
         id,
+        address,
         sender: datagrams.clone(),
         events: events_tx,
         inbox: inbox.clone(),
@@ -550,6 +554,10 @@ fn merge_ped(server: &PedBlock, client: &PedBlock) -> PedBlock {
 #[derive(Debug)]
 struct Player {
     slot: Slot,
+    /// Where the connection comes from, for [`PlayerView`].
+    address: SocketAddr,
+    /// When it joined.
+    joined: std::time::Instant,
     entity: Option<Entity>,
     sender: Datagrams,
     events: tokio_mpsc::Sender<Vec<u8>>,
@@ -558,6 +566,43 @@ struct Player {
     movement: Movement,
     /// When this player's entity was last sent a [`ServerEvent::Corrected`].
     corrected_at: Option<std::time::Instant>,
+}
+
+/// One connected player as an operator sees it ([`Players::player_list`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerView {
+    /// The player's entity id in snapshots.
+    pub id: u32,
+    /// Where the connection comes from.
+    pub address: SocketAddr,
+    /// How long ago it joined.
+    pub connected: std::time::Duration,
+    /// Where the server holds the player, in metres; `None` until its first accepted state.
+    pub position: Option<[f32; 3]>,
+    /// This player's states the movement checks refused (or, with report-only, would have).
+    pub refused: Violations,
+}
+
+/// The list of connected players, filled by the tick when asked ([`Players::player_list`]).
+#[derive(Debug, Default)]
+pub struct PlayerList {
+    wanted: AtomicBool,
+    list: Mutex<Vec<PlayerView>>,
+}
+
+impl PlayerList {
+    /// Asks the tick for a fresh list; [`PlayerList::take`] returns it after the next tick.
+    pub fn request(&self) {
+        self.wanted.store(true, Ordering::Relaxed);
+    }
+
+    /// The list the tick filled last, sorted by id, leaving it empty.
+    pub fn take(&self) -> Vec<PlayerView> {
+        self.list
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default()
+    }
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
@@ -609,6 +654,7 @@ pub struct Players {
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
+    player_list: Arc<PlayerList>,
     shutdown: Shutdown,
     roster: Option<mpsc::Sender<Roster>>,
 }
@@ -642,6 +688,13 @@ impl Players {
     #[must_use]
     pub fn stats_slot(&self) -> Arc<Mutex<Option<ServerStats>>> {
         self.pending_stats.clone()
+    }
+
+    /// A handle to ask for the connected players ([`PlayerList::request`]) and read them after the next tick
+    /// ([`PlayerList::take`]). Building the list costs one pass over the players, only on the ticks it is asked for.
+    #[must_use]
+    pub fn player_list(&self) -> Arc<PlayerList> {
+        self.player_list.clone()
     }
 
     /// Joins and leaves from now on, in the order the ticks apply them.
@@ -765,6 +818,35 @@ impl Players {
         // Every visible set has been recomputed without the players who left: their slots may be reused.
         self.slots.release();
         self.send_stats();
+        self.fill_player_list();
+    }
+
+    fn fill_player_list(&mut self) {
+        if !self.player_list.wanted.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut list: Vec<PlayerView> = self
+            .players
+            .iter()
+            .flatten()
+            .map(|p| PlayerView {
+                id: p.slot.wire_id(),
+                address: p.address,
+                connected: now.saturating_duration_since(p.joined),
+                position: self
+                    .states
+                    .get(p.slot.index as usize)
+                    .copied()
+                    .flatten()
+                    .map(|s| s.position.to_metres()),
+                refused: p.movement.violations(),
+            })
+            .collect();
+        list.sort_by_key(|v| v.id);
+        if let Ok(mut slot) = self.player_list.list.lock() {
+            *slot = list;
+        }
     }
 
     /// The owner of a spawned entity and its epoch: `None` for an id that is not one, `Some((None, _))` while
@@ -860,6 +942,7 @@ impl Players {
             match message {
                 Inbound::Join {
                     id,
+                    address,
                     sender,
                     events,
                     inbox,
@@ -891,6 +974,8 @@ impl Players {
                     self.info_ticks[index] = info.tick as u32;
                     self.players[index] = Some(Player {
                         slot,
+                        address,
+                        joined: std::time::Instant::now(),
                         entity: None,
                         sender,
                         events,
