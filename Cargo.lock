@@ -1397,6 +1397,7 @@ dependencies = [
  "sawgrass-gateway",
  "sawgrass-protocol",
  "sawgrass-script",
+ "sawgrass-store",
  "tikv-jemallocator",
  "tokio",
 ]
