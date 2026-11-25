@@ -141,7 +141,7 @@ pub struct Traffic {
     pub closed_floods: AtomicU64,
     /// Connections closed for an event that is not a known [`ClientEvent`].
     pub closed_bad_events: AtomicU64,
-    /// Connection attempts asked for a QUIC Retry because too many handshakes were in progress.
+    /// Connection attempts from an address QUIC had not validated yet, answered with a Retry.
     pub retried_handshakes: AtomicU64,
     /// Connection attempts refused because too many handshakes were in progress.
     pub refused_handshakes: AtomicU64,
@@ -149,7 +149,19 @@ pub struct Traffic {
     pub refused_per_address: AtomicU64,
 }
 
-/// Connections, handshakes included, by IP address.
+/// The address a connection counts against: an IPv4 address, or the /64 network of an IPv6 one, since one IPv6 host
+/// usually holds a whole /64.
+fn address_group(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6) & !((1u128 << 64) - 1);
+            IpAddr::V6(bits.into())
+        }
+        v4 => v4,
+    }
+}
+
+/// Connections, handshakes included, by address group ([`address_group`]).
 type PerAddress = Arc<Mutex<HashMap<IpAddr, usize>>>;
 
 /// One connection counted against its address; dropping it takes the count back.
@@ -200,22 +212,23 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let (outbox, recycle) = spawn_sender(traffic.clone());
     tokio::spawn(async move {
         while let Some(incoming) = gateway.accept().await {
+            if !incoming.address_validated() {
+                // Every unproven address gets a Retry first, a stateless packet, so a spoofed attempt takes no
+                // place below; a real client comes back as a validated attempt one round trip later.
+                accept_traffic.retried_handshakes.fetch_add(1, Ordering::Relaxed);
+                incoming.retry();
+                continue;
+            }
             if active.load(Ordering::Relaxed) >= config.max_players {
                 incoming.refuse();
                 continue;
             }
             if handshakes.load(Ordering::Relaxed) >= limits.max_handshakes {
-                // A Retry costs one packet and proves the address; a proven one beyond the cap is refused.
-                if incoming.address_validated() {
-                    accept_traffic.refused_handshakes.fetch_add(1, Ordering::Relaxed);
-                    incoming.refuse();
-                } else {
-                    accept_traffic.retried_handshakes.fetch_add(1, Ordering::Relaxed);
-                    incoming.retry();
-                }
+                accept_traffic.refused_handshakes.fetch_add(1, Ordering::Relaxed);
+                incoming.refuse();
                 continue;
             }
-            let ip = incoming.remote_address().ip().to_canonical();
+            let ip = address_group(incoming.remote_address().ip());
             let Some(guard) = AddressGuard::take(&per_address, ip, limits.max_per_address) else {
                 accept_traffic.refused_per_address.fetch_add(1, Ordering::Relaxed);
                 incoming.refuse();
@@ -632,4 +645,22 @@ pub fn bind_gateway(
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_counts_per_64_and_ipv4_per_address() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().expect("v6");
+        let b: IpAddr = "2001:db8:1:2:ffff::9".parse().expect("v6");
+        let other: IpAddr = "2001:db8:1:3::1".parse().expect("v6");
+        assert_eq!(address_group(a), address_group(b));
+        assert_ne!(address_group(a), address_group(other));
+        let v4: IpAddr = "192.0.2.7".parse().expect("v4");
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().expect("mapped");
+        assert_eq!(address_group(v4), v4);
+        assert_eq!(address_group(mapped), v4);
+    }
 }

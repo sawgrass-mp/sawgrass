@@ -1,9 +1,10 @@
 //! Per-connection limits (task NET-12).
 //!
 //! Each connection gets a [`Bucket`] for client states and one for events. A bucket admits what arrives within its
-//! rate and bursts, and drops the rest. A connection that keeps sending more than twice its rate, for
-//! [`Limits::strikes`] windows in a row, is told to close: dropping costs little, but a flood still costs the
-//! gateway its receive work, and no honest client sends one.
+//! rate and bursts, and drops the rest. A window with more than twice the rate is a strike and a calmer one takes a
+//! strike back, so a connection that floods more often than not reaches [`Limits::strikes`] and is told to close,
+//! even if it pauses between floods: dropping costs little, but a flood still costs the gateway its receive work,
+//! and no honest client sends one.
 
 use std::time::{Duration, Instant};
 
@@ -20,11 +21,13 @@ pub struct Limits {
     pub event_burst: f32,
     /// The window over which a flood is judged.
     pub window: Duration,
-    /// Windows in a row with more than twice the rate after which the connection is closed.
+    /// Strikes (windows with more than twice the rate, less one for each calmer window) at which the connection is
+    /// closed.
     pub strikes: u32,
-    /// Handshakes in progress beyond which unvalidated addresses get a QUIC Retry and the rest are refused.
+    /// Handshakes in progress beyond which new ones are refused. Only addresses QUIC has validated count: every
+    /// unvalidated attempt gets a Retry first, so spoofed packets take no place.
     pub max_handshakes: usize,
-    /// Connections, handshakes included, from one IP address.
+    /// Connections, handshakes included, from one validated IPv4 address or IPv6 /64.
     pub max_per_address: usize,
 }
 
@@ -101,12 +104,12 @@ impl Bucket {
     pub fn admit(&mut self, now: Instant) -> Admit {
         let since = now.saturating_duration_since(self.window_start);
         if since >= self.window {
-            // More than twice the rate over the window is a strike; a calmer window clears them.
+            // More than twice the rate over the window is a strike; a calmer window takes one back.
             let allowed = 2.0 * self.rate * since.as_secs_f32();
             if self.arrivals as f32 > allowed {
                 self.strikes += 1;
             } else {
-                self.strikes = 0;
+                self.strikes = self.strikes.saturating_sub(1);
             }
             self.window_start = now;
             self.arrivals = 0;
@@ -163,7 +166,7 @@ mod tests {
             assert_ne!(bucket.admit(at(ms)), Admit::Close);
             ms += 50;
         }
-        // Then three seconds at 1,000 a second: closed at the third window's end.
+        // Then floods again: the calm second took one strike back, so the second flooded window closes.
         let mut closed = None;
         for i in 0..4000 {
             if bucket.admit(at(ms)) == Admit::Close {
@@ -173,6 +176,26 @@ mod tests {
             ms += 1;
         }
         let closed = closed.expect("closed");
-        assert!((2900..=3100).contains(&closed), "closed after {closed} states");
+        assert!((1900..=2100).contains(&closed), "closed after {closed} states");
+    }
+
+    #[test]
+    fn a_flood_with_pauses_is_closed_too() {
+        let limits = Limits::default();
+        let start = Instant::now();
+        let mut bucket = Bucket::for_states(&limits, start);
+        // Two seconds at 1,000 a second, one second silent, over and over: about 700 a second on average.
+        let mut ms = 0u64;
+        for cycle in 0..10 {
+            for _ in 0..2000 {
+                if bucket.admit(start + Duration::from_millis(ms)) == Admit::Close {
+                    assert!(cycle >= 1, "closed in the first flood");
+                    return;
+                }
+                ms += 1;
+            }
+            ms += 1000;
+        }
+        panic!("never closed");
     }
 }

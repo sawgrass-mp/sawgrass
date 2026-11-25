@@ -396,3 +396,76 @@ fn connections_beyond_the_per_address_cap_are_refused() {
     });
     drop(players);
 }
+
+/// Forwards every datagram it receives to `server` and nothing back, like a sender with a forged source address:
+/// it never hears the server's answer. Returns its address and a flag that stops it.
+fn one_way_relay(
+    server: std::net::SocketAddr,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("relay");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .expect("timeout");
+    let addr = socket.local_addr().expect("addr");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        while !stopped.load(Ordering::Relaxed) {
+            if let Ok((len, from)) = socket.recv_from(&mut buf)
+                && from != server
+            {
+                let _ = socket.send_to(&buf[..len], server);
+            }
+        }
+    });
+    (addr, stop)
+}
+
+#[test]
+fn spoofed_attempts_take_no_place_and_a_real_client_still_connects() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    // One handshake and one connection per address: a single attempt that kept its place would shut out the client.
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        let config = ListenConfig {
+            limits: Limits {
+                max_handshakes: 1,
+                max_per_address: 1,
+                ..Limits::default()
+            },
+            ..ListenConfig::default()
+        };
+        (addr, roots, net::listen(gateway, config))
+    };
+    let traffic = players.traffic();
+    let (relay, stop) = one_way_relay(addr);
+    runtime.block_on(async {
+        // Ten attempts from 127.0.0.1 that never hear back: each Initial gets a Retry that goes nowhere.
+        let spoofed: Vec<_> = (0..10)
+            .map(|_| tokio::spawn(connect(relay, "localhost", roots.clone(), PROTOCOL_VERSION)))
+            .collect();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while traffic.retried_handshakes.load(Ordering::Relaxed) < 10 {
+            assert!(tokio::time::Instant::now() < deadline, "attempts not retried");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A real client from the same address proves it and gets both places.
+        let real = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        assert!(real.is_ok(), "{real:?}");
+        assert_eq!(traffic.refused_handshakes.load(Ordering::Relaxed), 0);
+        assert_eq!(traffic.refused_per_address.load(Ordering::Relaxed), 0);
+        // A second validated client from that address is beyond the per-address cap.
+        let second = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        assert!(second.is_err(), "second connection from one address admitted");
+        for attempt in spoofed {
+            attempt.abort();
+        }
+    });
+    stop.store(true, Ordering::Relaxed);
+}
