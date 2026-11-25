@@ -21,14 +21,15 @@ use bytes::{Bytes, BytesMut};
 use sawgrass_protocol::delta::{
     DeltaLists, FRAGMENT_PAYLOAD, MAX_ENTITIES, encode_added, encode_block, encode_changed, fragments,
 };
-use sawgrass_protocol::entity::Info;
+use sawgrass_protocol::entity::{EntityKind, Info};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
 
 /// Most entities in one player's snapshot (`docs/architecture.md`: "about 100–150 nearby, by priority"). When
-/// more are visible, the nearest are sent, and one already sent counts as [`KEEP_FACTOR`] times nearer, so an
-/// entity at the edge of the cut does not flicker in and out (IM-6).
+/// more are visible, players go first, then moving vehicles and NPCs, then everything else (IM-7); within each
+/// class the nearest are sent, and one already sent counts as [`KEEP_FACTOR`] times nearer, so an entity at the
+/// edge of the cut does not flicker in and out (IM-6).
 pub const SNAPSHOT_LIMIT: usize = 128;
 
 /// How much nearer an entity already in the last snapshot counts when the visible set is cut: 0.7 of its squared
@@ -40,6 +41,14 @@ pub const KEEP_FACTOR: f32 = 0.7;
 /// slot. Ranking is a third of a crowded player's snapshot cost, and an entity entering a full view waits at most
 /// this many ticks.
 pub const RANK_EVERY: usize = 4;
+
+/// Slowest speed, in m/s, at which a vehicle or NPC counts as moving when the visible set is cut (IM-7): above
+/// a walk's drift so parked cars and idle NPCs rank as still. A placeholder until the game's figures are known.
+pub const MOVING_SPEED: f32 = 0.5;
+
+/// Added to the squared distance in cm² of each class below players, so a class never mixes with the one above:
+/// more than the square of any distance on the 16 km map.
+const CLASS_GAP: f64 = 1e13;
 
 /// Ticks of history kept for baselines: 0.8 s at 20 Hz, several round trips.
 pub const HISTORY_TICKS: usize = 16;
@@ -298,11 +307,13 @@ pub struct View {
     change: Vec<u8>,
     payload: Vec<u8>,
     /// This build's candidates for the cut, in slot order: ranking key and slot.
-    ranked: Vec<(f32, u32)>,
+    ranked: Vec<(f64, u32)>,
     /// The slots that may go into this snapshot, ascending: the visible set, or its cut.
     chosen: Vec<u32>,
     /// Scratch for finding the cut's threshold.
-    keys: Vec<f32>,
+    keys: Vec<f64>,
+    /// Players visible but left out of a ranked cut since the last [`View::take_players_cut`].
+    players_cut: u64,
     /// The tick of the last snapshot built.
     last: Option<u32>,
     /// The length of each of this tick's datagrams, to cut them from their buffer.
@@ -329,6 +340,12 @@ impl View {
         self.last
             .and_then(|t| self.sent.get(t as usize % HISTORY_TICKS))
             .map_or(&[], |(_, slots)| slots)
+    }
+
+    /// How many times a visible player was left out of a ranked cut since the last call (IM-7: only when more
+    /// than [`SNAPSHOT_LIMIT`] players are visible).
+    pub fn take_players_cut(&mut self) -> u64 {
+        std::mem::take(&mut self.players_cut)
     }
 
     /// The datagrams of the last build, to be sent in order. Drained by the caller.
@@ -377,7 +394,7 @@ impl View {
                     self.chosen
                         .extend(slots.iter().copied().filter(|&s| visible.contains(EntityId(s))));
                 }
-                _ => self.rank(states, own, limit),
+                _ => self.rank(states, &history.infos, own, limit),
             }
         }
         let i = tick as usize % HISTORY_TICKS;
@@ -560,10 +577,11 @@ impl View {
 }
 
 impl View {
-    /// Chooses the `limit` nearest visible entities into `chosen`, in slot order. One in the last snapshot counts as
-    /// [`KEEP_FACTOR`] times nearer. Ties at the cut go to the lowest slots, so the result does not depend on how
+    /// Chooses `limit` visible entities into `chosen`, in slot order: players first, then vehicles and NPCs moving
+    /// at [`MOVING_SPEED`] or faster, then the rest, the nearest of each class (`infos` gives a slot's kind). One in
+    /// the last snapshot counts as [`KEEP_FACTOR`] times nearer. Ties at the cut go to the lowest slots, so the result does not depend on how
     /// the candidates are ordered.
-    fn rank(&mut self, states: &[Option<EntityState>], own: EntityState, limit: usize) {
+    fn rank(&mut self, states: &[Option<EntityState>], infos: &[Info], own: EntityState, limit: usize) {
         let own_cm = own.position.cm().map(|c| c as f32);
         self.ranked.clear();
         // The last snapshot's slots, ascending like the visible set: walked alongside it.
@@ -581,18 +599,22 @@ impl View {
                 p += 1;
             }
             let kept = previous.get(p) == Some(&id.0);
+            let near = f64::from((dx * dx + dy * dy) * if kept { KEEP_FACTOR } else { 1.0 });
             self.ranked
-                .push(((dx * dx + dy * dy) * if kept { KEEP_FACTOR } else { 1.0 }, id.0));
+                .push((near + class(infos.get(id.0 as usize), &state) * CLASS_GAP, id.0));
         }
         if self.ranked.len() <= limit {
             self.chosen.extend(self.ranked.iter().map(|r| r.1));
             return;
         }
+        // Players are the first class, so all of them make the cut unless they alone are over the limit.
+        let players = self.ranked.iter().filter(|r| r.0 < CLASS_GAP).count();
+        self.players_cut += players.saturating_sub(limit) as u64;
         // Find the key of the last one that makes the cut; everything below it goes, and of those equal to it the
         // lowest slots. The candidates stay in slot order, so nothing is sorted.
         self.keys.clear();
         self.keys.extend(self.ranked.iter().map(|r| r.0));
-        let (_, &mut threshold, _) = self.keys.select_nth_unstable_by(limit - 1, f32::total_cmp);
+        let (_, &mut threshold, _) = self.keys.select_nth_unstable_by(limit - 1, f64::total_cmp);
         let mut ties = limit - self.ranked.iter().filter(|r| r.0 < threshold).count();
         for &(key, id) in &self.ranked {
             if key < threshold || (key == threshold && ties > 0) {
@@ -602,6 +624,23 @@ impl View {
                 self.chosen.push(id);
             }
         }
+    }
+}
+
+/// The rank class of an entity whose info is `info`: 0 for a player (a slot past the infos is one), 1 for a
+/// vehicle or NPC moving at [`MOVING_SPEED`] or faster, 2 for anything else.
+fn class(info: Option<&Info>, state: &EntityState) -> f64 {
+    match info.map(|i| i.kind) {
+        None | Some(EntityKind::Player) => 0.0,
+        Some(EntityKind::Vehicle | EntityKind::Npc) => {
+            let [vx, vy, vz] = state.velocity.to_metres_per_second();
+            if vx * vx + vy * vy + vz * vz >= MOVING_SPEED * MOVING_SPEED {
+                1.0
+            } else {
+                2.0
+            }
+        }
+        Some(EntityKind::Object) => 2.0,
     }
 }
 
@@ -621,7 +660,7 @@ mod tests {
     use sawgrass_protocol::delta::{
         Baseline, DeltaEncoder, Reassembler, baseline_age, decode_delta_with_info,
     };
-    use sawgrass_protocol::entity::{AssetId, EntityKind};
+    use sawgrass_protocol::entity::AssetId;
     use sawgrass_protocol::{Position, Rotation, Velocity};
 
     struct Rng(u64);
@@ -931,6 +970,62 @@ mod tests {
         let mut third: Vec<u32> = (1..SNAPSHOT_LIMIT as u32).collect();
         third.push(others as u32);
         assert_eq!(view.sent(), &third[..]);
+    }
+
+    /// IM-7: a parking lot nearer than the players does not push them, or moving vehicles, out of the cut; within
+    /// a class the nearest go, and of two at the same distance the lower slot.
+    #[test]
+    fn the_cut_sends_players_then_moving_entities_then_the_rest() {
+        let mut grid = DenseGrid::default();
+        let mut history = History::new();
+        let mut view = View::new();
+        let parked = SNAPSHOT_LIMIT as u32 + 1;
+        let car = Info::with_fields(EntityKind::Vehicle, AssetId(3), &[255, 255, 0, 0, 0, 0]).expect("car");
+        let still = |id: u32, x: f32| EntityState {
+            velocity: Velocity::from_metres_per_second([0.1, 0.0, 0.0]).expect("velocity"),
+            ..state(id, [x, 0.0])
+        };
+        // Slot 0 the viewer; 1..=parked still cars 1 m apart, the last as far as the farthest that makes the cut;
+        // then two cars driving at 10 m/s and two players, all farther out.
+        let mut states = vec![Some(state(0, [0.0, 0.0]))];
+        let mut infos = vec![Info::PLAYER];
+        for i in 1..=parked {
+            let x = if i == parked {
+                -(SNAPSHOT_LIMIT as f32 - 4.0)
+            } else {
+                i as f32
+            };
+            states.push(Some(still(i, x)));
+            infos.push(car);
+        }
+        for (i, x) in [(parked + 1, 140.0), (parked + 2, 141.0)] {
+            states.push(Some(EntityState {
+                velocity: Velocity::from_metres_per_second([10.0, 0.0, 0.0]).expect("velocity"),
+                ..state(i, [x, 0.0])
+            }));
+            infos.push(car);
+        }
+        for (i, x) in [(parked + 3, 150.0), (parked + 4, 151.0)] {
+            states.push(Some(still(i, x)));
+            infos.push(Info::PLAYER);
+        }
+        for (slot, s) in states.iter().enumerate() {
+            let [x, y, _] = s.expect("state").position.to_metres();
+            grid.upsert(EntityId(slot as u32), Point::new(x, y));
+        }
+        grid.rebuild();
+        let ticks = vec![1; infos.len()];
+        history.record(1, &states, &infos, &ticks, []);
+        view.build(0, &grid, &history, &VisibilityConfig::default(), 1, 0);
+        // Four places go to the players and moving cars; the nearest parked cars fill the rest, and of the two
+        // parked at the edge of the cut the lower slot wins.
+        let mut expected: Vec<u32> = (1..=SNAPSHOT_LIMIT as u32 - 4).collect();
+        expected.extend(parked + 1..=parked + 4);
+        assert_eq!(view.sent(), &expected[..]);
+        assert_eq!(class(Some(&car), &still(1, 0.0)), 2.0);
+        assert_eq!(class(Some(&car), &state(1, [0.0, 0.0])), 1.0);
+        assert_eq!(class(None, &still(1, 0.0)), 0.0);
+        assert_eq!(view.take_players_cut(), 0);
     }
 
     #[test]
