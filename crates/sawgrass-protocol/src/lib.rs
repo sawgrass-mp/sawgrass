@@ -27,9 +27,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// carry the player's ped block ([`ped`]). Version 6 adds the vehicle block ([`vehicle`]) and the states of the
 /// entities a client simulates after its own ([`game::OwnedState`]). Version 7 adds
 /// [`game::ServerEvent::Corrected`], the server's answer to a refused state.
-/// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]). Version 9 is DB-8's (#162) and 10
-/// SRV-15's (#201). Version 11 adds the shot report ([`game::ClientEvent::Shot`], [`combat`]).
-pub const PROTOCOL_VERSION: u32 = 11;
+/// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]). Version 9 adds the shot report
+/// ([`game::ClientEvent::Shot`], [`combat`]).
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///
