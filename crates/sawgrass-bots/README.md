@@ -119,7 +119,7 @@ taskset -c 2,3 target/release/sawgrass-bots run ...
 
 ## Playing a recorded session
 
-A server started with `--record FILE` writes what every client sends, as it arrives (task SRV-21). The bots play
+A server started with `--record FILE` writes what every client sends, as it arrives (task SRV-22). The bots play
 such a file against any server of the same protocol version, one connection per recorded connection, joining,
 sending and leaving at the recorded times:
 

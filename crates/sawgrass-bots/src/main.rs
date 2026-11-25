@@ -110,7 +110,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
     Ok(run)
 }
 
-/// `replay`: plays a server's `--record` file against a server (task SRV-21).
+/// `replay`: plays a server's `--record` file against a server (task SRV-22).
 async fn replay(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let (mut file, mut server, mut cert, mut name, mut speed) =
         (None, None, None, "localhost".to_owned(), 1.0);

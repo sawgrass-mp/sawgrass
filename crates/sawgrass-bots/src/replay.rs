@@ -1,4 +1,4 @@
-//! Plays a session recording (task SRV-21) against a server: one connection per recorded connection, joining,
+//! Plays a session recording (task SRV-22) against a server: one connection per recorded connection, joining,
 //! sending and leaving at the recorded times.
 //!
 //! Datagrams and events are sent as recorded, except the tick in a client state's header, which acknowledges the
