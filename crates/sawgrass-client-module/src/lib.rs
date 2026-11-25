@@ -11,6 +11,7 @@
 //! - [`hooks`]: the game functions the module hooks and the events they report.
 //! - [`assets`] and [`entity_pool`]: protocol asset ids to game assets per build, server ids to game entities.
 //! - [`module`]: start, frame and stop, and [`module::NetCore`], where the network core plugs in.
+//! - [`link`]: [`link::NetLink`], the [`module::NetCore`] over the network core in `sawgrass-netcode`.
 //! - [`fake`]: a runtime over a made-up code image, so all of the above is tested without the game.
 
 pub mod assets;
@@ -18,6 +19,7 @@ pub mod entity_pool;
 pub mod fake;
 pub mod game;
 pub mod hooks;
+pub mod link;
 pub mod module;
 pub mod pattern;
 pub mod runtime;
