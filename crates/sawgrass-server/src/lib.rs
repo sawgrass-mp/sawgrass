@@ -5,6 +5,7 @@
 //! maximum over a rolling window against the budget in `docs/architecture.md` (p99 under 70% of the tick
 //! interval). [`interest`] decides which entities each player sees (task IM-1). [`net`] connects players
 //! through an in-process gateway and sends them snapshots. [`slots`] gives every entity a dense, recycled index.
+//! [`scripts`] runs the Luau resources in the tick.
 
 pub mod cpu;
 pub mod interest;
@@ -13,6 +14,7 @@ pub mod metrics;
 pub mod movement;
 pub mod net;
 pub mod ownership;
+pub mod scripts;
 pub mod slots;
 pub mod snapshot;
 pub mod tick;
