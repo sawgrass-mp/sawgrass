@@ -52,13 +52,16 @@ For the first session:
 ```sh
 NAME=playtest-$(date +%Y%m%d-%H%M)
 target/release/sawgrass-server --listen 0.0.0.0:4433 --cert cert/cert.der --key cert/key.der \
-    --movement-report-only --record $NAME.rec | tee $NAME.log
+    --movement-report-only --list-players --record $NAME.rec | tee $NAME.log
 ```
 
 - `--movement-report-only` counts every player state that breaks a movement rule but applies it. The game's map
   coordinates and speeds are not known yet, so a wrong limit would otherwise snap players back; with this flag the
   counts show which limit is wrong without spoiling the session. It covers the vehicles and NPCs a player drives or
   spawns too, so a car is not snapped back either. Leave it out once the limits are set.
+- `--list-players` adds one line per connected player after each five-second line: its id, address, time
+  connected, position and refused states. With it **the log holds the players' IP addresses**, so keep the log as
+  private as the recording.
 - `--record FILE` keeps everything the clients send, so the session can be played again through the bots (below).
 - Keep the defaults for the rest. In particular do not use `--stats-to-clients` on a server players can reach.
 
@@ -103,8 +106,8 @@ Write down the time of anything that looks wrong; the recording and the log can 
 Stop the server with Ctrl+C. The recording is written out every half second, so at most that much is lost. Keep
 the log and the recording together.
 
-A recording holds everything the players sent: their positions, chat and script events. **Keep it private and
-never commit it to this repository.** To play it again against a server of the same version:
+A recording holds everything the players sent: their positions, chat and script events, and with
+`--list-players` the log holds their IP addresses. **Keep both private and never commit them to this repository.** To play it again against a server of the same version:
 
 ```sh
 target/release/sawgrass-bots replay --file playtest-20261201-2000.rec --server 127.0.0.1:4433 \
