@@ -1,13 +1,10 @@
 //! The network core inside the module: snapshots from a made-up server become entities in the fake game, and the
 //! local player's state goes out.
 
-use std::collections::BTreeMap;
-
 use sawgrass_client_module::assets::{AssetId, AssetTable};
-use sawgrass_client_module::entity_pool::NetId;
 use sawgrass_client_module::fake::FakeRuntime;
 use sawgrass_client_module::game::{EntityKind, FakeGame, GameApi, GameAsset, Pose};
-use sawgrass_client_module::link::{InfoSource, NetLink};
+use sawgrass_client_module::link::NetLink;
 use sawgrass_client_module::module::{Module, required_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::FunctionTable;
@@ -42,14 +39,6 @@ fn module() -> Module<FakeRuntime> {
     module
 }
 
-struct Infos(BTreeMap<NetId, Info>);
-
-impl InfoSource for Infos {
-    fn info(&self, id: NetId) -> Option<Info> {
-        self.0.get(&id).copied()
-    }
-}
-
 fn state(id: u32, x: f32) -> EntityState {
     EntityState {
         id,
@@ -59,10 +48,22 @@ fn state(id: u32, x: f32) -> EntityState {
     }
 }
 
-/// Full snapshot datagrams for one tick.
+/// Full snapshot datagrams for one tick. Entity 1 is a vehicle with model 5, the rest are players.
 fn snapshot(encoder: &mut DeltaEncoder, tick: u32, states: &[EntityState]) -> Vec<Vec<u8>> {
+    let infos: Vec<Info> = states
+        .iter()
+        .map(|s| {
+            if s.id == 1 {
+                Info::new(NetKind::Vehicle, AssetId(5))
+            } else {
+                Info::PLAYER
+            }
+        })
+        .collect();
     let mut payload = Vec::new();
-    encoder.encode(tick, states, None, &mut payload).expect("encode");
+    encoder
+        .encode_with_info(tick, states, &infos, None, &[], &mut payload)
+        .expect("encode");
     fragments(&payload)
         .expect("fragments")
         .map(|(fragment, part)| {
@@ -94,8 +95,7 @@ fn remote_entities_follow_the_snapshots_and_the_local_player_reports() {
         },
     );
     game.local_player = Some(me);
-    let infos = Infos(BTreeMap::from([(1, Info::new(NetKind::Vehicle, AssetId(5)))]));
-    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()), infos);
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
     let (inbox, outbox) = (link.inbox(), link.outbox());
     let mut encoder = DeltaEncoder::default();
     let mut sent = 0;
@@ -155,14 +155,13 @@ fn remote_entities_follow_the_snapshots_and_the_local_player_reports() {
 fn an_owned_entity_is_left_to_the_game_and_measured() {
     let mut module = module();
     let mut game = FakeGame::default();
-    let infos = Infos(BTreeMap::from([(1, Info::new(NetKind::Vehicle, AssetId(5)))]));
-    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()), infos);
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
     let inbox = link.inbox();
     let mut encoder = DeltaEncoder::default();
     let run = |frames: std::ops::Range<u32>,
                module: &mut Module<FakeRuntime>,
                game: &mut FakeGame,
-               link: &mut NetLink<Infos>,
+               link: &mut NetLink,
                encoder: &mut DeltaEncoder| {
         for frame in frames {
             if frame % 3 == 0 {

@@ -9,21 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use sawgrass_netcode::interp::Sample;
+use sawgrass_netcode::interp::{Event, Sample};
 use sawgrass_netcode::{Client, Pose as NetPose};
-use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
+use sawgrass_protocol::entity::EntityKind as NetKind;
 
 use crate::entity_pool::NetId;
 use crate::game::{EntityKind, Pose};
 use crate::module::{CoreEvent, NetCore, World};
-
-/// What each remote entity is.
-///
-/// TODO(CLIENT-6, #165): the network core will carry each entity's `Info` on its samples; this lookup goes away
-/// then.
-pub trait InfoSource {
-    fn info(&self, id: NetId) -> Option<Info>;
-}
 
 /// Datagrams handed between the connection and the link. Cloning gives another handle to the same queue.
 #[derive(Debug, Clone, Default)]
@@ -94,9 +86,8 @@ fn velocity(last: Option<[f32; 3]>, now: [f32; 3], dt: f32) -> [f32; 3] {
 }
 
 #[derive(Debug)]
-pub struct NetLink<I> {
+pub struct NetLink {
     client: Client,
-    infos: I,
     inbox: Datagrams,
     outbox: Datagrams,
     /// Local time in seconds, the sum of the frames' `dt`.
@@ -111,11 +102,10 @@ pub struct NetLink<I> {
     pub world_errors: u64,
 }
 
-impl<I: InfoSource> NetLink<I> {
-    pub fn new(client: Client, infos: I) -> Self {
+impl NetLink {
+    pub fn new(client: Client) -> Self {
         Self {
             client,
-            infos,
             inbox: Datagrams::default(),
             outbox: Datagrams::default(),
             now: 0.0,
@@ -170,16 +160,21 @@ impl<I: InfoSource> NetLink<I> {
             let _ = self.client.receive(&datagram, self.now);
         }
         self.client.remote(self.now, &mut self.samples);
-        let present: BTreeSet<NetId> = self.samples.iter().map(|s| s.id).collect();
-        let gone: Vec<NetId> = self.shown.difference(&present).copied().collect();
-        for id in gone {
-            self.shown.remove(&id);
-            let result = world.despawn(id);
-            self.count(result);
+        for id in self.client.removed().to_vec() {
+            if self.shown.remove(&id) {
+                let result = world.despawn(id);
+                self.count(result);
+            }
+            self.owned.remove(&id);
         }
         let samples = std::mem::take(&mut self.samples);
         for sample in &samples {
             let pose = game_pose(&sample.pose);
+            if sample.event == Some(Event::InfoChanged) && self.shown.remove(&sample.id) {
+                // A new model: the game cannot swap it in place, so the entity is spawned again below.
+                let result = world.despawn(sample.id);
+                self.count(result);
+            }
             if let Some(owned) = self.owned.get_mut(&sample.id) {
                 // The game simulates it: measure it, and spawn it only if it is not there yet.
                 if let Some(now) = world.pose(sample.id) {
@@ -191,7 +186,10 @@ impl<I: InfoSource> NetLink<I> {
             if self.shown.contains(&sample.id) {
                 let result = world.set_pose(sample.id, pose);
                 self.count(result);
-            } else if let Some(info) = self.infos.info(sample.id) {
+            } else {
+                // Not only on `Event::Appeared`: an entity the game removed by itself, or whose spawn failed, is
+                // spawned again on a later frame.
+                let info = sample.info;
                 let result = world.spawn(sample.id, game_kind(info.kind), info.model, pose);
                 if self.count(result).is_some() {
                     self.shown.insert(sample.id);
@@ -233,7 +231,7 @@ impl<I: InfoSource> NetLink<I> {
     }
 }
 
-impl<I: InfoSource> NetCore for NetLink<I> {
+impl NetCore for NetLink {
     fn on_event(&mut self, event: &CoreEvent) {
         // An entity the game removed by itself is spawned again on the next frame it is still in the snapshot.
         if let CoreEvent::EntityLost(id) = event {
