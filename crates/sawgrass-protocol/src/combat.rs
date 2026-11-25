@@ -3,9 +3,10 @@
 //! and a shot that hit nothing still counts against the weapon's fire rate.
 //!
 //! Wire layout, after the event code: the snapshot tick the shooter drew its targets from (`u32`), how far its
-//! render time was past that tick toward the next (`u8`, out of 256; NET-22), the weapon ([`AssetId`], `u32`), the shooter's position (9 bytes), the number of hits (`u8`, at most [`MAX_HITS`]), then
-//! each hit: the target's entity id (`u32`), the body zone (`u8`, [`Zone`]) and the hit point (9 bytes). All
-//! integers are little-endian.
+//! render time was past that tick toward the next (`u8`, out of 256; NET-22), the weapon ([`AssetId`], `u32`), the
+//! shooter's position (9 bytes), the number of hits (`u8`, at most [`MAX_HITS`]), then each
+//! hit: the target's entity id (`u32`), the body zone (`u8`, [`Zone`]) and the hit point (9 bytes). All integers
+//! are little-endian.
 
 use crate::entity::AssetId;
 use crate::quant::Position;
