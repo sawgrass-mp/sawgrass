@@ -4,7 +4,7 @@ Status: proposed, 2026-11-25
 
 ## Context
 
-Step 8 of the [roadmap](../roadmap.md#8-sync-in-the-game) lists what can be built before the game runs on PC: the
+Step 9 of the [roadmap](../roadmap.md#9-sync-in-the-game) lists what can be built before the game runs on PC: the
 replicated state of peds and their animations and its encoding, the ownership rules and checks for vehicles and
 NPCs, the server's checks of weapons and damage, and the server side of world state. Today the protocol carries one
 kind of entity, a position, velocity and rotation with an id ([`sawgrass-protocol`](../../crates/sawgrass-protocol/src/lib.rs)),
