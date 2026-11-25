@@ -10,6 +10,7 @@ pub mod entity;
 pub mod game;
 pub mod ped;
 pub mod quant;
+pub mod vehicle;
 
 use std::fmt;
 
@@ -22,9 +23,10 @@ pub use quant::{Position, Rotation, Velocity};
 /// payloads in [`game`]. Version 3 sends snapshots delta-encoded ([`delta`], [`PacketKind::DeltaSnapshot`]) and
 /// makes the tick in a client state's header the newest snapshot tick the client decoded. Version 4 adds each
 /// entity's kind, model and block fields to delta snapshots ([`entity`], ADR 0006). Version 5 lets a client state
-/// carry the player's ped block ([`ped`]). Version 6 adds payments between players ([`game::ClientEvent::Pay`],
-/// [`game::ServerEvent::Paid`]).
-pub const PROTOCOL_VERSION: u32 = 6;
+/// carry the player's ped block ([`ped`]). Version 6 adds the vehicle block ([`vehicle`]) and the states of the
+/// entities a client simulates after its own ([`game::OwnedState`]). Version 7 adds payments
+/// between players ([`game::ClientEvent::Pay`], [`game::ServerEvent::Paid`]).
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///

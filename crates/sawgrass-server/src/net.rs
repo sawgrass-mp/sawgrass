@@ -46,7 +46,9 @@ use bytes::Bytes;
 use hecs::{Entity, World};
 use rayon::prelude::*;
 use sawgrass_gateway::{Datagrams, Gateway, Session};
+use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent, ServerStats};
+use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use sawgrass_store::WalletId;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -84,7 +86,7 @@ struct Batch {
 /// What one player's connection tasks leave for the tick thread. Each field holds the latest value only.
 #[derive(Debug, Default)]
 struct Inbox {
-    state: Mutex<Option<ClientState>>,
+    state: Mutex<Option<(ClientState, Option<PedBlock>)>>,
     wants_stats: AtomicBool,
     /// The newest snapshot tick the client decoded completely, from the tick field of its client states' headers
     /// (0: none). The server uses it as the delta baseline only if it sent that tick to this player.
@@ -314,6 +316,9 @@ pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<A
             })
             .flatten(),
         states: Vec::new(),
+        peds: Vec::new(),
+        infos: Vec::new(),
+        info_ticks: Vec::new(),
         history: History::new(),
         outbox,
         recycle,
@@ -453,7 +458,7 @@ async fn serve(
         if header.kind != PacketKind::ClientState {
             continue;
         }
-        if let Ok(state) = ClientState::decode(&packet[PacketHeader::SIZE..])
+        if let Ok(state) = ClientState::decode_with_ped(&packet[PacketHeader::SIZE..])
             && let Ok(mut slot) = inbox.state.lock()
         {
             *slot = Some(state);
@@ -463,6 +468,38 @@ async fn serve(
     }
     datagrams.close();
     let _ = inbound.send(Inbound::Leave { id });
+}
+
+/// Health a player spawns with; a placeholder until the roleplay base sets it (ADR 0006, section 5).
+const SPAWN_HEALTH: u8 = 100;
+
+/// The info a player's ped block is sent as.
+fn ped_info(ped: &PedBlock) -> Info {
+    // PED_FIELDS is below MAX_FIELDS, so this cannot fail.
+    Info::with_fields(EntityKind::Player, AssetId::NONE, &ped.to_fields()).unwrap_or(Info::PLAYER)
+}
+
+/// The server's ped block after a client sent `client` (ADR 0006, section 3): the client's motion, flags, aim
+/// and actions are presentation and taken as sent; its weapon is taken until the server checks it against what the
+/// character holds (SRV-16). Vehicle, seat, health and armour are the server's, and so are the motions "in
+/// vehicle" and "dead": a client cannot enter or leave them, and while the server holds one, it keeps it.
+fn merge_ped(server: &PedBlock, client: &PedBlock) -> PedBlock {
+    let held = matches!(server.motion, Motion::InVehicle | Motion::Dead);
+    let motion = match client.motion {
+        _ if held => server.motion,
+        Motion::InVehicle | Motion::Dead => Motion::Idle,
+        m => m,
+    };
+    PedBlock {
+        motion,
+        flags: client.flags,
+        weapon: client.weapon,
+        aim_yaw: client.aim_yaw,
+        aim_pitch: client.aim_pitch,
+        full_body: client.full_body,
+        upper_body: client.upper_body,
+        ..*server
+    }
 }
 
 /// One connected player, as the tick thread sees it.
@@ -497,6 +534,11 @@ pub struct Players {
     pool: Option<rayon::ThreadPool>,
     /// The wire state of every placed player, by slot index.
     states: Vec<Option<EntityState>>,
+    /// Every player's ped block, by slot index, as the server holds it.
+    peds: Vec<PedBlock>,
+    /// The info each slot sends, built from `peds`, and the tick it last changed at.
+    infos: Vec<Info>,
+    info_ticks: Vec<u32>,
     /// The wire states of the last ticks, for delta baselines.
     history: History,
     outbox: tokio_mpsc::Sender<Batch>,
@@ -552,7 +594,7 @@ impl Players {
     /// Applies what arrived since the last tick, then sends every player its snapshot for `info.tick`.
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
         self.apply_inbound(world, info);
-        self.apply_states(world);
+        self.apply_states(world, info.tick as u32);
         self.grid.rebuild();
         self.send_snapshots(info.tick as u32);
         // Every visible set has been recomputed without the players who left: their slots may be reused.
@@ -590,8 +632,17 @@ impl Players {
                     if self.players.len() <= index {
                         self.players.resize_with(index + 1, || None);
                         self.states.resize(index + 1, None);
+                        self.peds.resize(index + 1, PedBlock::default());
+                        self.infos.resize(index + 1, Info::PLAYER);
+                        self.info_ticks.resize(index + 1, 0);
                     }
                     self.by_connection.insert(id, slot);
+                    self.peds[index] = PedBlock {
+                        health: SPAWN_HEALTH,
+                        ..PedBlock::default()
+                    };
+                    self.infos[index] = ped_info(&self.peds[index]);
+                    self.info_ticks[index] = info.tick as u32;
                     self.players[index] = Some(Player {
                         slot,
                         entity: None,
@@ -623,11 +674,11 @@ impl Players {
 
     /// Takes each player's latest state, if a new one arrived and passes the movement checks, into the world, the
     /// grid and the wire states. A refused state is counted and dropped: the player stays where it was.
-    fn apply_states(&mut self, world: &mut World) {
+    fn apply_states(&mut self, world: &mut World, tick: u32) {
         let rules = &self.movement;
         let now = std::time::Instant::now();
         for player in self.players.iter_mut().flatten() {
-            let Some(state) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
+            let Some((state, ped)) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
                 continue;
             };
             if let Err(violation) = player.movement.check(rules, &state, now) {
@@ -648,6 +699,15 @@ impl Players {
                 }
                 None => player.entity = Some(world.spawn((NetId(id), PlayerState(state)))),
             }
+            let index = player.slot.index as usize;
+            if let Some(ped) = ped {
+                let merged = merge_ped(&self.peds[index], &ped);
+                if merged != self.peds[index] {
+                    self.peds[index] = merged;
+                    self.infos[index] = ped_info(&merged);
+                    self.info_ticks[index] = tick;
+                }
+            }
             let [x, y, _] = state.position.to_metres();
             self.grid.upsert(EntityId(player.slot.index), Point::new(x, y));
             self.states[player.slot.index as usize] = Some(EntityState {
@@ -662,6 +722,7 @@ impl Players {
     fn send_snapshots(&mut self, tick: u32) {
         let (grid, config) = (&self.grid, &self.visibility);
         let (history, states, players) = (&mut self.history, &self.states, &mut self.players);
+        let (infos, info_ticks) = (&self.infos[..], &self.info_ticks[..]);
         // The baselines the players acknowledged, so the changes against each are encoded once for all of them.
         let acks = |players: &[Option<Player>]| -> Vec<u32> {
             players
@@ -678,7 +739,7 @@ impl Players {
         };
         match &self.pool {
             Some(pool) => pool.install(|| {
-                history.record(tick, states, acks(players));
+                history.record(tick, states, infos, info_ticks, acks(players));
                 let history = &*history;
                 players
                     .par_iter_mut()
@@ -686,7 +747,7 @@ impl Players {
                     .for_each(|player| build(history, player));
             }),
             None => {
-                history.record(tick, states, acks(players));
+                history.record(tick, states, infos, info_ticks, acks(players));
                 players
                     .iter_mut()
                     .flatten()
@@ -775,5 +836,59 @@ mod tests {
         let mapped: IpAddr = "::ffff:192.0.2.7".parse().expect("mapped");
         assert_eq!(address_group(v4), v4);
         assert_eq!(address_group(mapped), v4);
+    }
+
+    #[test]
+    fn a_client_sets_its_presentation_but_not_the_servers_fields() {
+        use sawgrass_protocol::ped::Action;
+        let server = PedBlock {
+            health: 80,
+            armour: 20,
+            ..PedBlock::default()
+        };
+        let client = PedBlock {
+            motion: Motion::Run,
+            flags: PedBlock::AIMING,
+            weapon: AssetId(9),
+            aim_yaw: 3,
+            aim_pitch: 130,
+            vehicle: 77,
+            seat: 1,
+            full_body: Action {
+                action: AssetId(5),
+                start_tick: 40,
+                flags: Action::LOOP,
+            },
+            health: 255,
+            armour: 255,
+            ..PedBlock::default()
+        };
+        let merged = merge_ped(&server, &client);
+        assert_eq!(
+            merged,
+            PedBlock {
+                vehicle: 0,
+                seat: 0,
+                health: 80,
+                armour: 20,
+                ..client
+            }
+        );
+        // A client cannot claim a seat or death, nor leave either while the server holds it.
+        for claimed in [Motion::InVehicle, Motion::Dead] {
+            let m = merge_ped(
+                &server,
+                &PedBlock {
+                    motion: claimed,
+                    ..client
+                },
+            );
+            assert_eq!(m.motion, Motion::Idle);
+        }
+        let dead = PedBlock {
+            motion: Motion::Dead,
+            ..server
+        };
+        assert_eq!(merge_ped(&dead, &client).motion, Motion::Dead);
     }
 }

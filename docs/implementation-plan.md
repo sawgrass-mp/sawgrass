@@ -83,8 +83,12 @@ says so with the numbers, and the order is revisited.
 | IM-5 (#97) | Dense 50 m grid and bitset visible sets in `interest.rs`, as IM-2 measured them | Visible sets 1.8 to 2.8 times faster on the bots' movement (IM-3) | IM-4 |
 | SRV-7 (#98) | Visible sets and snapshot encoding per player in parallel on rayon | Crowd tick p50 2.7 to 3.2 times lower on 4 threads (SRV-4) | NET-9, IM-5 |
 
-Gate: 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under 70% of the interval, on the
-same 4-core machine as BOT-3.
+Gate: 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under 70% of the interval, on a dedicated
+4-core machine with the server on two of its cores. Until 2026-11-25 the gate named BOT-3's shared cloud VM; the
+maintainer moved it to a dedicated machine because a shared VM's figures are noisy and cannot be reproduced.
+
+Result (2026-11-25, [two-machine load](research/two-machine-load/README.md)): met. 3,800 bots ran at tick p99 23.8
+and 24.4 ms with no overrun and no dropped bot. For reference, 3,000 bots on the BOT-3 VM ran at p99 37 to 38 ms.
 
 ### Phase 2: fewer bytes, then 30 Hz
 
@@ -98,6 +102,10 @@ same 4-core machine as BOT-3.
 Gate: 4,096 bots with the bots on a second machine, as the
 [bots README](../crates/sawgrass-bots/README.md#bots-and-server-on-separate-machines) describes. This is stage
 1's gate in the roadmap.
+
+Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.md)): not met. At 20 Hz, with 3,700
+of the 4,096 bots on the server's machine, 4,096 bots ran with no overrun. On two server cores the gateway is the limit: with one gateway thread, tick p99
+28 to 30 ms and 7 to 12% of snapshots dropped; with two, every snapshot delivered and p99 38 to 39 ms.
 
 ### Phase 3: reliability of the realtime core
 
@@ -113,7 +121,7 @@ Gate: 4,096 bots with the bots on a second machine, as the
 | ID | Task |
 |---|---|
 | DB-5 | The single writer and its RocksDB store with group commit, behind the store trait (ADR 0003); bots that move money as load |
-| DB-8 | The writer in the server: a funded wallet for every player, and payments between players as a load-test event (protocol 6) |
+| DB-8 | The writer in the server: a funded wallet for every player, and payments between players as a load-test event (protocol 7) |
 | DB-6 | WAL copy to a second machine before acknowledgement, and the restore procedure (ADR 0003) |
 | DB-7 | PostgreSQL archive fed from the operation records; `sawgrass-db`'s ledger becomes the archive's schema |
 | SCRIPT-3 | Luau runtime in the server: resources, events, deadlines and memory caps (ADR 0005) |
@@ -133,6 +141,7 @@ core decodes, so they land in this order.
 |---|---|---|
 | NET-15 | Entity kinds and model ids in added entities, and the `blocks` list in delta snapshots; `PROTOCOL_VERSION` 4 | ADR 0006 |
 | NET-16 | The ped block: motion, flags, weapon, aim, seat, action layers, health and armour | NET-15 |
+| SRV-18 | The server sends each entity's info and relays the players' ped blocks, keeping its own fields | NET-16 |
 | NET-17 | The vehicle block, and owned-entity states with their epoch in the client state | NET-15 |
 | SRV-13 | Vehicles, NPCs and objects as server entities that scripts and admin commands spawn and remove | NET-15 |
 | SRV-14 | Owners for vehicles and NPCs: the four rules, epochs, hand-off and the checks on owned states | SRV-13, NET-17 |
