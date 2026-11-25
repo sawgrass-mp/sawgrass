@@ -222,6 +222,8 @@ pub struct Traffic {
     pub refused_teleport: AtomicU64,
     /// [`ServerEvent::Corrected`] events queued to clients after a refused state.
     pub corrections: AtomicU64,
+    /// Shots admitted from clients ([`ClientEvent::Shot`]).
+    pub shots_received: AtomicU64,
 }
 
 /// The address a connection counts against: an IPv4 address, or the /64 network of an IPv6 one, since one IPv6 host
@@ -445,8 +447,22 @@ async fn serve(
     let events_connection = datagrams.clone();
     tokio::spawn(async move {
         let mut bucket = Bucket::for_events(&limits, Instant::now());
+        let mut shots = Bucket::for_shots(&limits, Instant::now());
         while let Ok((_, packet)) = event_receiver.recv().await {
-            match bucket.admit(Instant::now()) {
+            let event = ClientEvent::decode(&packet[PacketHeader::SIZE..]);
+            let Ok(event) = event else {
+                // No valid client sends one, so whatever sent it is not a client to keep.
+                events_traffic.closed_bad_events.fetch_add(1, Ordering::Relaxed);
+                events_connection.close();
+                break;
+            };
+            // Shots have their own budget, so firing a fast weapon never closes the connection.
+            let budget = if matches!(event, ClientEvent::Shot(_)) {
+                &mut shots
+            } else {
+                &mut bucket
+            };
+            match budget.admit(Instant::now()) {
                 Admit::Pass => {}
                 Admit::Drop => {
                     events_traffic.dropped_events.fetch_add(1, Ordering::Relaxed);
@@ -458,17 +474,15 @@ async fn serve(
                     break;
                 }
             }
-            match ClientEvent::decode(&packet[PacketHeader::SIZE..]) {
-                Ok(ClientEvent::RequestStats) if stats_to_clients => {
+            match event {
+                ClientEvent::RequestStats if stats_to_clients => {
                     events_inbox.wants_stats.store(true, Ordering::Relaxed);
                 }
-                Ok(_) => {}
-                Err(_) => {
-                    // No valid client sends one, so whatever sent it is not a client to keep.
-                    events_traffic.closed_bad_events.fetch_add(1, Ordering::Relaxed);
-                    events_connection.close();
-                    break;
+                ClientEvent::Shot(_) => {
+                    // Checked and applied by SRV-16; counted until then.
+                    events_traffic.shots_received.fetch_add(1, Ordering::Relaxed);
                 }
+                ClientEvent::RequestStats => {}
             }
         }
     });

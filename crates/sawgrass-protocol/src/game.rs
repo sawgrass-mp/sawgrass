@@ -12,6 +12,7 @@
 //! [`SNAPSHOT_MAX_ENTITIES`] entities is split over several datagrams with the same tick, so each one fits in
 //! [`MAX_DATAGRAM`] bytes on any path quinn accepts.
 
+use crate::combat::Shot;
 use crate::delta::{put_varint, take_varint};
 use crate::entity::MAX_FIELDS;
 use crate::ped::PedBlock;
@@ -302,6 +303,8 @@ const STATS: u8 = 2;
 const OWNERSHIP: u8 = 4;
 const CORRECTED: u8 = 5;
 const REQUEST_STATS: u8 = 128;
+// 129 is taken by DB-8 (#162), 130 and 131 by SRV-15 (#201).
+const SHOT: u8 = 132;
 
 /// An event from the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -439,10 +442,13 @@ impl ServerEvent {
 }
 
 /// An event from a client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ClientEvent {
     /// Ask for [`ServerEvent::Stats`]. A server started without load-test reporting ignores it.
     RequestStats,
+    /// The client's player fired once, and what it hit (ADR 0006, section 5). Shots have their own rate limit,
+    /// separate from the other events'.
+    Shot(Box<Shot>),
 }
 
 impl ClientEvent {
@@ -450,6 +456,10 @@ impl ClientEvent {
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::RequestStats => out.push(REQUEST_STATS),
+            Self::Shot(shot) => {
+                out.push(SHOT);
+                shot.write(out);
+            }
         }
     }
 
@@ -458,6 +468,7 @@ impl ClientEvent {
         let mut r = Reader { input };
         let event = match r.array::<1>()? {
             [REQUEST_STATS] => Self::RequestStats,
+            [SHOT] => Self::Shot(Box::new(Shot::read(&mut r)?)),
             [other] => return Err(DecodeError::UnknownEvent(other)),
         };
         r.finish()?;
