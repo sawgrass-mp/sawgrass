@@ -117,7 +117,6 @@ impl Money {
                 balance(&self.ledger, from).await.unwrap_or(0),
             );
         };
-        self.remember(from, Paid { key, to, payee });
         // Both requests go in together: the balance is read after the transfer, in the same batch.
         let paid = submit(
             &self.ledger,
@@ -131,7 +130,12 @@ impl Money {
         );
         let after = balance(&self.ledger, from);
         let result = match paid.await {
-            Ok(_) => PayResult::Done,
+            Ok(_) => {
+                // Only a payment the ledger applied holds its key; a refused one leaves the key free, so a retry
+                // of it is a new payment and must find the payee connected.
+                self.remember(from, Paid { key, to, payee });
+                PayResult::Done
+            }
             Err(e) => result_of(&e),
         };
         (result, after.await.unwrap_or(0))

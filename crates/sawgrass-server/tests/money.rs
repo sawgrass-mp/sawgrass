@@ -163,10 +163,14 @@ fn a_retried_key_gets_its_first_answer_after_the_payee_has_left() {
     let writer = Writer::start(RocksStore::open(&dir).expect("store"), Config::default()).expect("writer");
     let money = Money::open(writer.handle(), 1_000, 1).expect("money");
     let (mut a, b, _, id_b, mut tick_loop) = two_players(&runtime, Some(money.clone()), true);
-    assert_eq!(
-        runtime.block_on(pay(&mut a, 1, id_b, 300)),
-        (PayResult::Done, 700)
-    );
+    runtime.block_on(async {
+        assert_eq!(pay(&mut a, 1, id_b, 300).await, (PayResult::Done, 700));
+        // Refused: the ledger does not keep key 2, so after B leaves it is a new payment.
+        assert_eq!(
+            pay(&mut a, 2, id_b, 5_000).await,
+            (PayResult::InsufficientFunds, 700)
+        );
+    });
     drop(b);
     for _ in 0..500 {
         if !money.knows_payee(id_b) {
@@ -181,8 +185,11 @@ fn a_retried_key_gets_its_first_answer_after_the_payee_has_left() {
         assert_eq!(pay(&mut a, 1, id_b, 300).await, (PayResult::Done, 700));
         // The same key with another amount is a reused key, as it is while the payee is connected.
         assert_eq!(pay(&mut a, 1, id_b, 301).await, (PayResult::Invalid, 700));
+        // The refused key retried with an amount A has: a new payment to a player who left, so no money goes
+        // into the ended connection's wallet.
+        assert_eq!(pay(&mut a, 2, id_b, 500).await, (PayResult::UnknownPayee, 700));
         // A new key to the player who left.
-        assert_eq!(pay(&mut a, 2, id_b, 10).await, (PayResult::UnknownPayee, 700));
+        assert_eq!(pay(&mut a, 3, id_b, 10).await, (PayResult::UnknownPayee, 700));
     });
     drop((a, tick_loop));
     drop(runtime);
