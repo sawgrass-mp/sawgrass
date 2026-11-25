@@ -1,6 +1,6 @@
 //! The four parts together, behind the calls a game module (or a bot) makes.
 
-use sawgrass_protocol::game::{ClientState, OwnedState};
+use sawgrass_protocol::game::{ClientState, MAX_OWNED, OwnedState};
 use sawgrass_protocol::ped::PedBlock;
 use sawgrass_protocol::{EncodeError, EntityState, PacketHeader, PacketKind};
 
@@ -36,6 +36,10 @@ pub struct Client {
     local: LocalPlayer,
     sequence: u16,
     render: Option<f64>,
+    /// Where the next datagram's owned states start in the caller's list, when they do not all fit in one.
+    owned_cursor: usize,
+    /// The owned states chosen for the datagram being built.
+    chosen: Vec<OwnedState>,
 }
 
 impl Client {
@@ -50,6 +54,8 @@ impl Client {
             local: LocalPlayer::new(config.local),
             sequence: 0,
             render: None,
+            owned_cursor: 0,
+            chosen: Vec::new(),
         }
     }
 
@@ -137,9 +143,13 @@ impl Client {
     }
 
     /// As [`Client::outgoing`], with the local player's ped block and the states of the entities this client
-    /// simulates (vehicles, NPCs; ADR 0006), all in one datagram. `Ok(None)` when no state is due. Fails for a pose
-    /// outside the wire ranges, more than [`MAX_OWNED`](sawgrass_protocol::game::MAX_OWNED) entities, or a payload too large for one datagram; the
-    /// send slot is then spent, so the next frame does not retry at once.
+    /// simulates (vehicles, NPCs; ADR 0006), in one datagram. `Ok(None)` when no state is due; an error only for a
+    /// pose outside the wire ranges, which spends the send slot.
+    ///
+    /// The player's own state always goes out. The server may give a client more entities than one datagram
+    /// carries ([`MAX_OWNED`], or fewer when their blocks are large), so each datagram takes as many as fit,
+    /// starting where the last one stopped and wrapping around: every owned entity is sent at least once every
+    /// `ceil(owned.len() / per_datagram)` datagrams. An entity whose own state does not encode is skipped.
     pub fn outgoing_with(
         &mut self,
         now: f64,
@@ -152,7 +162,31 @@ impl Client {
         }
         let state = pose.to_client_state()?;
         let mut out = self.header();
-        state.encode_with_owned(ped, owned, &mut out)?;
+        let start = if owned.is_empty() {
+            0
+        } else {
+            self.owned_cursor % owned.len()
+        };
+        self.chosen.clear();
+        self.chosen.extend(
+            owned
+                .iter()
+                .cycle()
+                .skip(start)
+                .take(owned.len().min(MAX_OWNED))
+                .copied(),
+        );
+        // Fewer if the blocks make the payload too large; with none, the player's state and ped block always fit.
+        loop {
+            match state.encode_with_owned(ped, &self.chosen, &mut out) {
+                Ok(()) => break,
+                Err(_) if !self.chosen.is_empty() => {
+                    self.chosen.pop();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        self.owned_cursor = start + self.chosen.len();
         Ok(Some(out))
     }
 
@@ -173,8 +207,6 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use sawgrass_protocol::game::MAX_OWNED;
-
     use super::*;
 
     fn client() -> Client {
@@ -212,27 +244,74 @@ mod tests {
         assert_eq!(PacketHeader::decode(&next).expect("header").0.sequence, 1);
     }
 
+    /// The owned ids in a datagram.
+    fn owned_ids(packet: &[u8]) -> Vec<u32> {
+        let (_, body) = PacketHeader::decode(packet).expect("header");
+        let mut owned = Vec::new();
+        ClientState::decode_with_owned(body, &mut owned).expect("decodes");
+        owned.iter().map(|o| o.id).collect()
+    }
+
     #[test]
-    fn too_many_owned_entities_are_refused() {
+    fn more_owned_entities_than_fit_are_rotated_and_the_player_always_goes_out() {
         let mut client = client();
         let me = Pose::at([0.0, 0.0, 30.0]);
-        let one = me.to_owned_state(1, 0, &[]).expect("owned");
-        let owned = vec![one; MAX_OWNED + 1];
-        assert_eq!(
-            client.outgoing_with(0.0, &me, &PedBlock::default(), &owned),
-            Err(EncodeError::OutOfRange)
-        );
-        // The slot is spent: nothing again until the next send period.
-        assert_eq!(
-            client.outgoing_with(0.01, &me, &PedBlock::default(), &[]),
-            Ok(None)
-        );
-        let none: [OwnedState; 0] = [];
+        // The server's ownership cap (SRV-14) is above what one datagram carries.
+        let owned: Vec<OwnedState> = (0..24)
+            .map(|id| me.to_owned_state(id, 1, &[1, 2, 3]).expect("owned"))
+            .collect();
+        let mut seen = vec![0u32; 24];
+        for frame in 0..6u32 {
+            let packet = client
+                .outgoing_with(f64::from(frame) * 0.05, &me, &PedBlock::default(), &owned)
+                .expect("the player's state always encodes")
+                .expect("due");
+            let (_, body) = PacketHeader::decode(&packet).expect("header");
+            assert_eq!(
+                ClientState::decode(body).expect("decodes"),
+                me.to_client_state().expect("state")
+            );
+            let ids = owned_ids(&packet);
+            assert_eq!(ids.len(), MAX_OWNED);
+            for id in ids {
+                seen[id as usize] += 1;
+            }
+        }
+        // 6 datagrams of 16 over 24 entities: each sent 4 times, none starved.
+        assert!(seen.iter().all(|&n| n == 4), "{seen:?}");
+    }
+
+    #[test]
+    fn owned_states_with_large_blocks_are_cut_to_fit_one_datagram() {
+        let mut client = client();
+        let me = Pose::at([0.0, 0.0, 30.0]);
+        let big = [u32::MAX; sawgrass_protocol::entity::MAX_FIELDS];
+        let owned: Vec<OwnedState> = (0..16)
+            .map(|id| me.to_owned_state(id, 1, &big).expect("owned"))
+            .collect();
+        let first = client
+            .outgoing_with(0.0, &me, &PedBlock::default(), &owned)
+            .expect("encodes")
+            .expect("due");
+        assert!(first.len() <= sawgrass_protocol::game::MAX_DATAGRAM);
+        let n = owned_ids(&first).len();
+        assert!(n > 0 && n < 16, "{n} fit");
+        // The next datagram goes on from the first entity left out.
+        let second = client
+            .outgoing_with(0.05, &me, &PedBlock::default(), &owned)
+            .expect("encodes")
+            .expect("due");
+        assert_eq!(owned_ids(&second)[0], n as u32);
+    }
+
+    #[test]
+    fn a_pose_off_the_wire_ranges_is_an_error() {
+        let mut client = client();
+        let far = Pose::at([1.0e9, 0.0, 0.0]);
         assert!(
             client
-                .outgoing_with(0.06, &me, &PedBlock::default(), &none)
-                .expect("encodes")
-                .is_some()
+                .outgoing_with(0.0, &far, &PedBlock::default(), &[])
+                .is_err()
         );
     }
 }
