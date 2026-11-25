@@ -2,7 +2,7 @@
 //! limits (4 ms per call, 16 MiB) and script budget (8 ms). Run with `cargo bench -p sawgrass-server --bench
 //! scripts`.
 //!
-//! Columns: the phase's p50, p99 and max over the measured ticks; `join ticks`, how many ticks the 4,096 joins
+//! Columns: the phase's p50, p99 and max over the measured ticks; `over`, measured ticks past the budget; `join ticks`, how many ticks the 4,096 joins
 //! took to deliver; `skipped`, tick events skipped for the budget over the measured ticks (out of 400 per
 //! resource).
 
@@ -70,14 +70,16 @@ fn run(name: &str, sources: &[&str], strikes: u32) {
         times.push(start.elapsed());
         skipped += report.skipped;
     }
+    let over = times.iter().filter(|t| **t > DEFAULT_BUDGET).count();
     times.sort();
     let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     println!(
-        "{name:<34} {:>6.2} {:>6.2} {:>6.2} {:>8} {:>8}",
+        "{name:<34} {:>6.2} {:>6.2} {:>6.2} {:>6} {:>10} {:>8}",
         ms(at(0.5)),
         ms(at(0.99)),
         ms(times[times.len() - 1]),
+        over,
         catching_up,
         skipped
     );
@@ -90,8 +92,8 @@ fn main() {
     for strikes in [0, DEFAULT_STRIKES] {
         println!("\nturned off after {strikes} strikes in a row (0: never)");
         println!(
-            "{:<34} {:>6} {:>6} {:>6} {:>8} {:>8}",
-            "resources", "p50", "p99", "max", "join ticks", "skipped"
+            "{:<34} {:>6} {:>6} {:>6} {:>6} {:>10} {:>8}",
+            "resources", "p50", "p99", "max", "over", "join ticks", "skipped"
         );
         run("8 typical", &typical, strikes);
         run("8 typical + endless loop", &with(&[LOOP]), strikes);
