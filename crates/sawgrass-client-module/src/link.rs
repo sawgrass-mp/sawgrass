@@ -6,7 +6,7 @@
 //! connection itself is not here: the code that owns the socket pushes into [`NetLink::inbox`] and sends what it
 //! takes from [`NetLink::outbox`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use sawgrass_netcode::interp::Sample;
@@ -76,6 +76,23 @@ pub fn net_pose(pose: &Pose, velocity: [f32; 3]) -> NetPose {
     }
 }
 
+/// An entity the server gave this client to simulate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Owned {
+    /// The server's ownership epoch, sent back with every state so a stale owner is refused.
+    pub epoch: u32,
+    /// Where the game has it now, measured on the last frame; `None` until it is spawned.
+    pub pose: Option<NetPose>,
+}
+
+/// Velocity from the last position to this one over `dt`; zero without a last position.
+fn velocity(last: Option<[f32; 3]>, now: [f32; 3], dt: f32) -> [f32; 3] {
+    match last {
+        Some(l) if dt > 0.0 => [(now[0] - l[0]) / dt, (now[1] - l[1]) / dt, (now[2] - l[2]) / dt],
+        _ => [0.0; 3],
+    }
+}
+
 #[derive(Debug)]
 pub struct NetLink<I> {
     client: Client,
@@ -88,6 +105,8 @@ pub struct NetLink<I> {
     /// Remote entities spawned in the game.
     shown: BTreeSet<NetId>,
     last_local: Option<[f32; 3]>,
+    /// Entities this client simulates, by the server's ownership epoch, with the last position measured.
+    owned: BTreeMap<NetId, Owned>,
     /// Spawns, moves and removals the world refused, for diagnostics.
     pub world_errors: u64,
 }
@@ -103,6 +122,7 @@ impl<I: InfoSource> NetLink<I> {
             samples: Vec::new(),
             shown: BTreeSet::new(),
             last_local: None,
+            owned: BTreeMap::new(),
             world_errors: 0,
         }
     }
@@ -117,6 +137,25 @@ impl<I: InfoSource> NetLink<I> {
         self.outbox.clone()
     }
 
+    /// The server gives (`yours`) or takes back the simulation of `entity`.
+    ///
+    /// From the server's ownership event (SRV-14, #170, in review). An owned entity is left to the game's own
+    /// physics instead of being moved to the interpolated pose, and its state is reported by [`NetLink::owned`].
+    pub fn set_ownership(&mut self, entity: NetId, epoch: u32, yours: bool) {
+        if yours {
+            self.owned.insert(entity, Owned { epoch, pose: None });
+        } else if self.owned.get(&entity).is_some_and(|o| o.epoch <= epoch) {
+            self.owned.remove(&entity);
+        }
+    }
+
+    /// The entities this client simulates and their measured state, for the owned states it sends.
+    ///
+    /// TODO(SRV-14): send these with the client state once the protocol's owned-state encoding lands.
+    pub fn owned(&self) -> &BTreeMap<NetId, Owned> {
+        &self.owned
+    }
+
     pub fn client(&self) -> &Client {
         &self.client
     }
@@ -125,7 +164,7 @@ impl<I: InfoSource> NetLink<I> {
         result.map_err(|_| self.world_errors += 1).ok()
     }
 
-    fn show_remote(&mut self, world: &mut World<'_>) {
+    fn show_remote(&mut self, dt: f32, world: &mut World<'_>) {
         // Datagrams are stamped with the frame that takes them, up to a frame later than they arrived.
         for datagram in self.inbox.take() {
             let _ = self.client.receive(&datagram, self.now);
@@ -141,6 +180,14 @@ impl<I: InfoSource> NetLink<I> {
         let samples = std::mem::take(&mut self.samples);
         for sample in &samples {
             let pose = game_pose(&sample.pose);
+            if let Some(owned) = self.owned.get_mut(&sample.id) {
+                // The game simulates it: measure it, and spawn it only if it is not there yet.
+                if let Some(now) = world.pose(sample.id) {
+                    let previous = owned.pose.map(|p| p.position);
+                    owned.pose = Some(net_pose(&now, velocity(previous, now.position, dt)));
+                    continue;
+                }
+            }
             if self.shown.contains(&sample.id) {
                 let result = world.set_pose(sample.id, pose);
                 self.count(result);
@@ -196,7 +243,7 @@ impl<I: InfoSource> NetCore for NetLink<I> {
 
     fn on_frame(&mut self, dt: f32, world: &mut World<'_>) {
         self.now += f64::from(dt);
-        self.show_remote(world);
+        self.show_remote(dt, world);
         self.report_local(dt, world);
     }
 }

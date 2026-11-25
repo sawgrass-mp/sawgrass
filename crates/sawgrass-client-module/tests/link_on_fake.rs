@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use sawgrass_client_module::assets::{AssetId, AssetTable};
 use sawgrass_client_module::entity_pool::NetId;
 use sawgrass_client_module::fake::FakeRuntime;
-use sawgrass_client_module::game::{EntityKind, FakeGame, GameAsset, Pose};
+use sawgrass_client_module::game::{EntityKind, FakeGame, GameApi, GameAsset, Pose};
 use sawgrass_client_module::link::{InfoSource, NetLink};
 use sawgrass_client_module::module::{Module, required_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
@@ -149,4 +149,52 @@ fn remote_entities_follow_the_snapshots_and_the_local_player_reports() {
     assert!(sent > 0, "the local player's state is sent");
     assert_eq!(link.world_errors, 0);
     assert!(game.streaming_focus.is_empty(), "nothing left to stream around");
+}
+
+#[test]
+fn an_owned_entity_is_left_to_the_game_and_measured() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let infos = Infos(BTreeMap::from([(1, Info::new(NetKind::Vehicle, AssetId(5)))]));
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()), infos);
+    let inbox = link.inbox();
+    let mut encoder = DeltaEncoder::default();
+    let run = |frames: std::ops::Range<u32>,
+               module: &mut Module<FakeRuntime>,
+               game: &mut FakeGame,
+               link: &mut NetLink<Infos>,
+               encoder: &mut DeltaEncoder| {
+        for frame in frames {
+            if frame % 3 == 0 {
+                let tick = frame / 3;
+                for d in snapshot(encoder, tick, &[state(1, tick as f32 * 0.5), state(LOCAL, 0.0)]) {
+                    inbox.push(d);
+                }
+            }
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        }
+    };
+    run(0..60, &mut module, &mut game, &mut link, &mut encoder);
+    let handle = module.entities().handle(1).expect("shown");
+
+    link.set_ownership(1, 7, true);
+    // The game's physics put the car somewhere else; the link must not pull it back to the snapshots.
+    let parked = Pose {
+        position: [-40.0, 3.0, 30.0],
+        heading: 1.0,
+    };
+    game.set_pose(handle, parked).expect("moved by the game");
+    run(60..90, &mut module, &mut game, &mut link, &mut encoder);
+    assert_eq!(game.entities[&handle].2, parked);
+    let owned = link.owned()[&1];
+    assert_eq!(owned.epoch, 7);
+    assert_eq!(owned.pose.map(|p| p.position), Some(parked.position));
+
+    // An older epoch cannot take it back; the current one can, and the snapshots move it again.
+    link.set_ownership(1, 6, false);
+    assert!(link.owned().contains_key(&1));
+    link.set_ownership(1, 7, false);
+    run(90..120, &mut module, &mut game, &mut link, &mut encoder);
+    assert!(link.owned().is_empty());
+    assert_ne!(game.entities[&handle].2, parked);
 }
