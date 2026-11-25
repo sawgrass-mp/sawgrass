@@ -75,12 +75,12 @@ So the work is split in three, in this order:
 | ⚪ | [**10. Launcher and releases**](docs/roadmap.md#10-launcher-and-releases)<br><sub>Stage 4</sub> | Detects the runtime and checks its build, installs the signed client module, auto-update, server list, downloads server resources, release process | — | 🟡 **Medium**<br><sub>Known technology (Tauri, signing, updates), but a security boundary on every player's machine</sub> | not started |
 | ⚪ | [**11. Scale**](docs/roadmap.md#11-scale)<br><sub>Stage 5</sub> | Real players on public servers, gateways in their own processes if the gateway limits, zones with entity hand-off only if measurements call for them, operations and moderation | — | 🔴 **Very hard**<br><sub>Real players behave unlike bots; zones with hand-off are the most error-prone step of the architecture</sub> | not started |
 
-Tooling and docs run alongside every step: 21 of 28 tasks done.
+Tooling and docs run alongside every step: 22 of 28 tasks done.
 
 Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
 
 <details>
-<summary><b>All tasks</b>: 98 done, 2 in review, 4 in progress, 2 ready, 8 planned</summary>
+<summary><b>All tasks</b>: 99 done, 2 in review, 4 in progress, 2 ready, 7 planned</summary>
 
 | | Task | Step | Size | Status |
 |---|---|---|---|---|
@@ -167,7 +167,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [SRV-15](https://github.com/sawgrass-mp/sawgrass/issues/200): Seats, entered and left on request and decided by the server | 9. Sync | M | done |
 | ✅ | [SRV-16](https://github.com/sawgrass-mp/sawgrass/issues/213): Hit reports checked against the snapshot history, with damage and death on the server | 9. Sync | M | done |
 | 🔍 | [SRV-17](https://github.com/sawgrass-mp/sawgrass/issues/215): Clock, weather and doors sent on joining and on change | 9. Sync | M | in review |
-| ⚪ | [BOT-5](https://github.com/sawgrass-mp/sawgrass/issues/219): Bots that drive, change seats and shoot | 9. Sync | M | planned |
+| 🔍 | [BOT-5](https://github.com/sawgrass-mp/sawgrass/issues/219): Bots that drive, change seats and shoot | 9. Sync | M | in review |
 | ⚪ | [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122): Show movement refusals per player for admins | Outside the plan | M | planned |
 | 🛠️ | [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157): Turn off a resource that keeps overrunning | Outside the plan | M | in progress |
 | ⚪ | [OPS-1](https://github.com/sawgrass-mp/sawgrass/issues/9): Benchmark regression gate | Tooling and docs | M | planned |
@@ -197,7 +197,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [DOC-13](https://github.com/sawgrass-mp/sawgrass/issues/186): README and roadmap after the first two\-client session plan | Tooling and docs | M | done |
 | ✅ | [DOC-14](https://github.com/sawgrass-mp/sawgrass/issues/199): A guide to run a server for a playtest | Tooling and docs | M | done |
 | ✅ | [DOC-15](https://github.com/sawgrass-mp/sawgrass/issues/211): Redraw the README pictures with every README update | Tooling and docs | M | done |
-| 🔍 | [DOC-16](https://github.com/sawgrass-mp/sawgrass/issues/222): Record DB\-8's change to the store writer, and ask scopes to list every crate | Tooling and docs | M | in review |
+| ✅ | [DOC-16](https://github.com/sawgrass-mp/sawgrass/issues/222): Record DB\-8's change to the store writer, and ask scopes to list every crate | Tooling and docs | M | done |
 
 </details>
 
