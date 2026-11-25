@@ -474,6 +474,27 @@ compio on io_uring with compio-quic.
 Full results, method, licences, the reasoning for each option and how to reproduce:
 [docs/research/allocator-runtime](docs/research/allocator-runtime/).
 
+## The real server under load, measured
+
+The server and the load-test bots ran on the project's own machines: a 4-core server machine (two cores for the
+server, two for local bots) and a second machine sending bots over the network. Bots walk, run and drive in a
+1.5 km square, the dense crowd of the plan's gates, at 20 Hz.
+
+| Players | Gateway threads | Tick p99 (budget 35 ms) | Overruns | Snapshots delivered | Server cores |
+|---:|---:|---:|---:|---:|---:|
+| 3,800 | 1 | 23.8 to 24.4 ms | 0 | 96 to 99% | 1.41 to 1.42 |
+| 4,096 | 1 | 28.4 to 30.5 ms | 0 | 88 to 93% | 1.48 to 1.51 |
+| 4,096 | 2 | 38.0 to 39.1 ms | 0 | 100% | 1.85 to 1.86 |
+
+- **3,800 players fit with room to spare**, which meets phase 1's gate (3,000 bots, p99 under 35 ms).
+- **At 4,096 players the tick is not the limit, the gateway is.** The tick used half a core; the gateway the rest.
+  On two cores the server either drops some snapshots or runs over its p99 budget, never over a whole tick.
+  A server with more cores gives the gateway threads of its own; the stand could not drive one, so that is not
+  measured yet.
+- Runs with a saturated load generator were thrown out; the page says which and why.
+
+Full results, method and limits: [docs/research/two-machine-load](docs/research/two-machine-load/).
+
 ## How it is built
 
 Most of the code is written by AI coding agents working as a swarm, under rules that keep the work small,
