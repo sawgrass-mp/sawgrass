@@ -14,8 +14,8 @@ use sawgrass_bots::report::{self, Context};
 use sawgrass_bots::stats::Counters;
 use sawgrass_bots::walker::Area;
 use sawgrass_bots::{BotConfig, run};
-use sawgrass_gateway::RootCertStore;
 use sawgrass_gateway::pki_types::CertificateDer;
+use sawgrass_gateway::{Connector, RootCertStore};
 use tokio::time::Instant;
 
 /// jemalloc for every allocation in the process (SRV-5; BOT-3 halved the crowd's tick p99 with it).
@@ -28,6 +28,7 @@ const USAGE: &str = "usage:
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
                     [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
                     [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]
+                    [--decoders N] [--sockets N]
                     [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]";
 
 struct RunArgs {
@@ -44,6 +45,8 @@ struct RunArgs {
     record: Option<PathBuf>,
     record_bots: u64,
     misbehave: [u64; 4],
+    decoders: u64,
+    sockets: usize,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, value: Option<String>) -> Result<T, String>
@@ -72,6 +75,8 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
         record: None,
         record_bots: 32,
         misbehave: [0; 4],
+        decoders: u64::MAX,
+        sockets: 0,
     };
     while let Some(flag) = args.next() {
         let value = args.next();
@@ -90,6 +95,8 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--report-every" => run.report_every = Duration::from_secs(parse::<u64>(&flag, value)?.max(1)),
             "--record" => run.record = Some(PathBuf::from(value.ok_or("--record needs a value")?)),
             "--record-bots" => run.record_bots = parse(&flag, value)?,
+            "--decoders" => run.decoders = parse(&flag, value)?,
+            "--sockets" => run.sockets = parse(&flag, value)?,
             "--misbehave" => run.misbehave = misbehave::parse(&value.ok_or("--misbehave needs a value")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -137,6 +144,10 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         )),
         None => None,
     };
+    let sockets = (0..args.sockets)
+        .map(|_| Connector::new(args.server.is_ipv6(), roots.clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("socket: {e}"))?;
     let config = Arc::new(BotConfig {
         server: args.server,
         server_name: args.name.clone(),
@@ -144,6 +155,8 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         send_hz: args.send_hz,
         area: args.area,
         record: record.clone(),
+        decoders: args.decoders,
+        sockets,
     });
     let counters = Arc::new(Counters::default());
     let ctx = Context {
