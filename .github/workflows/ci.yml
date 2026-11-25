@@ -37,7 +37,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install libclang (RocksDB's bindgen step needs it)
-        run: sudo apt-get install -y --no-install-recommends libclang-dev
+        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
@@ -50,7 +50,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install libclang (RocksDB's bindgen step needs it)
-        run: sudo apt-get install -y --no-install-recommends libclang-dev
+        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
       - run: cargo test --workspace --locked
 
   deny:
