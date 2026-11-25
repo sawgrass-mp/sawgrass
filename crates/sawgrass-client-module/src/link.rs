@@ -20,6 +20,7 @@ use sawgrass_protocol::ped::PedBlock;
 use crate::entity_pool::NetId;
 use crate::game::{EntityKind, Pose};
 use crate::module::{CoreEvent, NetCore, World};
+use crate::world_state::WorldState;
 
 /// Datagrams kept at most in a [`Datagrams`] queue. While frames stop (a loading screen, a pause) the connection
 /// keeps pushing, and only the newest snapshots matter, so the oldest are dropped above this.
@@ -119,6 +120,8 @@ pub struct NetLink {
     /// The network core, once the server said who we are (`ServerEvent::Joined`).
     client: Option<Client>,
     config: ClientConfig,
+    /// The clock, weather and doors the server sent.
+    world_state: WorldState,
     events: ServerEvents,
     inbox: Datagrams,
     outbox: Datagrams,
@@ -151,6 +154,7 @@ impl NetLink {
         Self {
             client,
             config,
+            world_state: WorldState::default(),
             events: ServerEvents::default(),
             inbox: Datagrams::default(),
             outbox: Datagrams::default(),
@@ -211,6 +215,8 @@ impl NetLink {
                 ServerEvent::Joined { entity, tick_hz } => self.joined(entity, tick_hz, world),
                 ServerEvent::Corrected(state) => self.corrected(&state, world),
                 ServerEvent::Ownership { entity, epoch, yours } => self.set_ownership(entity, epoch, yours),
+                ServerEvent::Environment(environment) => self.world_state.set_environment(environment),
+                ServerEvent::Door(door) => self.world_state.set_door(door),
                 // Server figures are for load tests, and events of later features (payments, seats) are handled by
                 // the code that adds them.
                 _ => {}
@@ -251,6 +257,23 @@ impl NetLink {
             let result = world.set_pose(state.id, game_pose(&NetPose::from_state(state)));
             self.count(result);
         }
+    }
+
+    fn apply_world_state(&mut self, world: &mut World<'_>) {
+        // Before the join there is no session, and the server sends the world state right after `Joined`.
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        let clock = client.clock();
+        let refused = self
+            .world_state
+            .apply(clock.server_tick(self.now), clock.tick_hz(), world);
+        self.world_errors += refused;
+    }
+
+    /// The clock, weather and doors the server sent.
+    pub fn world_state(&self) -> &WorldState {
+        &self.world_state
     }
 
     fn count<T, E>(&mut self, result: Result<T, E>) -> Option<T> {
@@ -374,6 +397,7 @@ impl NetCore for NetLink {
     fn on_frame(&mut self, dt: f32, world: &mut World<'_>) {
         self.now += f64::from(dt);
         self.handle_events(world);
+        self.apply_world_state(world);
         self.show_remote(dt, world);
         self.report_local(dt, world);
     }

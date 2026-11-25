@@ -3,7 +3,7 @@
 
 use sawgrass_client_module::assets::{AssetId, AssetTable};
 use sawgrass_client_module::fake::FakeRuntime;
-use sawgrass_client_module::game::{EntityKind, FakeGame, GameApi, GameAsset, Pose};
+use sawgrass_client_module::game::{DoorState, EntityKind, FakeGame, GameApi, GameAsset, Pose, WeatherState};
 use sawgrass_client_module::link::{MAX_QUEUED, NetLink};
 use sawgrass_client_module::module::{Module, required_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
@@ -12,6 +12,7 @@ use sawgrass_netcode::{Client, ClientConfig};
 use sawgrass_protocol::delta::{DeltaEncoder, fragments};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
 use sawgrass_protocol::game::{ClientState, OwnedState, ServerEvent};
+use sawgrass_protocol::world::{Door, Environment};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position, Rotation, Velocity};
 
 const BUILD_KEY: &str = "victory/1.0.0/00ff";
@@ -33,7 +34,10 @@ fn module() -> Module<FakeRuntime> {
         table += &format!("{name} = 5A {i:02X} A5 3C\n");
     }
     let functions = FunctionTable::parse(&table).expect("functions");
-    let assets = AssetTable::parse(&format!("build = {BUILD_KEY}\n5 = 0xCA\n6 = 0xCB\n")).expect("assets");
+    let assets = AssetTable::parse(&format!(
+        "build = {BUILD_KEY}\n5 = 0xCA\n6 = 0xCB\n7 = 0xD0\n8 = 0xD1\n"
+    ))
+    .expect("assets");
     let Ok(module) = Module::start(FakeRuntime::new(build, 0x4000, image), &functions, assets) else {
         panic!("module starts");
     };
@@ -492,4 +496,104 @@ fn a_second_join_starts_the_session_over() {
     );
     assert!(game.entities.contains_key(&me), "the local player stays");
     assert_eq!(link.world_errors, 0);
+}
+
+#[test]
+fn the_clock_weather_and_doors_follow_the_server() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let mut link = NetLink::joining(ClientConfig::default());
+    let (inbox, events) = (link.inbox(), link.events());
+    let mut encoder = DeltaEncoder::default();
+    let mut run = |frames: std::ops::Range<u32>,
+                   module: &mut Module<FakeRuntime>,
+                   game: &mut FakeGame,
+                   link: &mut NetLink| {
+        for frame in frames {
+            if frame % 3 == 0 {
+                for d in snapshot(&mut encoder, frame / 3, &[state(LOCAL, 0.0)]) {
+                    inbox.push(d);
+                }
+            }
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        }
+    };
+    // 10:00, two game minutes a real second, clear (7) all along.
+    let mut environment = Environment {
+        tick: 0,
+        minute: 600,
+        rate: 200,
+        weather: AssetId(7),
+        next_weather: AssetId(7),
+        transition: 0,
+    };
+    events.push(ServerEvent::Joined {
+        entity: LOCAL,
+        tick_hz: TICK_HZ,
+    });
+    events.push(ServerEvent::Environment(environment));
+    let door = Door {
+        id: AssetId(8),
+        locked: true,
+        open: 0,
+    };
+    events.push(ServerEvent::Door(door));
+    // A door the asset table does not know is counted, not applied.
+    events.push(ServerEvent::Door(Door {
+        id: AssetId(40),
+        locked: true,
+        open: 0,
+    }));
+
+    // Three seconds: the clock runs about six game minutes on from 10:00.
+    run(0..180, &mut module, &mut game, &mut link);
+    let minute = game.clock.expect("clock set");
+    assert!((604.0..=607.0).contains(&minute), "the clock shows {minute}");
+    let clear = WeatherState {
+        current: GameAsset(0xD0),
+        next: GameAsset(0xD0),
+        transition: 0.0,
+    };
+    assert_eq!(game.weather, Some(clear));
+    assert_eq!(
+        game.doors[&GameAsset(0xD1)],
+        DoorState {
+            locked: true,
+            open: 0.0
+        }
+    );
+    assert_eq!(game.doors.len(), 1);
+    assert_eq!(link.world_errors, 1);
+
+    // Rain (6) half way in, the clock stopped at noon, and the door unlocked and wide open.
+    environment = Environment {
+        tick: 60,
+        minute: 720,
+        rate: 0,
+        next_weather: AssetId(6),
+        transition: 255 / 2 + 1,
+        ..environment
+    };
+    events.push(ServerEvent::Environment(environment));
+    events.push(ServerEvent::Door(Door {
+        locked: false,
+        open: 255,
+        ..door
+    }));
+    run(180..240, &mut module, &mut game, &mut link);
+    assert_eq!(game.clock, Some(720.0));
+    let weather = game.weather.expect("weather");
+    assert_eq!(
+        (weather.current, weather.next),
+        (GameAsset(0xD0), GameAsset(0xCB))
+    );
+    assert!((weather.transition - 0.5).abs() < 0.01);
+    assert_eq!(
+        game.doors[&GameAsset(0xD1)],
+        DoorState {
+            locked: false,
+            open: 1.0
+        }
+    );
+    assert_eq!(link.world_errors, 1);
 }

@@ -161,6 +161,31 @@ pub trait GameApi {
     /// Keeps the world loaded around these points, the positions of remote players, besides the camera.
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]);
     fn disable(&mut self, system: SinglePlayerSystem) -> Result<(), GameError>;
+    /// Sets the clock to `minute` of the day, from 0 to below 1440, the fraction being seconds. The module sets it
+    /// every frame, so the game's own clock must not move it in between.
+    fn set_clock(&mut self, minute: f32) -> Result<(), GameError>;
+    /// Sets the weather to `current` turning into `next`, `transition` of the way, from 0 to 1.
+    fn set_weather(&mut self, current: GameAsset, next: GameAsset, transition: f32) -> Result<(), GameError>;
+    /// Locks or unlocks a door and opens it `open` of the way, from 0 shut to 1 wide.
+    ///
+    /// ASSUMPTION: the game keeps door states by door, whether or not the door is streamed in, as earlier games on
+    /// this engine did; otherwise the module keeps them and applies each again when its door streams in.
+    fn set_door(&mut self, door: GameAsset, locked: bool, open: f32) -> Result<(), GameError>;
+}
+
+/// A door's state in [`FakeGame`]: locked, and how far open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DoorState {
+    pub locked: bool,
+    pub open: f32,
+}
+
+/// The weather in [`FakeGame`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WeatherState {
+    pub current: GameAsset,
+    pub next: GameAsset,
+    pub transition: f32,
 }
 
 /// A game in memory: entities with a kind, an asset and a pose.
@@ -170,6 +195,10 @@ pub struct FakeGame {
     pub local_player: Option<GameHandle>,
     pub streaming_focus: Vec<[f32; 3]>,
     pub disabled: Vec<SinglePlayerSystem>,
+    /// The minute of the day last set.
+    pub clock: Option<f32>,
+    pub weather: Option<WeatherState>,
+    pub doors: BTreeMap<GameAsset, DoorState>,
     generations: Generations,
     /// Raw handles of removed entities, handed out again first, as a game's entity pool does.
     free: Vec<u64>,
@@ -227,6 +256,25 @@ impl GameApi for FakeGame {
         if !self.disabled.contains(&system) {
             self.disabled.push(system);
         }
+        Ok(())
+    }
+
+    fn set_clock(&mut self, minute: f32) -> Result<(), GameError> {
+        self.clock = Some(minute);
+        Ok(())
+    }
+
+    fn set_weather(&mut self, current: GameAsset, next: GameAsset, transition: f32) -> Result<(), GameError> {
+        self.weather = Some(WeatherState {
+            current,
+            next,
+            transition,
+        });
+        Ok(())
+    }
+
+    fn set_door(&mut self, door: GameAsset, locked: bool, open: f32) -> Result<(), GameError> {
+        self.doors.insert(door, DoorState { locked, open });
         Ok(())
     }
 }
