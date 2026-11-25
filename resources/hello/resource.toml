@@ -1,0 +1,2 @@
+# The smallest resource: it greets players and counts ticks. See crates/sawgrass-script for the API.
+server = ["server/main.luau"]

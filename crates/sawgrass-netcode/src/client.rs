@@ -1,0 +1,134 @@
+//! The four parts together, behind the calls a game module (or a bot) makes.
+
+use sawgrass_protocol::game::ClientState;
+use sawgrass_protocol::{PacketHeader, PacketKind};
+
+use crate::Pose;
+use crate::clock::{ClockConfig, ServerClock};
+use crate::interp::{InterpConfig, Interpolator, Sample};
+use crate::local::{Correction, LocalConfig, LocalPlayer};
+use crate::receive::{Skipped, SnapshotReceiver};
+
+/// Settings of every part.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ClientConfig {
+    /// The server clock and render delay.
+    pub clock: ClockConfig,
+    /// Interpolation of remote entities.
+    pub interp: InterpConfig,
+    /// The local player.
+    pub local: LocalConfig,
+}
+
+/// The network state of one connected client.
+///
+/// Each frame the game module passes the datagrams that arrived to [`Client::receive`], asks
+/// [`Client::remote`] where to show remote entities, applies [`Client::frame`]'s correction offset to the local
+/// player, and sends what [`Client::outgoing`] returns.
+#[derive(Debug)]
+pub struct Client {
+    entity: u32,
+    receiver: SnapshotReceiver,
+    clock: ServerClock,
+    interp: Interpolator,
+    local: LocalPlayer,
+    sequence: u16,
+    render: Option<f64>,
+}
+
+impl Client {
+    /// A client that joined as `entity` on a server running at `tick_hz` (both from the join event).
+    #[must_use]
+    pub fn new(entity: u32, tick_hz: u16, config: ClientConfig) -> Self {
+        Self {
+            entity,
+            receiver: SnapshotReceiver::new(),
+            clock: ServerClock::new(tick_hz, config.clock),
+            interp: Interpolator::new(tick_hz, config.interp),
+            local: LocalPlayer::new(config.local),
+            sequence: 0,
+            render: None,
+        }
+    }
+
+    /// The local player's entity id.
+    #[must_use]
+    pub fn entity(&self) -> u32 {
+        self.entity
+    }
+
+    /// The server clock, for its estimates.
+    #[must_use]
+    pub fn clock(&self) -> &ServerClock {
+        &self.clock
+    }
+
+    /// The newest snapshot tick decoded, as acknowledged to the server.
+    #[must_use]
+    pub fn ack(&self) -> u32 {
+        self.receiver.ack()
+    }
+
+    /// Takes one datagram from the server that arrived at local time `now`, in seconds. Returns the tick of the
+    /// snapshot it completed.
+    pub fn receive(&mut self, datagram: &[u8], now: f64) -> Result<u32, Skipped> {
+        let (tick, states) = self.receiver.push(datagram)?;
+        self.clock.observe(tick, now);
+        self.interp.insert(tick, states, Some(self.entity));
+        Ok(tick)
+    }
+
+    /// Writes the remote entities to show at local time `now` into `out`, cleared first, ascending by id. Empty
+    /// until the first snapshot. Call once per frame.
+    pub fn remote(&mut self, now: f64, out: &mut Vec<Sample>) {
+        self.render = self.clock.render_tick(now);
+        match self.render {
+            Some(render) => self.interp.sample(render, out),
+            None => out.clear(),
+        }
+    }
+
+    /// The render tick of the last [`Client::remote`] call.
+    #[must_use]
+    pub fn render_tick(&self) -> Option<f64> {
+        self.render
+    }
+
+    /// Takes where the server holds the local player while the game has it at `current`.
+    ///
+    /// The server does not report this yet: it refuses a bad move silently and keeps the player where it was last
+    /// accepted. Until it sends that position this is called by nobody but tests; the follow-up task adds the event.
+    pub fn correct(&mut self, current: &Pose, server: &Pose) -> Correction {
+        self.local.correct(current, server)
+    }
+
+    /// The offset to move the local player by this frame, `dt` seconds after the last, while a correction is being
+    /// smoothed in.
+    pub fn frame(&mut self, dt: f32) -> Option<[f32; 3]> {
+        self.local.frame(dt)
+    }
+
+    /// The client state datagram to send at local time `now` for the local player at `pose`, if one is due and the
+    /// pose fits the wire ranges. Its header carries the acknowledgement.
+    pub fn outgoing(&mut self, now: f64, pose: &Pose) -> Option<Vec<u8>> {
+        if !self.local.due(now) {
+            return None;
+        }
+        let state = pose.to_client_state().ok()?;
+        Some(self.packet(&state))
+    }
+
+    fn packet(&mut self, state: &ClientState) -> Vec<u8> {
+        let mut out = vec![0; PacketHeader::SIZE + ClientState::SIZE];
+        let header = PacketHeader {
+            kind: PacketKind::ClientState,
+            sequence: self.sequence,
+            tick: self.receiver.ack(),
+        };
+        self.sequence = self.sequence.wrapping_add(1);
+        // The buffer holds exactly a header and a state, so neither encoding can fail.
+        let _ = header.encode(&mut out);
+        let _ = state.encode(&mut out[PacketHeader::SIZE..]);
+        out
+    }
+}

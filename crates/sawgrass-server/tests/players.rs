@@ -16,7 +16,7 @@ use sawgrass_protocol::{
     EntityState, PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity,
 };
 use sawgrass_server::limits::Limits;
-use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState};
+use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState, Roster};
 use sawgrass_server::{TickConfig, TickLoop};
 
 fn gateway() -> (Gateway, RootCertStore) {
@@ -95,6 +95,7 @@ fn players_are_placed_and_see_each_other() {
         (a.expect("a connects"), b.expect("b connects"))
     });
     // Joins reach the tick thread through the channel; ticks send the Joined events.
+    let roster = players.roster();
     tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
     let (id_a, id_b) = std::thread::scope(|scope| {
         let ids = scope.spawn(|| runtime.block_on(async { (joined(&mut a).await, joined(&mut b).await) }));
@@ -151,6 +152,12 @@ fn players_are_placed_and_see_each_other() {
     a.close();
     assert!(tick_until(&mut tick_loop, |t| position_of(t, id_a).is_none()));
     assert!(position_of(&tick_loop, id_b).is_some());
+
+    // Later systems (scripts) heard both joins, then A leaving.
+    let changes: Vec<Roster> = roster.try_iter().collect();
+    assert_eq!(changes.len(), 3, "{changes:?}");
+    assert!(changes[..2].contains(&Roster::Joined(id_a)) && changes[..2].contains(&Roster::Joined(id_b)));
+    assert_eq!(changes[2], Roster::Left(id_a));
 }
 
 /// Snapshots leave through the gateway's send task once per tick (NET-9): each tick's datagram reaches the client,

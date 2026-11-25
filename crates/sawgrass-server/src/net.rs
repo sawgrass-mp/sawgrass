@@ -63,6 +63,16 @@ use crate::snapshot::{History, View};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetId(pub u32);
 
+/// A player who joined or left during a tick, by entity id ([`Slot::wire_id`]), for systems after `net` such as
+/// scripts. See [`Players::roster`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Roster {
+    /// The player was given an entity id.
+    Joined(u32),
+    /// The player left; the id may be given to someone else from the next tick.
+    Left(u32),
+}
+
 /// The last state a player's client sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerState(pub ClientState);
@@ -310,6 +320,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
         shutdown: Shutdown(shutdown),
+        roster: None,
     }
 }
 
@@ -510,6 +521,7 @@ pub struct Players {
     recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
     shutdown: Shutdown,
+    roster: Option<mpsc::Sender<Roster>>,
 }
 
 /// Closes the gateway from outside the tick: every connection, and no new ones.
@@ -541,6 +553,13 @@ impl Players {
     #[must_use]
     pub fn stats_slot(&self) -> Arc<Mutex<Option<ServerStats>>> {
         self.pending_stats.clone()
+    }
+
+    /// Joins and leaves from now on, in the order the ticks apply them.
+    pub fn roster(&mut self) -> mpsc::Receiver<Roster> {
+        let (tx, rx) = mpsc::channel();
+        self.roster = Some(tx);
+        rx
     }
 
     /// Players connected.
@@ -655,6 +674,9 @@ impl Players {
                     let index = slot.index as usize;
                     self.grow(index);
                     self.by_connection.insert(id, slot);
+                    if let Some(roster) = &self.roster {
+                        let _ = roster.send(Roster::Joined(slot.wire_id()));
+                    }
                     self.peds[index] = PedBlock {
                         health: SPAWN_HEALTH,
                         ..PedBlock::default()
@@ -681,6 +703,9 @@ impl Players {
                     }
                     self.states[index] = None;
                     self.grid.remove(EntityId(slot.index));
+                    if let Some(roster) = &self.roster {
+                        let _ = roster.send(Roster::Left(slot.wire_id()));
+                    }
                     self.slots.free(slot);
                 }
             }
