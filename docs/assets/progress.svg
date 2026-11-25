@@ -6,7 +6,7 @@
 <rect width="880" height="270" rx="16" fill="#060a08"/>
 <rect x="1" y="1" width="878" height="268" rx="15" fill="none" stroke="#1d3b2f"/>
 <text x="28" y="44" class="h">We are here: Fewer bytes, then 30 Hz</text>
-<text x="28" y="68" class="s">Step 4 of 11 · roadmap stage 1, server without the game; plan phase 2 · 2 of 4 done</text>
+<text x="28" y="68" class="s">Step 4 of 11 · roadmap stage 1, server without the game; plan phase 2 · 2 of 3 done</text>
 <rect x="28.0" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="28.0" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
 <text x="62.7" y="170" class="l" text-anchor="middle">1. Setup</text>
@@ -15,7 +15,7 @@
 <rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
 <text x="138.2" y="170" class="l" text-anchor="middle">2. Prototype</text>
-<text x="138.2" y="186" class="n" text-anchor="middle">35 of 35 done</text>
+<text x="138.2" y="186" class="n" text-anchor="middle">42 of 42 done</text>
 <text x="138.2" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
 <rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
@@ -23,13 +23,13 @@
 <text x="213.6" y="186" class="n" text-anchor="middle">5 of 5 done</text>
 <text x="213.6" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
 <rect x="254.4" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
-<rect x="254.4" y="132" width="34.7" height="18" rx="5" fill="url(#g)"/>
+<rect x="254.4" y="132" width="45.8" height="18" rx="5" fill="url(#g)"/>
 <rect x="252.4" y="130" width="73.5" height="22" rx="7" fill="none" stroke="#a6ff4d" stroke-width="1.5"/>
 <rect x="241.1" y="92" width="96" height="22" rx="11" fill="#a6ff4d"/>
 <text x="289.1" y="107" class="m" text-anchor="middle">WE ARE HERE</text>
 <path d="M283.1 114 L295.1 114 L289.1 122 Z" fill="#a6ff4d"/>
 <text x="289.1" y="170" class="c" text-anchor="middle">4. 30 Hz</text>
-<text x="289.1" y="186" class="n" text-anchor="middle">2 of 4 done</text>
+<text x="289.1" y="186" class="n" text-anchor="middle">2 of 3 done</text>
 <text x="289.1" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
 <rect x="329.8" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="329.8" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
@@ -50,9 +50,9 @@
 <text x="590.9" y="186" class="w" text-anchor="middle">waiting</text>
 <text x="590.9" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
 <rect x="631.6" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
-<rect x="631.6" y="132" width="43.8" height="18" rx="5" fill="url(#g)"/>
+<rect x="631.6" y="132" width="56.3" height="18" rx="5" fill="url(#g)"/>
 <text x="666.4" y="170" class="l" text-anchor="middle">9. Sync</text>
-<text x="666.4" y="186" class="n" text-anchor="middle">7 of 11 done</text>
+<text x="666.4" y="186" class="n" text-anchor="middle">9 of 11 done</text>
 <text x="666.4" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
 <rect x="707.1" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <text x="741.8" y="170" class="l" text-anchor="middle">10. Launcher</text>
