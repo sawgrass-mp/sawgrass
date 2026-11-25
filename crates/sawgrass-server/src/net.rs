@@ -168,6 +168,8 @@ pub struct Traffic {
     pub refused_handshakes: AtomicU64,
     /// Connection attempts refused because their address had too many connections.
     pub refused_per_address: AtomicU64,
+    /// Times a visible player was left out of another player's snapshot by the cut (IM-7), all players together.
+    pub players_cut: AtomicU64,
     /// Client states refused by [`Movement::check`], all players together: outside the map.
     pub refused_bounds: AtomicU64,
     /// Client states refused for a velocity above the speed limit.
@@ -771,11 +773,16 @@ impl Players {
                 .map(|p| p.inbox.ack.load(Ordering::Relaxed))
                 .collect()
         };
+        let traffic = &self.traffic;
         let build = |history: &History, player: &mut Player| {
             let ack = player.inbox.ack.load(Ordering::Relaxed);
             player
                 .view
                 .build(player.slot.index as usize, grid, history, config, tick, ack);
+            let cut = player.view.take_players_cut();
+            if cut > 0 {
+                traffic.players_cut.fetch_add(cut, Ordering::Relaxed);
+            }
         };
         match &self.pool {
             Some(pool) => pool.install(|| {
