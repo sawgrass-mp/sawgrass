@@ -12,7 +12,9 @@
 //! added:   count, then per entity: id gap, position, velocity, rotation in full
 //! ```
 //!
-//! Ids ascend in each list and are sent as the gap from the one before (the first as is). Mask bits 0 to 2 are
+//! Ids ascend in each list. Each is sent as two varints: its high 16 bits as the gap from the previous id's high
+//! bits (the first as is), then its low 16 bits. The server's ids are a slot index in the high bits and a reuse
+//! generation in the low bits, so both usually take one byte. Mask bits 0 to 2 are
 //! the position axes, 3 to 5 the velocity axes, bit 6 a rotation whose largest component is unchanged (three
 //! 10-bit differences follow), bit 7 a rotation sent whole. A lost snapshot breaks nothing: the next one is
 //! relative to whatever the client last acknowledged.
@@ -106,20 +108,23 @@ impl DeltaEncoder {
         self.added.clear();
         let (mut n_removed, mut n_changed, mut n_added) = (0u64, 0u64, 0u64);
         let (mut last_removed, mut last_changed, mut last_added) = (0u32, 0u32, 0u32);
+        let put_id = |out: &mut Vec<u8>, id: u32, last: &mut u32| {
+            put(out, u64::from((id >> 16) - (*last >> 16)));
+            put(out, u64::from(id & 0xffff));
+            *last = id;
+        };
         let (mut i, mut j) = (0, 0);
         while i < old.len() || j < current.len() {
             let ida = old.get(i).map_or(u64::MAX, |e| u64::from(e.id));
             let idb = current.get(j).map_or(u64::MAX, |e| u64::from(e.id));
             if ida < idb {
                 let id = old[i].id;
-                put(&mut self.removed, u64::from(id - last_removed));
-                last_removed = id;
+                put_id(&mut self.removed, id, &mut last_removed);
                 n_removed += 1;
                 i += 1;
             } else if idb < ida {
                 let e = &current[j];
-                put(&mut self.added, u64::from(e.id - last_added));
-                last_added = e.id;
+                put_id(&mut self.added, e.id, &mut last_added);
                 for v in e.position.cm() {
                     put_signed(&mut self.added, i64::from(v));
                 }
@@ -148,8 +153,7 @@ impl DeltaEncoder {
                 }
                 if mask != 0 {
                     let c = &mut self.changed;
-                    put(c, u64::from(b.id - last_changed));
-                    last_changed = b.id;
+                    put_id(c, b.id, &mut last_changed);
                     c.push(mask);
                     for k in 0..3 {
                         if mask & (1 << k) != 0 {
@@ -223,14 +227,18 @@ impl Reader<'_> {
         Ok(n)
     }
 
-    /// The next id in an ascending list.
+    /// The next id in an ascending list: the gap in its high 16 bits, then its low 16 bits.
     fn id(&mut self, last: &mut Option<u32>) -> Result<u32, DecodeError> {
-        let gap = narrow::<u32>(self.get()? as i64)?;
-        let id = match *last {
-            None => gap,
-            Some(l) if gap > 0 => l.checked_add(gap).ok_or(DecodeError::OutOfRange)?,
-            Some(_) => return Err(DecodeError::OutOfRange),
-        };
+        let gap = self.get()?;
+        let low = self.get()?;
+        let high = u64::from(last.map_or(0, |l| l >> 16)) + gap;
+        if high > 0xffff || low > 0xffff {
+            return Err(DecodeError::OutOfRange);
+        }
+        let id = ((high as u32) << 16) | low as u32;
+        if last.is_some_and(|l| id <= l) {
+            return Err(DecodeError::OutOfRange);
+        }
         *last = Some(id);
         Ok(id)
     }
