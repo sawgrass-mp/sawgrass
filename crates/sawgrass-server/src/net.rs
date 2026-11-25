@@ -49,17 +49,19 @@ use sawgrass_gateway::{Datagrams, Gateway, Session};
 use sawgrass_protocol::combat::{Shot, Zone};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::OwnedState;
-use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, ServerStats};
+use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position};
+use sawgrass_store::WalletId;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
 use crate::combat::{FROM_TOLERANCE, HIT_TOLERANCE, REWIND, WeaponRules, hit_ped, hit_vehicle};
 use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
-use crate::movement::{Movement, MovementRules, Violation};
+use crate::money::Money;
+use crate::movement::{Movement, MovementRules, Violation, Violations};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
 use crate::slots::{Slot, Slots};
@@ -158,9 +160,11 @@ struct Inbox {
 enum Inbound {
     Join {
         id: u32,
+        address: SocketAddr,
         sender: Datagrams,
         events: tokio_mpsc::Sender<Vec<u8>>,
         inbox: Arc<Inbox>,
+        wallet: Option<WalletId>,
     },
     Leave {
         id: u32,
@@ -185,6 +189,9 @@ pub struct ListenConfig {
     pub limits: Limits,
     /// What a client's movement is checked against.
     pub movement: MovementRules,
+    /// Let clients pay each other with [`ClientEvent::Pay`] when the server has a ledger (load tests, DB-8);
+    /// otherwise a payment is answered [`PayResult::Refused`].
+    pub money_events: bool,
 }
 
 impl Default for ListenConfig {
@@ -196,6 +203,7 @@ impl Default for ListenConfig {
             tick_threads: 1,
             limits: Limits::default(),
             movement: MovementRules::default(),
+            money_events: false,
         }
     }
 }
@@ -311,6 +319,11 @@ impl Drop for AddressGuard {
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
 pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
+    listen_with_money(gateway, config, None)
+}
+
+/// As [`listen`], and gives every player a wallet in `money`'s ledger.
+pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<Arc<Money>>) -> Players {
     let (inbound_tx, inbound_rx) = mpsc::channel();
     let traffic = Arc::new(Traffic::default());
     let next_id = AtomicU32::new(1);
@@ -322,7 +335,9 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let (outbox, recycle) = spawn_sender(traffic.clone());
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let close = shutdown.clone();
+    let accept_money = money.clone();
     tokio::spawn(async move {
+        let money = accept_money;
         loop {
             let incoming = tokio::select! {
                 incoming = gateway.accept() => incoming,
@@ -363,11 +378,12 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
             let active = active.clone();
             let handshakes = handshakes.clone();
             let id = next_id.fetch_add(1, Ordering::Relaxed);
+            let money = money.clone();
             tokio::spawn(async move {
                 let session = incoming.handshake().await;
                 handshakes.fetch_sub(1, Ordering::Relaxed);
                 if let Ok(session) = session {
-                    serve(session, id, inbound, traffic, config.stats_to_clients, limits).await;
+                    serve(session, id, inbound, traffic, config, money).await;
                 }
                 drop(guard);
                 active.fetch_sub(1, Ordering::Relaxed);
@@ -375,6 +391,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         }
     });
     Players {
+        money,
         inbound: inbound_rx,
         traffic,
         players: Vec::new(),
@@ -415,6 +432,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
+        player_list: Arc::default(),
         shutdown: Shutdown(shutdown),
         roster: None,
     }
@@ -454,17 +472,34 @@ async fn serve(
     id: u32,
     inbound: mpsc::Sender<Inbound>,
     traffic: Arc<Traffic>,
-    stats_to_clients: bool,
-    limits: Limits,
+    config: ListenConfig,
+    money: Option<Arc<Money>>,
 ) {
+    let address = session.remote_address();
+    let (stats_to_clients, limits) = (config.stats_to_clients, config.limits);
     let (datagrams, mut event_sender, mut event_receiver) = session.split();
+    // A player whose wallet cannot be opened is not let in: the ledger has stopped, and money would be lost.
+    let wallet = match &money {
+        Some(money) => match money.open_wallet(id).await {
+            Ok(wallet) => Some(wallet),
+            Err(_) => {
+                datagrams.close();
+                return;
+            }
+        },
+        None => None,
+    };
+    let payments = money.filter(|_| config.money_events).zip(wallet);
     let (events_tx, mut events_rx) = tokio_mpsc::channel::<Vec<u8>>(EVENT_QUEUE);
+    let answers = events_tx.clone();
     let inbox = Arc::new(Inbox::default());
     let join = Inbound::Join {
         id,
+        address,
         sender: datagrams.clone(),
         events: events_tx,
         inbox: inbox.clone(),
+        wallet,
     };
     if inbound.send(join).is_err() {
         return;
@@ -516,6 +551,15 @@ async fn serve(
                 ClientEvent::Shot(shot) => {
                     events_traffic.shots_received.fetch_add(1, Ordering::Relaxed);
                     let _ = events_inbound.send(Inbound::Shot { id, shot });
+                }
+                ClientEvent::Pay { key, to, amount } => {
+                    let (result, balance) = match &payments {
+                        Some((money, wallet)) => money.pay(*wallet, key, to, amount).await,
+                        None => (PayResult::Refused, 0),
+                    };
+                    let answer = ServerEvent::Paid { key, result, balance };
+                    // A full queue means the client reads nothing; the answer is dropped like the others.
+                    let _ = answers.try_send(event_packet(&answer, 0));
                 }
                 // A server without load-test reporting ignores RequestStats; later events are not used yet.
                 _ => {}
@@ -594,6 +638,10 @@ fn merge_ped(server: &PedBlock, client: &PedBlock) -> PedBlock {
 #[derive(Debug)]
 struct Player {
     slot: Slot,
+    /// Where the connection comes from, for [`PlayerView`].
+    address: SocketAddr,
+    /// When it joined.
+    joined: std::time::Instant,
     entity: Option<Entity>,
     sender: Datagrams,
     events: tokio_mpsc::Sender<Vec<u8>>,
@@ -606,9 +654,48 @@ struct Player {
     last_shot: Option<std::time::Instant>,
 }
 
+/// One connected player as an operator sees it ([`Players::player_list`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerView {
+    /// The player's entity id in snapshots.
+    pub id: u32,
+    /// Where the connection comes from.
+    pub address: SocketAddr,
+    /// How long ago it joined.
+    pub connected: std::time::Duration,
+    /// Where the server holds the player, in metres; `None` until its first accepted state.
+    pub position: Option<[f32; 3]>,
+    /// This player's states the movement checks refused (or, with report-only, would have).
+    pub refused: Violations,
+}
+
+/// The list of connected players, filled by the tick when asked ([`Players::player_list`]).
+#[derive(Debug, Default)]
+pub struct PlayerList {
+    wanted: AtomicBool,
+    list: Mutex<Vec<PlayerView>>,
+}
+
+impl PlayerList {
+    /// Asks the tick for a fresh list; [`PlayerList::take`] returns it after the next tick.
+    pub fn request(&self) {
+        self.wanted.store(true, Ordering::Relaxed);
+    }
+
+    /// The list the tick filled last, sorted by id, leaving it empty.
+    pub fn take(&self) -> Vec<PlayerView> {
+        self.list
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default()
+    }
+}
+
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
 #[derive(Debug)]
 pub struct Players {
+    /// Players' wallets, when the server has a ledger.
+    money: Option<Arc<Money>>,
     inbound: mpsc::Receiver<Inbound>,
     traffic: Arc<Traffic>,
     /// Connected players by slot index.
@@ -657,6 +744,7 @@ pub struct Players {
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
+    player_list: Arc<PlayerList>,
     shutdown: Shutdown,
     roster: Option<mpsc::Sender<Roster>>,
 }
@@ -690,6 +778,13 @@ impl Players {
     #[must_use]
     pub fn stats_slot(&self) -> Arc<Mutex<Option<ServerStats>>> {
         self.pending_stats.clone()
+    }
+
+    /// A handle to ask for the connected players ([`PlayerList::request`]) and read them after the next tick
+    /// ([`PlayerList::take`]). Building the list costs one pass over the players, only on the ticks it is asked for.
+    #[must_use]
+    pub fn player_list(&self) -> Arc<PlayerList> {
+        self.player_list.clone()
     }
 
     /// Joins and leaves from now on, in the order the ticks apply them.
@@ -929,6 +1024,35 @@ impl Players {
         // Every visible set has been recomputed without the players who left: their slots may be reused.
         self.slots.release();
         self.send_stats();
+        self.fill_player_list();
+    }
+
+    fn fill_player_list(&mut self) {
+        if !self.player_list.wanted.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut list: Vec<PlayerView> = self
+            .players
+            .iter()
+            .flatten()
+            .map(|p| PlayerView {
+                id: p.slot.wire_id(),
+                address: p.address,
+                connected: now.saturating_duration_since(p.joined),
+                position: self
+                    .states
+                    .get(p.slot.index as usize)
+                    .copied()
+                    .flatten()
+                    .map(|s| s.position.to_metres()),
+                refused: p.movement.violations(),
+            })
+            .collect();
+        list.sort_by_key(|v| v.id);
+        if let Ok(mut slot) = self.player_list.list.lock() {
+            *slot = list;
+        }
     }
 
     /// The owner of a spawned entity and its epoch: `None` for an id that is not one, `Some((None, _))` while
@@ -1024,14 +1148,19 @@ impl Players {
             match message {
                 Inbound::Join {
                     id,
+                    address,
                     sender,
                     events,
                     inbox,
+                    wallet,
                 } => {
                     let Some(slot) = self.slots.alloc() else {
                         sender.close();
                         continue;
                     };
+                    if let (Some(money), Some(wallet)) = (&self.money, wallet) {
+                        money.register(slot.wire_id(), wallet);
+                    }
                     let tick_hz =
                         (std::time::Duration::from_secs(1).as_nanos() / info.dt.as_nanos().max(1)) as u16;
                     let _ = events.try_send(event_packet(
@@ -1055,6 +1184,8 @@ impl Players {
                     self.info_ticks[index] = info.tick as u32;
                     self.players[index] = Some(Player {
                         slot,
+                        address,
+                        joined: std::time::Instant::now(),
                         entity: None,
                         sender,
                         events,
@@ -1074,6 +1205,9 @@ impl Players {
                     let Some(slot) = self.by_connection.remove(&id) else {
                         continue;
                     };
+                    if let Some(money) = &self.money {
+                        money.unregister(slot.wire_id());
+                    }
                     let index = slot.index as usize;
                     if let Some(entity) = self.players[index].take().and_then(|p| p.entity) {
                         let _ = world.despawn(entity);
