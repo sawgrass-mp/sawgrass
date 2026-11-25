@@ -4,10 +4,11 @@
 //! |---|---|
 //! | [`ClientState`](crate::PacketKind::ClientState) | [`ClientState`]: position, velocity, rotation, 19 bytes |
 //! | [`Snapshot`](crate::PacketKind::Snapshot) | count (`u8`), then that many [`EntityState`]s |
+//! | [`DeltaSnapshot`](crate::PacketKind::DeltaSnapshot) | a fragment byte and part of a delta payload ([`crate::delta`]) |
 //! | [`Event`](crate::PacketKind::Event) | [`ServerEvent`] or [`ClientEvent`]: a code byte, then its fields |
 //!
-//! Snapshots are whole for now: every entity in the player's view, every tick. Delta encoding (chosen in
-//! `docs/research/packet-compression`) replaces them in a later version. A snapshot that holds more than
+//! The server sends delta snapshots since protocol version 3; the whole [`Snapshot`](crate::PacketKind::Snapshot)
+//! format stays for tools and tests that read older recordings. A whole snapshot that holds more than
 //! [`SNAPSHOT_MAX_ENTITIES`] entities is split over several datagrams with the same tick, so each one fits in
 //! [`MAX_DATAGRAM`] bytes on any path quinn accepts.
 

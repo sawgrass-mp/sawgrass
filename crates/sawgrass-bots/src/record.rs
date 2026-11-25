@@ -3,7 +3,8 @@
 //!
 //! The file is a sequence of records, each a little-endian `u16` bot index, a little-endian `u16` length, then
 //! that many bytes: one snapshot datagram exactly as it arrived, packet header included. A snapshot split over
-//! several datagrams gives several records with the same tick.
+//! several datagrams gives several records with the same tick. Since protocol version 3 these are delta snapshot
+//! fragments (`PacketKind::DeltaSnapshot`), not the whole snapshots NET-8 recorded.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};

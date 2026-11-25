@@ -7,7 +7,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use sawgrass_gateway::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sawgrass_gateway::{Gateway, RootCertStore, Session, connect};
-use sawgrass_protocol::game::{ClientState, ServerEvent, decode_snapshot};
+use sawgrass_protocol::delta::{Reassembler, decode_delta};
+use sawgrass_protocol::game::{ClientState, ServerEvent};
 use sawgrass_protocol::{
     EntityState, PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity,
 };
@@ -115,11 +116,19 @@ fn players_are_placed_and_see_each_other() {
     let seen: Vec<EntityState> = std::thread::scope(|scope| {
         let reader = scope.spawn(|| {
             runtime.block_on(async {
+                let mut reassembler = Reassembler::new();
                 loop {
                     let (header, packet) = b.recv_datagram().await.expect("snapshot");
-                    assert_eq!(header.kind, PacketKind::Snapshot);
+                    assert_eq!(header.kind, PacketKind::DeltaSnapshot);
+                    // B never acknowledges (its states carry tick 0), so every snapshot is whole.
+                    let Some(payload) = reassembler
+                        .push(header.tick, &packet[PacketHeader::SIZE..])
+                        .expect("fragment")
+                    else {
+                        continue;
+                    };
                     let mut states = Vec::new();
-                    decode_snapshot(&packet[PacketHeader::SIZE..], |s| states.push(s)).expect("decode");
+                    decode_delta(payload, header.tick, None, &mut states).expect("decode");
                     assert!(states.iter().all(|s| s.id != id_b), "B sees itself");
                     if states.iter().any(|s| s.position.to_metres()[0] == 12.5) {
                         return states;
@@ -170,7 +179,7 @@ fn snapshots_arrive_in_tick_order() {
                 let mut headers = Vec::new();
                 while headers.len() < 20 {
                     let (header, _) = client.recv_datagram().await.expect("snapshot");
-                    assert_eq!(header.kind, PacketKind::Snapshot);
+                    assert_eq!(header.kind, PacketKind::DeltaSnapshot);
                     headers.push(header);
                 }
                 headers

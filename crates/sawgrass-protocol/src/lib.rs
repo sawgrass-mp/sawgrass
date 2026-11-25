@@ -17,8 +17,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// protocol crate changes (task OPS-3).
 ///
 /// Version 1 is the first wire format: the packet header and the quantized encodings. Version 2 adds the
-/// payloads in [`game`].
-pub const PROTOCOL_VERSION: u32 = 2;
+/// payloads in [`game`]. Version 3 sends snapshots delta-encoded ([`delta`], [`PacketKind::DeltaSnapshot`]) and
+/// makes the tick in a client state's header the newest snapshot tick the client decoded.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///
