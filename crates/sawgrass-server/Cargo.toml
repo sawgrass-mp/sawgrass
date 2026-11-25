@@ -16,7 +16,7 @@ sawgrass-protocol = { path = "../sawgrass-protocol" }
 # Players' snapshots built in parallel (SRV-4 chose players in parallel on rayon; SRV-7).
 rayon = "1"
 # The gateway runs on tokio (quinn's runtime) next to the tick thread.
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 
 # jemalloc as the global allocator (SRV-5, confirmed on the bots by BOT-3). `unprefixed_malloc` makes it the

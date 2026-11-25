@@ -21,6 +21,11 @@
 //! tick. At most [`OUTBOX_TICKS`] batches wait for the gateway; if it falls further behind, the tick's snapshots
 //! are dropped and counted rather than queued.
 //!
+//! That is the overload policy for sending (task SRV-10): a slow client loses snapshots, never the tick. When a
+//! connection's 64 KiB datagram send buffer is full, quinn discards that connection's oldest unsent datagrams to
+//! make room for the new ones, so the client gets the newest state and the tick never waits; when the gateway as a
+//! whole falls behind, whole ticks are dropped and counted in [`Traffic::dropped_ticks`].
+//!
 //! Every player takes a dense [`Slot`] when the tick thread sees it join (task IM-4). The slot indexes the
 //! per-player arrays here (players, wire states) and the ids in the grid and the visible sets; its
 //! [`Slot::wire_id`] is the player's entity id in `Joined` and in snapshots. A freed slot is reused only after
@@ -137,8 +142,20 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let active = Arc::new(AtomicUsize::new(0));
     let accept_traffic = traffic.clone();
     let (outbox, recycle) = spawn_sender(traffic.clone());
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let close = shutdown.clone();
     tokio::spawn(async move {
-        while let Some(incoming) = gateway.accept().await {
+        loop {
+            let incoming = tokio::select! {
+                incoming = gateway.accept() => incoming,
+                () = close.notified() => {
+                    gateway.close();
+                    break;
+                }
+            };
+            let Some(incoming) = incoming else {
+                break;
+            };
             if active.load(Ordering::Relaxed) >= config.max_players {
                 incoming.refuse();
                 continue;
@@ -178,6 +195,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
+        shutdown: Shutdown(shutdown),
     }
 }
 
@@ -298,6 +316,19 @@ pub struct Players {
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
+    shutdown: Shutdown,
+}
+
+/// Closes the gateway from outside the tick: every connection, and no new ones.
+#[derive(Debug, Clone)]
+pub struct Shutdown(Arc<tokio::sync::Notify>);
+
+impl Shutdown {
+    /// Closes every connection and stops accepting new ones. The close goes out on the gateway's runtime, which
+    /// must keep running for a moment after this call for clients to hear it.
+    pub fn close(&self) {
+        self.0.notify_one();
+    }
 }
 
 impl Players {
@@ -305,6 +336,12 @@ impl Players {
     #[must_use]
     pub fn traffic(&self) -> Arc<Traffic> {
         self.traffic.clone()
+    }
+
+    /// A handle that closes the gateway, for stopping the server when the tick cannot go on.
+    #[must_use]
+    pub fn shutdown(&self) -> Shutdown {
+        self.shutdown.clone()
     }
 
     /// Where to put [`ServerStats`] for the next tick to send to the players that asked for them.
