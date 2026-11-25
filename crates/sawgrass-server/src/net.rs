@@ -65,6 +65,7 @@ use crate::movement::{Movement, MovementRules, Violation, Violations};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
 use crate::recording::Recorder;
+use crate::seats::{ENTER_RADIUS, Refusal, Seats};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
 use crate::world::WorldState;
@@ -166,6 +167,11 @@ enum Inbound {
     Leave {
         id: u32,
     },
+    /// The player asked to enter `Some((vehicle id, seat))` or to leave its seat (`None`).
+    Seat {
+        id: u32,
+        request: Option<(u32, u8)>,
+    },
 }
 
 /// How the server accepts players.
@@ -249,6 +255,10 @@ pub struct Traffic {
     pub corrections: AtomicU64,
     /// World state changes that found a player's event queue full; that player is sent the whole state again.
     pub lost_world_events: AtomicU64,
+    /// Requests to enter a seat that the server granted (SRV-15).
+    pub seats_granted: AtomicU64,
+    /// Requests to enter a seat that the server refused, for any [`Refusal`].
+    pub seats_refused: AtomicU64,
     /// Shots admitted from clients ([`ClientEvent::Shot`]).
     pub shots_received: AtomicU64,
 }
@@ -430,6 +440,7 @@ pub fn listen_full(
         world: WorldState::default(),
         world_changes: Vec::new(),
         tick_dt: std::time::Duration::from_millis(50),
+        seats: Seats::new(),
         tick: 0,
         infos: Vec::new(),
         info_ticks: Vec::new(),
@@ -523,6 +534,7 @@ async fn serve(
     let events_inbox = inbox.clone();
     let events_traffic = traffic.clone();
     let events_connection = datagrams.clone();
+    let events_inbound = inbound.clone();
     let events_recorder = recorder.clone();
     tokio::spawn(async move {
         let mut bucket = Bucket::for_events(&limits, Instant::now());
@@ -559,6 +571,15 @@ async fn serve(
             match event {
                 ClientEvent::RequestStats if stats_to_clients => {
                     events_inbox.wants_stats.store(true, Ordering::Relaxed);
+                }
+                ClientEvent::EnterSeat { vehicle, seat } => {
+                    let _ = events_inbound.send(Inbound::Seat {
+                        id,
+                        request: Some((vehicle, seat)),
+                    });
+                }
+                ClientEvent::LeaveSeat => {
+                    let _ = events_inbound.send(Inbound::Seat { id, request: None });
                 }
                 ClientEvent::Shot(_) => {
                     // Checked and applied by SRV-16; counted until then.
@@ -755,6 +776,8 @@ pub struct Players {
     world_changes: Vec<ServerEvent>,
     /// The tick's length.
     tick_dt: std::time::Duration,
+    /// Who sits in which vehicle (SRV-15).
+    seats: Seats,
     /// The tick being run, or the last one run.
     tick: u32,
     /// The info each slot sends, built from `peds`, and the tick it last changed at.
@@ -897,6 +920,9 @@ impl Players {
             return false;
         }
         self.spawned[index] = false;
+        for player in self.seats.vacate(slot.index) {
+            self.unseated(player);
+        }
         if let Some(change) = self.ownership.untrack(slot.index) {
             // Its state is gone, so the owner is told here, with the id, rather than with the tick's changes.
             self.tell_owner(change.old, id, change.epoch, false);
@@ -992,12 +1018,149 @@ impl Players {
         self.world_changes.clear();
     }
 
+    /// Locks or unlocks a spawned vehicle: a locked one refuses every request to enter, and those inside stay.
+    /// Returns `false` for an id that is not a spawned vehicle.
+    pub fn set_locked(&mut self, id: u32, locked: bool) -> bool {
+        if !self
+            .spawned(id)
+            .is_some_and(|(i, _)| i.kind == EntityKind::Vehicle)
+        {
+            return false;
+        }
+        self.seats.set_locked(id >> 16, locked);
+        true
+    }
+
+    /// The vehicle id and seat the player with entity id `player` sits in.
+    #[must_use]
+    pub fn seat_of(&self, player: u32) -> Option<(u32, u8)> {
+        let (vehicle, seat) = self.seats.seat_of(player >> 16)?;
+        Some((self.states.get(vehicle as usize).copied().flatten()?.id, seat))
+    }
+
+    /// Seats the player in slot `player` in `seat` of the vehicle with id `vehicle`, if the rules allow it
+    /// (`seats.rs`), and sets its ped block; the driver's seat makes it the vehicle's driver (ownership rule 1).
+    fn enter_seat(&mut self, player: u32, vehicle: u32, seat: u8) -> Result<(), Refusal> {
+        let Some((_, car)) = self
+            .spawned(vehicle)
+            .filter(|(i, _)| i.kind == EntityKind::Vehicle)
+        else {
+            return Err(Refusal::NotAVehicle);
+        };
+        let p = player as usize;
+        let reach = self.states.get(p).copied().flatten().is_some_and(|me| {
+            let ([x, y, z], [cx, cy, cz]) = (me.position.to_metres(), car.position.to_metres());
+            (x - cx).powi(2) + (y - cy).powi(2) + (z - cz).powi(2) <= ENTER_RADIUS * ENTER_RADIUS
+        });
+        if !reach || self.peds[p].motion == Motion::Dead {
+            return Err(Refusal::CannotReach);
+        }
+        let slot = vehicle >> 16;
+        self.seats.enter(player, slot, seat)?;
+        if seat == 0 {
+            self.ownership.set_driver(slot, Some(player));
+        }
+        self.set_seat_in_ped(p, vehicle, seat + 1);
+        Ok(())
+    }
+
+    /// Takes the player in slot `player` out of its seat, if it sits in one, and starts its movement checks from
+    /// where the vehicle is, so its first state outside is checked from there.
+    fn leave_seat(&mut self, player: u32) {
+        let Some((vehicle, seat)) = self.seats.leave(player) else {
+            return;
+        };
+        if seat == 0 {
+            self.ownership.set_driver(vehicle, None);
+        }
+        self.unseated(player);
+    }
+
+    /// What follows a player's leaving its seat, however it left.
+    fn unseated(&mut self, player: u32) {
+        let p = player as usize;
+        self.set_seat_in_ped(p, 0, 0);
+        let at = self.states.get(p).copied().flatten();
+        if let (Some(Some(pl)), Some(at)) = (self.players.get_mut(p), at) {
+            pl.movement.reset();
+            let state = ClientState {
+                position: at.position,
+                velocity: at.velocity,
+                rotation: at.rotation,
+            };
+            let _ = pl
+                .movement
+                .check(&self.movement, &state, std::time::Instant::now());
+        }
+    }
+
+    /// Sets the seat fields of the ped block in slot `p` (`seat` 0 for none) and the motion that goes with them.
+    fn set_seat_in_ped(&mut self, p: usize, vehicle: u32, seat: u8) {
+        let Some(ped) = self.peds.get(p).copied() else {
+            return;
+        };
+        let motion = match (seat, ped.motion) {
+            (0, Motion::InVehicle) => Motion::Idle,
+            (0, m) => m,
+            _ => Motion::InVehicle,
+        };
+        let ped = PedBlock {
+            motion,
+            vehicle,
+            seat,
+            ..ped
+        };
+        if ped != self.peds[p] {
+            self.peds[p] = ped;
+            self.infos[p] = ped_info(&ped);
+            self.info_ticks[p] = self.tick;
+        }
+    }
+
+    /// Puts every seated player where its vehicle is, so the grid, the ownership rules, the scripts and its own
+    /// view follow the vehicle. Run after the owned states of the tick.
+    fn follow_vehicles(&mut self, world: &mut World) {
+        for (player, vehicle) in self.seats.seated().collect::<Vec<_>>() {
+            let Some(car) = self.states.get(vehicle as usize).copied().flatten() else {
+                continue;
+            };
+            let p = player as usize;
+            let Some(Some(pl)) = self.players.get(p) else {
+                continue;
+            };
+            let state = EntityState {
+                id: pl.slot.wire_id(),
+                ..car
+            };
+            if let Some(entity) = pl.entity
+                && let Ok(mut current) = world.get::<&mut PlayerState>(entity)
+            {
+                current.0 = ClientState {
+                    position: car.position,
+                    velocity: car.velocity,
+                    rotation: car.rotation,
+                };
+            }
+            let [x, y, _] = car.position.to_metres();
+            self.grid.upsert(EntityId(player), Point::new(x, y));
+            self.states[p] = Some(state);
+        }
+    }
+
     /// The info and state of an entity [`Players::spawn`] made.
     #[must_use]
     pub fn spawned(&self, id: u32) -> Option<(Info, EntityState)> {
         let index = (id >> 16) as usize;
         let state = self.states.get(index).copied().flatten().filter(|s| s.id == id)?;
         (self.spawned.get(index) == Some(&true)).then(|| (self.infos[index], state))
+    }
+
+    /// The info and state the server holds for any entity, a player's included, by its id.
+    #[must_use]
+    pub fn entity(&self, id: u32) -> Option<(Info, EntityState)> {
+        let index = (id >> 16) as usize;
+        let state = self.states.get(index).copied().flatten().filter(|s| s.id == id)?;
+        Some((self.infos[index], state))
     }
 
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
@@ -1185,10 +1348,26 @@ impl Players {
                         world_cursor: Some(0),
                     });
                 }
+                Inbound::Seat { id, request } => {
+                    let Some(slot) = self.by_connection.get(&id).copied() else {
+                        continue;
+                    };
+                    match request {
+                        Some((vehicle, seat)) => {
+                            let counter = match self.enter_seat(slot.index, vehicle, seat) {
+                                Ok(()) => &self.traffic.seats_granted,
+                                Err(_) => &self.traffic.seats_refused,
+                            };
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        None => self.leave_seat(slot.index),
+                    }
+                }
                 Inbound::Leave { id } => {
                     let Some(slot) = self.by_connection.remove(&id) else {
                         continue;
                     };
+                    self.leave_seat(slot.index);
                     if let Some(money) = &self.money {
                         money.unregister(slot.wire_id());
                     }
@@ -1230,6 +1409,19 @@ impl Players {
             }) else {
                 continue;
             };
+            let index = player.slot.index as usize;
+            if self.seats.seat_of(player.slot.index).is_some() {
+                // Seated: the vehicle's state places it (`follow_vehicles`); only the presentation is taken.
+                if let Some(ped) = ped {
+                    let merged = merge_ped(&self.peds[index], &ped);
+                    if merged != self.peds[index] {
+                        self.peds[index] = merged;
+                        self.infos[index] = ped_info(&merged);
+                        self.info_ticks[index] = tick;
+                    }
+                }
+                continue;
+            }
             if let Err(violation) = player.movement.check(rules, &state, now) {
                 let counter = match violation {
                     Violation::Bounds => &self.traffic.refused_bounds,
@@ -1265,7 +1457,6 @@ impl Players {
                 }
                 None => player.entity = Some(world.spawn((NetId(id), PlayerState(state)))),
             }
-            let index = player.slot.index as usize;
             if let Some(ped) = ped {
                 let merged = merge_ped(&self.peds[index], &ped);
                 if merged != self.peds[index] {
@@ -1292,6 +1483,7 @@ impl Players {
             self.owned_pool.push(list);
         }
         self.owned_by = owned;
+        self.follow_vehicles(world);
     }
 
     /// Takes one owned-entity state from the player in slot `player` if it owns the entity with that epoch, the

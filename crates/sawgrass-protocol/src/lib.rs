@@ -31,8 +31,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// [`game::ServerEvent::Corrected`], the server's answer to a refused state.
 /// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]). Version 9 adds payments between
 /// players ([`game::ClientEvent::Pay`], [`game::ServerEvent::Paid`]). Version 10 adds the shot report
-/// ([`game::ClientEvent::Shot`], [`combat`]). Version 11 is SRV-15's (#201). Version 12 adds the world state
-/// events ([`world`]).
+/// ([`game::ClientEvent::Shot`], [`combat`]). Version 11 adds the seat requests
+/// ([`game::ClientEvent::EnterSeat`], [`game::ClientEvent::LeaveSeat`]). Version 12 adds the world state events
+/// ([`world`]).
 pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
