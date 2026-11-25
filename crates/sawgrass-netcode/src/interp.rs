@@ -7,12 +7,20 @@
 //!
 //! When the render tick passes the newest sample (snapshots late or lost) the entity is extrapolated along its
 //! last velocity for at most [`InterpConfig::max_extrapolation_secs`], then held. An entity missing from a
-//! snapshot has left the visible set: it is shown until the render tick reaches its last sample, then removed.
+//! snapshot has left the visible set: it is shown until the render tick reaches that snapshot, then removed. One
+//! that comes back before then is never removed and moves on from its last sample.
+//!
+//! Each sample also carries the entity's [`Info`] (kind, model and block fields, ADR 0006) from the snapshot whose
+//! pose is being shown, so a change of model or block appears together with the movement it came with. A
+//! [`Sample::event`] marks the first frame an entity is shown and a frame its info changed, and
+//! [`Interpolator::removed`] lists the entities no longer shown, so the game module can spawn, update and remove
+//! game entities without comparing frames itself.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use sawgrass_protocol::EntityState;
+use sawgrass_protocol::entity::Info;
 
 use crate::{Pose, length, sub};
 
@@ -60,6 +68,19 @@ pub struct Sample {
     pub pose: Pose,
     /// How the pose was obtained.
     pub kind: Kind,
+    /// Its kind, model and block fields, from the snapshot of the pose shown.
+    pub info: Info,
+    /// Whether it appeared or its info changed at this frame.
+    pub event: Option<Event>,
+}
+
+/// What changed for an entity at this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// Shown for the first time: spawn it.
+    Appeared,
+    /// Its info differs from the last frame's: update its model or blocks.
+    InfoChanged,
 }
 
 /// Samples kept per entity. More than enough for the longest render delay the clock allows.
@@ -67,10 +88,12 @@ const KEPT: usize = 12;
 
 #[derive(Debug, Default)]
 struct Track {
-    /// (tick, pose), ascending by tick.
-    samples: Vec<(u32, Pose)>,
+    /// (tick, pose, info), ascending by tick.
+    samples: Vec<(u32, Pose, Info)>,
     /// The tick of the first snapshot without this entity, once it left.
     left: Option<u32>,
+    /// The info of the last frame it was shown in; `None` until it is first shown.
+    shown: Option<Info>,
 }
 
 /// The remote entities and their recent samples.
@@ -80,6 +103,7 @@ pub struct Interpolator {
     tick_hz: f32,
     tracks: HashMap<u32, Track>,
     newest: Option<u32>,
+    removed: Vec<u32>,
 }
 
 impl Interpolator {
@@ -91,6 +115,7 @@ impl Interpolator {
             tick_hz: f32::from(tick_hz.max(1)),
             tracks: HashMap::new(),
             newest: None,
+            removed: Vec::new(),
         }
     }
 
@@ -106,14 +131,15 @@ impl Interpolator {
         self.tracks.is_empty()
     }
 
-    /// Takes the whole snapshot for `tick`: every visible entity's state. A snapshot older than the newest one
+    /// Takes the whole snapshot for `tick`: every visible entity's state, and `infos[i]` the info of
+    /// `states[i]` (an empty slice stands for [`Info::PLAYER`] for all). A snapshot older than the newest one
     /// taken is ignored. `skip` is left out (the local player's own entity).
-    pub fn insert(&mut self, tick: u32, states: &[EntityState], skip: Option<u32>) {
+    pub fn insert(&mut self, tick: u32, states: &[EntityState], infos: &[Info], skip: Option<u32>) {
         if self.newest.is_some_and(|n| tick <= n) {
             return;
         }
         self.newest = Some(tick);
-        for state in states {
+        for (i, state) in states.iter().enumerate() {
             if Some(state.id) == skip {
                 continue;
             }
@@ -121,55 +147,93 @@ impl Interpolator {
                 Entry::Occupied(e) => e.into_mut(),
                 Entry::Vacant(e) => e.insert(Track::default()),
             };
-            if track.left.is_some() {
-                // Left and came back: start again rather than interpolate across the gap.
-                *track = Track::default();
-            }
+            // Left and came back before the render tick reached its absence: it never stopped being shown, so it
+            // carries on from its last sample (a long jump across the gap snaps like any teleport).
+            track.left = None;
             if track.samples.len() == KEPT {
                 track.samples.remove(0);
             }
-            track.samples.push((tick, Pose::from_state(state)));
+            let info = infos.get(i).copied().unwrap_or(Info::PLAYER);
+            track.samples.push((tick, Pose::from_state(state), info));
         }
         for track in self.tracks.values_mut() {
-            if track.left.is_none() && track.samples.last().is_some_and(|&(t, _)| t < tick) {
+            if track.left.is_none() && track.samples.last().is_some_and(|&(t, _, _)| t < tick) {
                 track.left = Some(tick);
             }
         }
     }
 
     /// Writes every entity shown at `render` (a fractional tick) to `out`, cleared first, ascending by id. Drops
-    /// samples no longer needed and entities that have left by then.
+    /// samples no longer needed and entities that have left by then; those that had been shown are listed in
+    /// [`Interpolator::removed`] until the next call.
     pub fn sample(&mut self, render: f64, out: &mut Vec<Sample>) {
         out.clear();
+        self.removed.clear();
         let config = self.config;
         let tick_hz = self.tick_hz;
+        let removed = &mut self.removed;
         self.tracks.retain(|&id, track| {
             // A leaver is gone once the render tick reaches the snapshot it was missing from.
             if track.left.is_some_and(|l| render >= f64::from(l)) {
+                if track.shown.is_some() {
+                    removed.push(id);
+                }
                 return false;
             }
             // Keep one sample at or before the render tick, and all after it.
-            let before = track.samples.iter().rposition(|&(t, _)| f64::from(t) <= render);
+            let before = track
+                .samples
+                .iter()
+                .rposition(|&(t, _, _)| f64::from(t) <= render);
             if let Some(i) = before {
                 track.samples.drain(..i);
             }
-            if let Some(sample) = pose_at(&track.samples, render, tick_hz, &config) {
-                out.push(Sample { id, ..sample });
+            if let Some(mut sample) = pose_at(&track.samples, render, tick_hz, &config) {
+                sample.id = id;
+                sample.event = match track.shown {
+                    None => Some(Event::Appeared),
+                    Some(info) if info != sample.info => Some(Event::InfoChanged),
+                    Some(_) => None,
+                };
+                track.shown = Some(sample.info);
+                out.push(sample);
             }
             true
         });
         out.sort_unstable_by_key(|s| s.id);
+        removed.sort_unstable();
+    }
+
+    /// The entities that stopped being shown in the last [`Interpolator::sample`] call, ascending: remove them
+    /// from the game. Only entities that had been shown are listed.
+    #[must_use]
+    pub fn removed(&self) -> &[u32] {
+        &self.removed
     }
 }
 
-/// The pose at `render` from samples whose first is at or before it. `None` if the entity is not visible yet.
-fn pose_at(samples: &[(u32, Pose)], render: f64, tick_hz: f32, config: &InterpConfig) -> Option<Sample> {
-    let &(t0, p0) = samples.first()?;
+/// The pose at `render` from samples whose first is at or before it, with the info of the sample it comes from.
+/// `None` if the entity is not visible yet. The id and event are left for the caller.
+fn pose_at(
+    samples: &[(u32, Pose, Info)],
+    render: f64,
+    tick_hz: f32,
+    config: &InterpConfig,
+) -> Option<Sample> {
+    let &(t0, p0, i0) = samples.first()?;
     if f64::from(t0) > render {
         return None;
     }
-    let sample = |pose, kind| Some(Sample { id: 0, pose, kind });
-    let Some(&(t1, p1)) = samples.get(1) else {
+    let sample = |pose, kind, info| {
+        Some(Sample {
+            id: 0,
+            pose,
+            kind,
+            info,
+            event: None,
+        })
+    };
+    let Some(&(t1, p1, i1)) = samples.get(1) else {
         let secs = ((render - f64::from(t0)) as f32 / tick_hz).max(0.0);
         let limit = config.max_extrapolation_secs;
         let kind = if secs > limit {
@@ -182,12 +246,12 @@ fn pose_at(samples: &[(u32, Pose)], render: f64, tick_hz: f32, config: &InterpCo
         for (p, v) in pose.position.iter_mut().zip(p0.velocity) {
             *p += v * secs;
         }
-        return sample(pose, kind);
+        return sample(pose, kind, i0);
     };
     let dt = (t1 - t0) as f32 / tick_hz;
     let distance = length(sub(p1.position, p0.position));
     if distance > config.teleport_min_distance && distance > config.teleport_speed * dt {
-        return sample(p1, Kind::Snapped);
+        return sample(p1, Kind::Snapped, i1);
     }
     let s = ((render - f64::from(t0)) / f64::from(t1 - t0)) as f32;
     let (position, velocity) = hermite(&p0, &p1, dt, distance, s);
@@ -198,6 +262,7 @@ fn pose_at(samples: &[(u32, Pose)], render: f64, tick_hz: f32, config: &InterpCo
             rotation: slerp(p0.rotation, p1.rotation, s),
         },
         Kind::Interpolated,
+        i0,
     )
 }
 
@@ -293,7 +358,7 @@ mod tests {
         let mut interp = Interpolator::new(20, InterpConfig::default());
         for tick in 0..4u32 {
             let x = tick as f32 * 0.25;
-            interp.insert(tick, &[state(7, [x, 0.0, 0.0], [5.0, 0.0, 0.0])], None);
+            interp.insert(tick, &[state(7, [x, 0.0, 0.0], [5.0, 0.0, 0.0])], &[], None);
         }
         let s = one(&mut interp, 1.5).expect("shown");
         assert_eq!(s.id, 7);
@@ -305,7 +370,7 @@ mod tests {
     #[test]
     fn not_shown_before_its_first_sample() {
         let mut interp = Interpolator::new(20, InterpConfig::default());
-        interp.insert(10, &[state(1, [0.0; 3], [0.0; 3])], None);
+        interp.insert(10, &[state(1, [0.0; 3], [0.0; 3])], &[], None);
         assert_eq!(one(&mut interp, 9.5), None);
         assert!(one(&mut interp, 10.0).is_some());
     }
@@ -313,7 +378,7 @@ mod tests {
     #[test]
     fn extrapolates_for_a_while_then_holds() {
         let mut interp = Interpolator::new(20, InterpConfig::default());
-        interp.insert(0, &[state(1, [0.0; 3], [4.0, 0.0, 0.0])], None);
+        interp.insert(0, &[state(1, [0.0; 3], [4.0, 0.0, 0.0])], &[], None);
         let s = one(&mut interp, 2.0).expect("shown");
         assert_eq!(s.kind, Kind::Extrapolated);
         assert!((s.pose.position[0] - 0.4).abs() < 1e-3);
@@ -326,8 +391,8 @@ mod tests {
     #[test]
     fn a_teleport_jumps() {
         let mut interp = Interpolator::new(20, InterpConfig::default());
-        interp.insert(0, &[state(1, [0.0; 3], [0.0; 3])], None);
-        interp.insert(1, &[state(1, [500.0, 0.0, 0.0], [0.0; 3])], None);
+        interp.insert(0, &[state(1, [0.0; 3], [0.0; 3])], &[], None);
+        interp.insert(1, &[state(1, [500.0, 0.0, 0.0], [0.0; 3])], &[], None);
         let s = one(&mut interp, 0.1).expect("shown");
         assert_eq!(s.kind, Kind::Snapped);
         assert_eq!(s.pose.position[0], 500.0);
@@ -339,9 +404,10 @@ mod tests {
         interp.insert(
             0,
             &[state(1, [0.0; 3], [0.0; 3]), state(2, [1.0; 3], [0.0; 3])],
+            &[],
             None,
         );
-        interp.insert(1, &[state(1, [0.0; 3], [0.0; 3])], None);
+        interp.insert(1, &[state(1, [0.0; 3], [0.0; 3])], &[], None);
         let mut out = Vec::new();
         interp.sample(0.5, &mut out);
         assert_eq!(out.iter().map(|s| s.id).collect::<Vec<_>>(), [1, 2]);
@@ -356,9 +422,10 @@ mod tests {
         interp.insert(
             5,
             &[state(1, [0.0; 3], [0.0; 3]), state(9, [0.0; 3], [0.0; 3])],
+            &[],
             Some(9),
         );
-        interp.insert(4, &[state(3, [0.0; 3], [0.0; 3])], None);
+        interp.insert(4, &[state(3, [0.0; 3], [0.0; 3])], &[], None);
         let mut out = Vec::new();
         interp.sample(5.0, &mut out);
         assert_eq!(out.iter().map(|s| s.id).collect::<Vec<_>>(), [1]);
@@ -368,12 +435,75 @@ mod tests {
     fn a_turn_is_a_curve_through_both_samples() {
         let mut interp = Interpolator::new(20, InterpConfig::default());
         // Moving +x at 10 m/s, then +y: the curve bulges past the chord, towards the corner.
-        interp.insert(0, &[state(1, [0.0; 3], [10.0, 0.0, 0.0])], None);
-        interp.insert(1, &[state(1, [0.5, 0.5, 0.0], [0.0, 10.0, 0.0])], None);
+        interp.insert(0, &[state(1, [0.0; 3], [10.0, 0.0, 0.0])], &[], None);
+        interp.insert(1, &[state(1, [0.5, 0.5, 0.0], [0.0, 10.0, 0.0])], &[], None);
         let mid = one(&mut interp, 0.5).expect("shown").pose.position;
         assert!(mid[0] > 0.25 + 0.05 && mid[1] < 0.25 - 0.05, "{mid:?}");
         let end = one(&mut interp, 1.0).expect("shown").pose.position;
         assert!((end[0] - 0.5).abs() < 1e-3 && (end[1] - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn events_spawn_update_and_remove_once() {
+        use sawgrass_protocol::entity::{AssetId, EntityKind};
+
+        let mut interp = Interpolator::new(20, InterpConfig::default());
+        let car = Info::new(EntityKind::Vehicle, AssetId(10));
+        let red = Info::with_fields(EntityKind::Vehicle, AssetId(10), &[1]).expect("info");
+        let s = |x| state(1, [x, 0.0, 0.0], [0.0; 3]);
+        interp.insert(0, &[s(0.0)], &[car], None);
+        interp.insert(1, &[s(0.1)], &[car], None);
+        interp.insert(2, &[s(0.2)], &[red], None);
+        let mut out = Vec::new();
+        let mut frame = |interp: &mut Interpolator, render| {
+            interp.sample(render, &mut out);
+            (out.first().map(|s| (s.info, s.event)), interp.removed().to_vec())
+        };
+        assert_eq!(
+            frame(&mut interp, 0.5),
+            (Some((car, Some(Event::Appeared))), vec![])
+        );
+        assert_eq!(frame(&mut interp, 1.5), (Some((car, None)), vec![]));
+        // The new info shows with the pose of the snapshot that carried it, once.
+        assert_eq!(
+            frame(&mut interp, 2.0),
+            (Some((red, Some(Event::InfoChanged))), vec![])
+        );
+        assert_eq!(frame(&mut interp, 2.2), (Some((red, None)), vec![]));
+        interp.insert(3, &[], &[], None);
+        assert_eq!(frame(&mut interp, 3.0), (None, vec![1]));
+        assert_eq!(frame(&mut interp, 3.5), (None, vec![]));
+    }
+
+    #[test]
+    fn an_entity_never_shown_is_never_removed() {
+        let mut interp = Interpolator::new(20, InterpConfig::default());
+        interp.insert(0, &[state(1, [0.0; 3], [0.0; 3])], &[], None);
+        interp.insert(1, &[], &[], None);
+        let mut out = Vec::new();
+        interp.sample(2.0, &mut out);
+        assert!(out.is_empty());
+        assert!(interp.removed().is_empty());
+        assert!(interp.is_empty());
+    }
+
+    #[test]
+    fn coming_back_before_removal_is_not_a_second_spawn() {
+        let mut interp = Interpolator::new(20, InterpConfig::default());
+        let s = state(1, [0.0; 3], [0.0; 3]);
+        interp.insert(0, &[s], &[], None);
+        let mut out = Vec::new();
+        interp.sample(0.0, &mut out);
+        assert_eq!(out[0].event, Some(Event::Appeared));
+        interp.insert(1, &[], &[], None);
+        interp.insert(2, &[s], &[], None);
+        interp.sample(0.5, &mut out);
+        assert_eq!(out[0].event, None);
+        interp.sample(1.5, &mut out);
+        assert_eq!(out[0].event, None);
+        interp.sample(2.0, &mut out);
+        assert_eq!(out[0].event, None);
+        assert!(interp.removed().is_empty());
     }
 
     #[test]

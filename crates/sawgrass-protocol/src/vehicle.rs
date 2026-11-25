@@ -11,7 +11,13 @@
 //! | 4 | flags, 16 bits: [`VehicleBlock::ENGINE`] and the others below, then one bit per door from [`VehicleBlock::DOOR_0`] |
 //! | 5 | damage: engine health (`u8`, 255 intact) in the low byte, body health in the next, burst tyres as bits in the third |
 //!
-//! Deformation is not sent (ADR 0006, assumption A3). A decoder reads the first [`VEHICLE_FIELDS`] fields and ignores
+//! Deformation is not sent (ADR 0006, assumption A3).
+//!
+//! **Who may lower the damage fields** (ADR 0006, section 5, the maintainer's choice of 2026-11-25): the server
+//! takes field 5 from the simulating owner's [`OwnedState`](crate::game::OwnedState) only for a vehicle that belongs
+//! to nobody as property, and then only as a decrease under a cap. For a vehicle that belongs to a player, the owner's
+//! value is ignored and the server sends its own, changed only by events it checked (an accepted hit report, a
+//! script). A decoder reads the first [`VEHICLE_FIELDS`] fields and ignores
 //! any after them; fields wider than their table entry are refused.
 
 use crate::DecodeError;
@@ -33,11 +39,12 @@ pub struct VehicleBlock {
     pub angular_velocity: [i16; 3],
     /// The flag bits below.
     pub flags: u16,
-    /// Engine health, `255` intact.
+    /// Engine health, `255` intact. From a simulating owner, taken only for a vehicle nobody owns as property and
+    /// only as a decrease (see the module's notes).
     pub engine: u8,
-    /// Body health, `255` intact.
+    /// Body health, `255` intact. As `engine`.
     pub body: u8,
-    /// Burst tyres, one bit each.
+    /// Burst tyres, one bit each. As `engine`: an owner may burst a tyre only of a vehicle nobody owns.
     pub burst_tyres: u8,
 }
 
