@@ -259,8 +259,9 @@ pub struct Traffic {
     pub corrections: AtomicU64,
     /// Shots admitted from clients ([`ClientEvent::Shot`]).
     pub shots_received: AtomicU64,
-    /// Shots refused whole: a dead shooter, a weapon it does not hold, faster than the fire rate, fired from too
-    /// far from where the server holds the shooter, or a tick older than the rewind limit (SRV-16).
+    /// Shots refused whole: a dead shooter, a weapon it does not hold, more hits than the weapon has pellets,
+    /// faster than the fire rate, fired from too far from where the server holds the shooter, or a tick older than
+    /// the rewind limit (SRV-16).
     pub shots_refused: AtomicU64,
     /// Hits accepted and applied.
     pub hits_accepted: AtomicU64,
@@ -950,6 +951,7 @@ impl Players {
         let seen = pl.view.sent_at(shot.tick);
         if shooter.motion == Motion::Dead
             || shot.weapon != shooter.weapon
+            || shot.hits().len() > usize::from(rules.pellets)
             || distance(shot.from, own.position) > FROM_TOLERANCE
             || seen.is_none()
         {

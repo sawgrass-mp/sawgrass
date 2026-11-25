@@ -40,15 +40,19 @@ pub struct WeaponRules {
     pub range: f32,
     /// Shortest time between two shots.
     pub interval: Duration,
+    /// Projectiles one shot fires, so the most hits it may report: a shotgun's pellets, 1 for a rifle. A shot with
+    /// more is refused whole, so one pull of the trigger cannot multiply its damage.
+    pub pellets: u8,
 }
 
 impl Default for WeaponRules {
-    /// A placeholder for every weapon: 25 points, 150 m, 900 rounds a minute.
+    /// A placeholder for every weapon: 25 points, 150 m, 900 rounds a minute, one projectile a shot.
     fn default() -> Self {
         Self {
             damage: 25,
             range: 150.0,
             interval: Duration::from_micros(66_667),
+            pellets: 1,
         }
     }
 }
