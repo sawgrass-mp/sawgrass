@@ -220,6 +220,15 @@ impl GameApi for ReentrantGame {
     fn disable(&mut self, system: SinglePlayerSystem) -> Result<(), GameError> {
         self.inner.disable(system)
     }
+    fn set_clock(&mut self, minute: f32) -> Result<(), GameError> {
+        self.inner.set_clock(minute)
+    }
+    fn set_weather(&mut self, current: GameAsset, next: GameAsset, transition: f32) -> Result<(), GameError> {
+        self.inner.set_weather(current, next, transition)
+    }
+    fn set_door(&mut self, door: GameAsset, locked: bool, open: f32) -> Result<(), GameError> {
+        self.inner.set_door(door, locked, open)
+    }
 }
 
 /// Spawns entity 1 and, on the first frame only, entity 2, which it despawns in the same frame.

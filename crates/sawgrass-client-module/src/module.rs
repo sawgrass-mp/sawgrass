@@ -7,8 +7,11 @@ use std::fmt;
 
 use crate::assets::{AssetId, AssetTable};
 use crate::entity_pool::{BindError, EntityPool, NetId};
+use sawgrass_protocol::world::{Door, Environment};
+
 use crate::game::{
-    CameraPose, EntityKind, GameApi, GameError, GameShot, InputState, Pose, SinglePlayerSystem, Zone,
+    CameraPose, EntityKind, GameApi, GameAsset, GameError, GameShot, InputState, Pose, SinglePlayerSystem,
+    Zone,
 };
 use crate::hooks::{EventSink, GameEvent, HookPoint};
 use crate::runtime::{HookHandle, HookRequest, Runtime, RuntimeError};
@@ -134,6 +137,43 @@ impl World<'_> {
 
     pub fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
         self.game.set_streaming_focus(points);
+    }
+
+    /// Sets the game's clock to `minute` of the day, below [`sawgrass_protocol::world::MINUTES_PER_DAY`].
+    pub fn set_clock(&mut self, minute: f32) -> Result<(), WorldError> {
+        self.game.set_clock(minute).map_err(WorldError::Game)
+    }
+
+    /// Sets the weather from the server's [`Environment`]. Weather [`AssetId::NONE`] leaves the game's own, and a
+    /// next weather of none means no change is under way.
+    pub fn set_weather(&mut self, environment: &Environment) -> Result<(), WorldError> {
+        if environment.weather == AssetId::NONE {
+            return Ok(());
+        }
+        let current = self.asset(environment.weather)?;
+        let next = if environment.next_weather == AssetId::NONE {
+            current
+        } else {
+            self.asset(environment.next_weather)?
+        };
+        let transition = f32::from(environment.transition) / 255.0;
+        self.game
+            .set_weather(current, next, transition)
+            .map_err(WorldError::Game)
+    }
+
+    /// Applies a door's state from the server. The door's id is looked up in the asset table (ADR 0006,
+    /// assumption A4).
+    pub fn set_door(&mut self, door: &Door) -> Result<(), WorldError> {
+        let asset = self.asset(door.id)?;
+        let open = f32::from(door.open) / 255.0;
+        self.game
+            .set_door(asset, door.locked, open)
+            .map_err(WorldError::Game)
+    }
+
+    fn asset(&self, id: AssetId) -> Result<GameAsset, WorldError> {
+        self.assets.game_asset(id).ok_or(WorldError::UnknownAsset(id))
     }
 }
 

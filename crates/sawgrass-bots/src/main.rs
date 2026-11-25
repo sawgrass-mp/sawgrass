@@ -113,7 +113,8 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             }
             "--drivers" => run.drivers = parse(&flag, value)?,
             "--shooters" => run.shooters = parse(&flag, value)?,
-            "--shot-hz" => run.shot_hz = parse::<u32>(&flag, value)?.clamp(1, 15),
+            // Below the placeholder weapon's 15 shots a second, so send jitter never makes an honest shot early.
+            "--shot-hz" => run.shot_hz = parse::<u32>(&flag, value)?.clamp(1, 12),
             "--misbehave" => run.misbehave = misbehave::parse(&value.ok_or("--misbehave needs a value")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
