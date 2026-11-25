@@ -57,7 +57,8 @@ target/release/sawgrass-server --listen 0.0.0.0:4433 --cert cert/cert.der --key 
 
 - `--movement-report-only` counts every player state that breaks a movement rule but applies it. The game's map
   coordinates and speeds are not known yet, so a wrong limit would otherwise snap players back; with this flag the
-  counts show which limit is wrong without spoiling the session. Leave it out once the limits are set.
+  counts show which limit is wrong without spoiling the session. It covers the vehicles and NPCs a player drives or
+  spawns too, so a car is not snapped back either. Leave it out once the limits are set.
 - `--record FILE` keeps everything the clients send, so the session can be played again through the bots (below).
 - Keep the defaults for the rest. In particular do not use `--stats-to-clients` on a server players can reach.
 
@@ -92,7 +93,8 @@ The server prints a line every five seconds. Watch these parts of it:
   been refused. Bounds counts mean the map square is wrong, speed counts mean the speed limit is too low, teleport
   counts are the game's own teleports (respawns, interiors) or a speed limit too low;
 - `limits: dropped ... closed ...`: any closed connection here is worth a note with its time;
-- `recording N written M dropped`: dropped records mean the disk was too slow.
+- `recording N written M dropped`: dropped records mean the disk was too slow, or more than 256 MiB was waiting to
+  be written.
 
 Write down the time of anything that looks wrong; the recording and the log can be read back at that time.
 
