@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+sawgrass-netcode = { path = "../sawgrass-netcode" }
 sawgrass-protocol = { path = "../sawgrass-protocol" }
 
 [lints]

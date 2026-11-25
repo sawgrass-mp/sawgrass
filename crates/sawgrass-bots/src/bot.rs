@@ -130,9 +130,10 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
-                // An honest walker stays within the limits; a correction would show up in the server's counts.
-                // Bots do not pay each other yet (BOT-7).
-                Ok(ServerEvent::Corrected(_) | ServerEvent::Paid { .. }) | Err(_) => {}
+                // Bots simulate no vehicle until BOT-5, and an honest walker stays within the limits; a correction
+                // would show up in the server's counts. Bots do not pay each other yet (BOT-7).
+                Ok(ServerEvent::Ownership { .. } | ServerEvent::Corrected(_) | ServerEvent::Paid { .. })
+                | Err(_) => {}
             }
         }
     });

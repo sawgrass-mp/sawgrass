@@ -121,7 +121,7 @@ of the 4,096 bots on the server's machine, 4,096 bots ran with no overrun. On tw
 | ID | Task |
 |---|---|
 | DB-5 | The single writer and its RocksDB store with group commit, behind the store trait (ADR 0003); bots that move money as load |
-| DB-8 | The writer in the server: a funded wallet for every player, and payments between players as a load-test event (protocol 8) |
+| DB-8 | The writer in the server: a funded wallet for every player, and payments between players as a load-test event (protocol 9) |
 | DB-6 | WAL copy to a second machine before acknowledgement, and the restore procedure (ADR 0003) |
 | DB-7 | PostgreSQL archive fed from the operation records; `sawgrass-db`'s ledger becomes the archive's schema |
 | SCRIPT-3 | Luau runtime in the server: resources, events, deadlines and memory caps (ADR 0005) |
@@ -144,11 +144,12 @@ core decodes, so they land in this order.
 | SRV-18 | The server sends each entity's info and relays the players' ped blocks, keeping its own fields | NET-16 |
 | NET-17 | The vehicle block, and owned-entity states with their epoch in the client state | NET-15 |
 | SRV-13 | Vehicles, NPCs and objects as server entities that scripts and admin commands spawn and remove | NET-15 |
-| SRV-14 | Owners for vehicles and NPCs: the four rules, epochs, hand-off and the checks on owned states; an owner's damage values taken only for NPCs and vehicles nobody owns as property, and only as decreases | SRV-13, NET-17 |
+| SRV-14 | Owners for vehicles and NPCs: the four rules, epochs and the ownership event | SRV-13, NET-17 |
+| SRV-19 | Owned states taken from their owner only, with the right epoch, checked for bounds, speed and distance; an owner's damage values taken only for NPCs and vehicles nobody owns as property, and only as decreases | SRV-14 |
 | SRV-15 | Seats: enter and leave requests, decided by the server | SRV-14, NET-16 |
 | SRV-16 | Hit reports checked against the snapshot history; health, armour and death on the server | NET-16 |
 | SRV-17 | World state: time, weather, doors and routing buckets, sent on join and on change | NET-15 |
-| BOT-5 | Bots that drive, change seats and owners and shoot, as a load-test scenario with bytes per player | SRV-14, SRV-15, SRV-16 |
+| BOT-5 | Bots that drive, change seats and owners and shoot, as a load-test scenario with bytes per player | SRV-19, SRV-15, SRV-16 |
 
 Gate: the BOT-5 scenario at 3,000 bots in the 1.5 km square, with phase 1's tick budget, no refused state from a
 well-behaved bot, and the bytes per player reported against architecture.md's budget.
