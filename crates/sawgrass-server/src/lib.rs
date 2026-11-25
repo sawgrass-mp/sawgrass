@@ -10,6 +10,7 @@ pub mod cpu;
 pub mod interest;
 pub mod limits;
 pub mod metrics;
+pub mod movement;
 pub mod net;
 pub mod slots;
 pub mod snapshot;
@@ -17,4 +18,6 @@ pub mod tick;
 
 pub use hecs;
 pub use metrics::{TickMetrics, TickStats};
-pub use tick::{Clock, SystemClock, TickConfig, TickConfigError, TickInfo, TickLoop};
+pub use tick::{
+    BETWEEN, Clock, Overrun, SystemClock, SystemPanic, TickConfig, TickConfigError, TickInfo, TickLoop,
+};

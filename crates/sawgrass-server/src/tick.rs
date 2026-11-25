@@ -9,8 +9,14 @@
 //! A tick's recorded duration runs from the start of its slot, when [`TickLoop::run`] calls `between`, to the
 //! end of its last system: everything that delays the schedule counts against the budget. The loop reads
 //! time through a [`Clock`], so tests can drive the schedule with a simulated clock instead of sleeping.
+//!
+//! Every phase of a tick (the `between` hook, then each system by name) is timed, and the longest overrun since
+//! [`TickLoop::take_worst_overrun`] is kept with its phases, so a report can say where an overrun's time went. A
+//! system that panics stops the loop: [`TickLoop::run`] returns a [`SystemPanic`] naming it, and no later system
+//! runs on the world it may have left half-written.
 
 use std::ops::ControlFlow;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
 use hecs::World;
@@ -136,6 +142,67 @@ impl Clock for SystemClock {
 
 type System = Box<dyn FnMut(&mut World, &TickInfo) + Send>;
 
+/// The name [`Overrun::phases`] gives the `between` hook of [`TickLoop::run`].
+pub const BETWEEN: &str = "between";
+
+/// A tick that took longer than the interval, and where its time went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overrun {
+    /// The tick's number.
+    pub tick: u64,
+    /// Its recorded duration.
+    pub duration: Duration,
+    /// Each phase in the order it ran: [`BETWEEN`] (under [`TickLoop::run`]), then the systems by name.
+    pub phases: Vec<(&'static str, Duration)>,
+}
+
+impl Overrun {
+    /// The phase that took the longest.
+    #[must_use]
+    pub fn slowest(&self) -> Option<(&'static str, Duration)> {
+        self.phases.iter().copied().max_by_key(|&(_, d)| d)
+    }
+}
+
+impl std::fmt::Display for Overrun {
+    /// `tick 812 took 61.204 ms: between 0.051, net 61.153`
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tick {} took {:.3} ms:", self.tick, ms(self.duration))?;
+        for (i, (name, d)) in self.phases.iter().enumerate() {
+            let sep = if i == 0 { "" } else { "," };
+            write!(f, "{sep} {name} {:.3}", ms(*d))?;
+        }
+        Ok(())
+    }
+}
+
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+/// A system panicked; the loop stopped before running anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemPanic {
+    /// The system's name.
+    pub system: &'static str,
+    /// The tick it panicked in.
+    pub tick: u64,
+    /// The panic message, when it was a string.
+    pub message: String,
+}
+
+impl std::fmt::Display for SystemPanic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "system {:?} panicked in tick {}: {}",
+            self.system, self.tick, self.message
+        )
+    }
+}
+
+impl std::error::Error for SystemPanic {}
+
 /// The world, its systems and the fixed-rate loop that runs them.
 pub struct TickLoop {
     config: TickConfig,
@@ -143,6 +210,9 @@ pub struct TickLoop {
     systems: Vec<(&'static str, System)>,
     metrics: TickMetrics,
     tick: u64,
+    /// The phases of the tick being run, reused across ticks.
+    phases: Vec<(&'static str, Duration)>,
+    worst: Option<Overrun>,
 }
 
 impl std::fmt::Debug for TickLoop {
@@ -169,6 +239,8 @@ impl TickLoop {
             world: World::new(),
             systems: Vec::new(),
             tick: 0,
+            phases: Vec::new(),
+            worst: None,
         }
     }
 
@@ -211,35 +283,79 @@ impl TickLoop {
         self.tick
     }
 
+    /// The longest overrun since the last call, with its phases; `None` if no tick overran.
+    pub fn take_worst_overrun(&mut self) -> Option<Overrun> {
+        self.worst.take()
+    }
+
     /// Runs every system once, records the duration and returns it. Does not wait.
+    ///
+    /// # Panics
+    ///
+    /// If a system panics, with its [`SystemPanic`] as the message; the systems after it do not run.
     pub fn run_tick(&mut self) -> Duration {
         let clock = SystemClock;
         let start = clock.now();
-        self.finish_tick(&clock, start)
+        self.phases.clear();
+        match self.finish_tick(&clock, start, start) {
+            Ok(duration) => duration,
+            Err(panic) => panic!("{panic}"),
+        }
     }
 
-    /// Runs every system once and records the time from `slot_start` to the end of the last system.
-    fn finish_tick(&mut self, clock: &impl Clock, slot_start: Instant) -> Duration {
+    /// Runs every system once, timing each from `systems_start`, and records the time from `slot_start` to the
+    /// end of the last system. Phases already in `self.phases` (the `between` hook) count as this tick's.
+    fn finish_tick(
+        &mut self,
+        clock: &impl Clock,
+        slot_start: Instant,
+        systems_start: Instant,
+    ) -> Result<Duration, SystemPanic> {
         let info = TickInfo {
             tick: self.tick,
             dt: self.config.interval(),
         };
-        for (_, system) in &mut self.systems {
-            system(&mut self.world, &info);
+        let mut phase_start = systems_start;
+        for (name, system) in &mut self.systems {
+            let world = &mut self.world;
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| system(world, &info))) {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_owned())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_owned());
+                return Err(SystemPanic {
+                    system: name,
+                    tick: self.tick,
+                    message,
+                });
+            }
+            let now = clock.now();
+            self.phases
+                .push((name, now.saturating_duration_since(phase_start)));
+            phase_start = now;
         }
-        let duration = clock.now().saturating_duration_since(slot_start);
+        let duration = phase_start.saturating_duration_since(slot_start);
         self.metrics.record(duration);
+        if duration > self.config.interval() && self.worst.as_ref().is_none_or(|w| duration > w.duration) {
+            self.worst = Some(Overrun {
+                tick: self.tick,
+                duration,
+                phases: self.phases.clone(),
+            });
+        }
         self.tick += 1;
-        duration
+        Ok(duration)
     }
 
-    /// Runs ticks at the configured rate on the real clock until `between` returns [`ControlFlow::Break`].
+    /// Runs ticks at the configured rate on the real clock until `between` returns [`ControlFlow::Break`], or
+    /// until a system panics, which returns its [`SystemPanic`].
     ///
     /// `between` is called at the start of every tick slot, before the systems. It is the place for work
     /// that is not simulation: reporting metrics, applying commands, deciding to stop. Its time counts in the
     /// recorded tick duration, because it delays the schedule like any system.
-    pub fn run(&mut self, between: impl FnMut(&mut Self) -> ControlFlow<()>) {
-        self.run_with_clock(&mut SystemClock, between);
+    pub fn run(&mut self, between: impl FnMut(&mut Self) -> ControlFlow<()>) -> Result<(), SystemPanic> {
+        self.run_with_clock(&mut SystemClock, between)
     }
 
     /// [`Self::run`] with time read from `clock`.
@@ -247,15 +363,19 @@ impl TickLoop {
         &mut self,
         clock: &mut impl Clock,
         mut between: impl FnMut(&mut Self) -> ControlFlow<()>,
-    ) {
+    ) -> Result<(), SystemPanic> {
         let interval = self.config.interval();
         let mut next = clock.now();
         loop {
             let slot_start = clock.now();
             if between(self).is_break() {
-                return;
+                return Ok(());
             }
-            self.finish_tick(clock, slot_start);
+            let systems_start = clock.now();
+            self.phases.clear();
+            self.phases
+                .push((BETWEEN, systems_start.saturating_duration_since(slot_start)));
+            self.finish_tick(clock, slot_start, systems_start)?;
             next += interval;
             let now = clock.now();
             if now < next {

@@ -156,6 +156,7 @@ fn main() -> ExitCode {
     // The gateway runtime lives as long as main; the tick loop runs on this thread.
     let mut runtime = None;
     let mut network = None;
+    let mut shutdown = None;
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let (threads, tick_threads) = split_cores(cores, args.net_threads, args.tick_threads);
@@ -188,6 +189,7 @@ fn main() -> ExitCode {
                                 max_per_address: args.max_per_address,
                                 ..Limits::default()
                             },
+                            ..net::ListenConfig::default()
                         },
                     )
                 }
@@ -198,6 +200,7 @@ fn main() -> ExitCode {
             }
         };
         network = Some((players.traffic(), players.stats_slot()));
+        shutdown = Some(players.shutdown());
         let mut players = players;
         tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
         runtime = Some(rt);
@@ -212,7 +215,7 @@ fn main() -> ExitCode {
         0u64,
         0u64,
     );
-    tick_loop.run(|tick_loop| {
+    let result = tick_loop.run(|tick_loop| {
         let tick = tick_loop.tick();
         if args.ticks.is_some_and(|limit| tick >= limit) {
             return ControlFlow::Break(());
@@ -243,11 +246,15 @@ fn main() -> ExitCode {
                     received_bytes_per_sec: per_sec(received - last.4),
                 };
                 line += &format!(
-                    ", sent {} kB/s, received {} kB/s, send errors {}, dropped ticks {}",
+                    ", sent {} kB/s, received {} kB/s, send errors {}, dropped ticks {}, \
+                     refused states {} bounds {} speed {} teleport",
                     report.sent_bytes_per_sec / 1000,
                     report.received_bytes_per_sec / 1000,
                     traffic.send_errors.load(Ordering::Relaxed),
-                    traffic.dropped_ticks.load(Ordering::Relaxed)
+                    traffic.dropped_ticks.load(Ordering::Relaxed),
+                    traffic.refused_bounds.load(Ordering::Relaxed),
+                    traffic.refused_speed.load(Ordering::Relaxed),
+                    traffic.refused_teleport.load(Ordering::Relaxed)
                 );
                 let count = |counter: &std::sync::atomic::AtomicU64| counter.load(Ordering::Relaxed);
                 line += &format!(
@@ -267,12 +274,25 @@ fn main() -> ExitCode {
                 last.3 = sent;
                 last.4 = received;
             }
+            if let Some(overrun) = tick_loop.take_worst_overrun() {
+                line += &format!(", worst overrun {overrun}");
+            }
             println!("{line}");
             last = (now.0, now.1, now.2, last.3, last.4);
         }
         ControlFlow::Continue(())
     });
     println!("tick {}", tick_loop.metrics().stats());
+    if let Err(panic) = result {
+        // The world may be half-written: close every connection and stop rather than tick on.
+        eprintln!("sawgrass-server: {panic}; stopping");
+        if let (Some(shutdown), Some(rt)) = (&shutdown, &runtime) {
+            shutdown.close();
+            rt.block_on(tokio::time::sleep(Duration::from_millis(200)));
+        }
+        drop(runtime);
+        return ExitCode::FAILURE;
+    }
     drop(runtime);
     ExitCode::SUCCESS
 }

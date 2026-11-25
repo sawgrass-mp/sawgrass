@@ -21,6 +21,11 @@
 //! tick. At most [`OUTBOX_TICKS`] batches wait for the gateway; if it falls further behind, the tick's snapshots
 //! are dropped and counted rather than queued.
 //!
+//! That is the overload policy for sending (task SRV-10): a slow client loses snapshots, never the tick. When a
+//! connection's 64 KiB datagram send buffer is full, quinn discards that connection's oldest unsent datagrams to
+//! make room for the new ones, so the client gets the newest state and the tick never waits; when the gateway as a
+//! whole falls behind, whole ticks are dropped and counted in [`Traffic::dropped_ticks`].
+//!
 //! Every player takes a dense [`Slot`] when the tick thread sees it join (task IM-4). The slot indexes the
 //! per-player arrays here (players, wire states) and the ids in the grid and the visible sets; its
 //! [`Slot::wire_id`] is the player's entity id in `Joined` and in snapshots. A freed slot is reused only after
@@ -48,6 +53,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::TickInfo;
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
+use crate::movement::{Movement, MovementRules, Violation};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
 
@@ -108,6 +114,8 @@ pub struct ListenConfig {
     pub tick_threads: usize,
     /// Rates, handshakes and connections per address each connection is held to.
     pub limits: Limits,
+    /// What a client's movement is checked against.
+    pub movement: MovementRules,
 }
 
 impl Default for ListenConfig {
@@ -118,6 +126,7 @@ impl Default for ListenConfig {
             max_players: 4096,
             tick_threads: 1,
             limits: Limits::default(),
+            movement: MovementRules::default(),
         }
     }
 }
@@ -147,6 +156,12 @@ pub struct Traffic {
     pub refused_handshakes: AtomicU64,
     /// Connection attempts refused because their address had too many connections.
     pub refused_per_address: AtomicU64,
+    /// Client states refused by [`Movement::check`], all players together: outside the map.
+    pub refused_bounds: AtomicU64,
+    /// Client states refused for a velocity above the speed limit.
+    pub refused_speed: AtomicU64,
+    /// Client states refused as a move too long for the time since the last accepted one.
+    pub refused_teleport: AtomicU64,
 }
 
 /// The address a connection counts against: an IPv4 address, or the /64 network of an IPv6 one, since one IPv6 host
@@ -210,8 +225,20 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let limits = config.limits;
     let accept_traffic = traffic.clone();
     let (outbox, recycle) = spawn_sender(traffic.clone());
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let close = shutdown.clone();
     tokio::spawn(async move {
-        while let Some(incoming) = gateway.accept().await {
+        loop {
+            let incoming = tokio::select! {
+                incoming = gateway.accept() => incoming,
+                () = close.notified() => {
+                    gateway.close();
+                    break;
+                }
+            };
+            let Some(incoming) = incoming else {
+                break;
+            };
             if !incoming.address_validated() {
                 // Every unproven address gets a Retry first, a stateless packet, so a spoofed attempt takes no
                 // place below; a real client comes back as a validated attempt one round trip later.
@@ -260,6 +287,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         by_connection: std::collections::HashMap::new(),
         grid: DenseGrid::default(),
         visibility: VisibilityConfig::default(),
+        movement: config.movement,
         pool: (config.tick_threads > 1)
             .then(|| {
                 rayon::ThreadPoolBuilder::new()
@@ -274,6 +302,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
+        shutdown: Shutdown(shutdown),
     }
 }
 
@@ -405,6 +434,7 @@ struct Player {
     events: tokio_mpsc::Sender<Vec<u8>>,
     inbox: Arc<Inbox>,
     view: View,
+    movement: Movement,
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
@@ -419,6 +449,8 @@ pub struct Players {
     by_connection: std::collections::HashMap<u32, Slot>,
     grid: DenseGrid,
     visibility: VisibilityConfig,
+    /// What every player's movement is checked against.
+    movement: MovementRules,
     /// Builds the views in parallel; `None` for one thread.
     pool: Option<rayon::ThreadPool>,
     /// The wire state of every placed player, by slot index.
@@ -429,6 +461,19 @@ pub struct Players {
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
+    shutdown: Shutdown,
+}
+
+/// Closes the gateway from outside the tick: every connection, and no new ones.
+#[derive(Debug, Clone)]
+pub struct Shutdown(Arc<tokio::sync::Notify>);
+
+impl Shutdown {
+    /// Closes every connection and stops accepting new ones. The close goes out on the gateway's runtime, which
+    /// must keep running for a moment after this call for clients to hear it.
+    pub fn close(&self) {
+        self.0.notify_one();
+    }
 }
 
 impl Players {
@@ -436,6 +481,12 @@ impl Players {
     #[must_use]
     pub fn traffic(&self) -> Arc<Traffic> {
         self.traffic.clone()
+    }
+
+    /// A handle that closes the gateway, for stopping the server when the tick cannot go on.
+    #[must_use]
+    pub fn shutdown(&self) -> Shutdown {
+        self.shutdown.clone()
     }
 
     /// Where to put [`ServerStats`] for the next tick to send to the players that asked for them.
@@ -502,6 +553,7 @@ impl Players {
                         events,
                         inbox,
                         view: View::new(),
+                        movement: Movement::new(),
                     });
                 }
                 Inbound::Leave { id } => {
@@ -520,12 +572,24 @@ impl Players {
         }
     }
 
-    /// Takes each player's latest state, if a new one arrived, into the world, the grid and the wire states.
+    /// Takes each player's latest state, if a new one arrived and passes the movement checks, into the world, the
+    /// grid and the wire states. A refused state is counted and dropped: the player stays where it was.
     fn apply_states(&mut self, world: &mut World) {
+        let rules = &self.movement;
+        let now = std::time::Instant::now();
         for player in self.players.iter_mut().flatten() {
             let Some(state) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
                 continue;
             };
+            if let Err(violation) = player.movement.check(rules, &state, now) {
+                let counter = match violation {
+                    Violation::Bounds => &self.traffic.refused_bounds,
+                    Violation::Speed => &self.traffic.refused_speed,
+                    Violation::Teleport => &self.traffic.refused_teleport,
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             let id = player.slot.wire_id();
             match player.entity {
                 Some(entity) => {
