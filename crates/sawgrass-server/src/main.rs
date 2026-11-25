@@ -13,10 +13,14 @@
 //! - `--listen ADDR`: accept players on this UDP address, for example `0.0.0.0:4433`.
 //! - `--cert FILE`, `--key FILE`: the gateway's certificate (DER) and PKCS#8 private key (DER).
 //!   `sawgrass-bots gen-cert` writes a self-signed pair for tests.
-//! - `--net-threads N`: threads for the gateway runtime (default: all cores but the tick thread's).
+//! - `--net-threads N`: threads for the gateway runtime (default: a quarter of the cores, at least 1).
 //! - `--max-players N`: refuse connections beyond N (default 4096).
-//! - `--tick-threads N`: threads that build players' snapshots in parallel during a tick (default: every core
-//!   the process may run on; 1 builds them on the tick thread).
+//! - `--tick-threads N`: threads that build players' snapshots in parallel during a tick (default: the cores the
+//!   gateway does not get; 1 builds them on the tick thread).
+//!
+//! The two pools share the cores the process may run on and do not overlap (task SRV-11): the tick thread waits
+//! while the snapshot pool works, so gateway and tick threads together are one per core. Giving only one of the
+//! options gives the other the rest of the cores.
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
 
 use std::net::SocketAddr;
@@ -142,7 +146,7 @@ fn main() -> ExitCode {
     let mut network = None;
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let threads = args.net_threads.unwrap_or(cores.saturating_sub(1).max(1));
+        let (threads, tick_threads) = split_cores(cores, args.net_threads, args.tick_threads);
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(threads)
             .thread_name("gateway")
@@ -159,13 +163,15 @@ fn main() -> ExitCode {
             let _guard = rt.enter();
             match net::bind_gateway(listen, cert, key) {
                 Ok(gateway) => {
-                    println!("listening on {listen} with {threads} gateway threads");
+                    println!(
+                        "listening on {listen} with {threads} gateway threads and {tick_threads} tick threads"
+                    );
                     net::listen(
                         gateway,
                         net::ListenConfig {
                             stats_to_clients: args.stats_to_clients,
                             max_players: args.max_players,
-                            tick_threads: args.tick_threads.unwrap_or(cores),
+                            tick_threads,
                         },
                     )
                 }
@@ -241,4 +247,37 @@ fn main() -> ExitCode {
     println!("tick {}", tick_loop.metrics().stats());
     drop(runtime);
     ExitCode::SUCCESS
+}
+
+/// Splits `cores` between the gateway runtime and the snapshot pool, honouring either count that was given. By
+/// default the gateway gets a quarter (at least one) and the pool the rest (at least one).
+fn split_cores(cores: usize, net: Option<usize>, tick: Option<usize>) -> (usize, usize) {
+    let cores = cores.max(1);
+    let rest = |n: usize| cores.saturating_sub(n).max(1);
+    match (net, tick) {
+        (Some(net), Some(tick)) => (net, tick),
+        (Some(net), None) => (net, rest(net)),
+        (None, Some(tick)) => (rest(tick), tick),
+        (None, None) => {
+            let net = (cores / 4).max(1);
+            (net, rest(net))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_cores;
+
+    #[test]
+    fn the_gateway_and_the_tick_pool_share_the_cores_without_overlap() {
+        assert_eq!(split_cores(1, None, None), (1, 1));
+        assert_eq!(split_cores(2, None, None), (1, 1));
+        assert_eq!(split_cores(4, None, None), (1, 3));
+        assert_eq!(split_cores(16, None, None), (4, 12));
+        assert_eq!(split_cores(4, Some(2), None), (2, 2));
+        assert_eq!(split_cores(4, None, Some(1)), (3, 1));
+        assert_eq!(split_cores(2, Some(1), Some(4)), (1, 4));
+        assert_eq!(split_cores(2, Some(3), None), (3, 1));
+    }
 }
