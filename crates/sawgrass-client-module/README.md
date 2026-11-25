@@ -20,6 +20,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 | Protocol asset ids to game assets, per build | `assets.rs` | done; tables live outside the repository |
 | The network core (`sawgrass-netcode`) in the module: remote entities shown, the local player sent and corrected, owned entities left to the game | `link.rs` | done; sending owned states waits for SRV-14 |
 | The module's own connection to a server | `connection.rs` | done |
+| The server's clock, weather and doors applied to the game | `world_state.rs` | done over `GameApi` |
 
 `tests/two_clients.rs` is the first milestone without the game: two modules, each in its own fake game, connect to
 the real server over loopback and each shows the other player's ped where that player stands.
@@ -33,7 +34,8 @@ None of this can be in the repository; it comes from a maintainer with the game:
 2. A function table for the exact game build: one pattern for each function `module::required_functions()` lists
    (the frame, creation and removal of peds, vehicles and objects, input, camera, streaming, five single-player
    switches). The module refuses to start without it, and refuses a table for another build.
-3. An asset table for that build, with at least the `ped` line (the model players are shown with) and one vehicle.
+3. An asset table for that build, with at least the `ped` line (the model players are shown with) and one vehicle,
+   plus a line for each weather and each door the server's resources name (ADR 0006, assumption A4).
 4. The game's coordinate conventions, checked once: `link.rs` assumes a Z-up world with the heading as yaw about Z.
 5. A server both clients can reach, and its certificate for `ConnectConfig`.
 
@@ -64,5 +66,8 @@ ped = 0x2000      # the ped model for players and peds with no model
 - The runtime installs a hook given a function address and calls the module's handler with the original available.
 - The game has no generation for its entity handles; the adapter counts them (`game::Generations`).
 - Each single-player system is switched off by one game function.
+- The game keeps a door's state whether or not the door is streamed in, and lets the module hold its clock still
+  between the frames that set it.
+- Weather and door ids share the asset table with models, as opaque protocol ids (ADR 0006, section 2).
 - The module is a Rust library with a C ABI (docs/architecture.md); the exported entry point waits for the loading
   API.
