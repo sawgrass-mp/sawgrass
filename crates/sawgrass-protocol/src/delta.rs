@@ -78,6 +78,19 @@ fn put(out: &mut Vec<u8>, mut v: u64) {
     out.push(v as u8);
 }
 
+/// Appends `v` as a LEB128 varint, for the other payloads of the crate.
+pub(crate) fn put_varint(out: &mut Vec<u8>, v: u64) {
+    put(out, v);
+}
+
+/// Reads a LEB128 varint from the front of `input` and advances it.
+pub(crate) fn take_varint(input: &mut &[u8]) -> Result<u64, DecodeError> {
+    let mut r = Reader(input);
+    let v = r.get()?;
+    *input = r.0;
+    Ok(v)
+}
+
 fn varint_len(v: u64) -> usize {
     (64 - (v | 1).leading_zeros() as usize).div_ceil(7)
 }
