@@ -47,9 +47,22 @@ pub struct Stats {
 }
 
 enum Request {
-    Apply(Operation, mpsc::Sender<Result<Outcome, Error>>),
-    Balance(WalletId, mpsc::Sender<Result<i64, Error>>),
+    Apply(Operation, Reply<Outcome>),
+    Balance(WalletId, Reply<i64>),
     Stop,
+}
+
+/// Where an answer goes once its batch is durable: called on the writer thread, so it must not block.
+type Reply<T> = Box<dyn FnOnce(Result<T, Error>) + Send>;
+
+fn to_channel<T: Send + 'static>() -> (Reply<T>, Pending<T>) {
+    let (tx, rx) = mpsc::channel();
+    (
+        Box::new(move |answer| {
+            let _ = tx.send(answer);
+        }),
+        Pending(rx),
+    )
 }
 
 /// An answer that is not there yet.
@@ -96,16 +109,41 @@ impl std::fmt::Debug for Request {
 impl Handle {
     /// Submits `operation`; the answer comes once its batch is durable.
     pub fn submit(&self, operation: Operation) -> Pending<Outcome> {
-        let (tx, rx) = mpsc::channel();
-        let _ = self.requests.send(Request::Apply(operation, tx));
-        Pending(rx)
+        let (reply, pending) = to_channel();
+        self.submit_then(operation, reply);
+        pending
     }
 
     /// Asks for the balance of `wallet`, as of the durable state when the answer leaves.
     pub fn balance(&self, wallet: WalletId) -> Pending<i64> {
-        let (tx, rx) = mpsc::channel();
-        let _ = self.requests.send(Request::Balance(wallet, tx));
-        Pending(rx)
+        let (reply, pending) = to_channel();
+        self.balance_then(wallet, reply);
+        pending
+    }
+
+    /// As [`Handle::submit`], and calls `reply` with the answer on the writer thread instead, for callers that
+    /// must not block a thread to wait, such as async tasks. `reply` must return at once. If the writer has
+    /// stopped, `reply` is called here with [`Error::Stopped`].
+    pub fn submit_then(
+        &self,
+        operation: Operation,
+        reply: impl FnOnce(Result<Outcome, Error>) + Send + 'static,
+    ) {
+        if let Err(mpsc::SendError(Request::Apply(_, reply))) =
+            self.requests.send(Request::Apply(operation, Box::new(reply)))
+        {
+            reply(Err(Error::Stopped));
+        }
+    }
+
+    /// As [`Handle::balance`], answered through `reply` as [`Handle::submit_then`] is. Requests from one thread
+    /// are answered in order, so a balance asked right after a transfer includes it.
+    pub fn balance_then(&self, wallet: WalletId, reply: impl FnOnce(Result<i64, Error>) + Send + 'static) {
+        if let Err(mpsc::SendError(Request::Balance(_, reply))) =
+            self.requests.send(Request::Balance(wallet, Box::new(reply)))
+        {
+            reply(Err(Error::Stopped));
+        }
     }
 
     /// The writer's counts.
@@ -170,8 +208,8 @@ fn now_ms() -> u64 {
 
 /// An answer held until its batch is durable.
 enum Answer {
-    Apply(mpsc::Sender<Result<Outcome, Error>>, Result<Outcome, Error>),
-    Balance(mpsc::Sender<Result<i64, Error>>, Result<i64, Error>),
+    Apply(Reply<Outcome>, Result<Outcome, Error>),
+    Balance(Reply<i64>, Result<i64, Error>),
 }
 
 fn run(
@@ -203,10 +241,10 @@ fn run(
         for request in batch.drain(..) {
             match request {
                 Request::Apply(_, reply) if failed => {
-                    let _ = reply.send(Err(Error::Stopped));
+                    reply(Err(Error::Stopped));
                 }
                 Request::Balance(_, reply) if failed => {
-                    let _ = reply.send(Err(Error::Stopped));
+                    reply(Err(Error::Stopped));
                 }
                 Request::Apply(operation, reply) => {
                     let result = ledger.apply(operation, now).map(|(outcome, change)| {
@@ -240,10 +278,10 @@ fn run(
                 for answer in answers.drain(..) {
                     match answer {
                         Answer::Apply(reply, result) => {
-                            let _ = reply.send(result);
+                            reply(result);
                         }
                         Answer::Balance(reply, result) => {
-                            let _ = reply.send(result);
+                            reply(result);
                         }
                     }
                 }
@@ -255,10 +293,10 @@ fn run(
                 for answer in answers.drain(..) {
                     match answer {
                         Answer::Apply(reply, _) => {
-                            let _ = reply.send(Err(e.clone()));
+                            reply(Err(e.clone()));
                         }
                         Answer::Balance(reply, _) => {
-                            let _ = reply.send(Err(e.clone()));
+                            reply(Err(e.clone()));
                         }
                     }
                 }
@@ -359,5 +397,35 @@ mod tests {
         );
         assert_eq!(commits.load(Ordering::Relaxed), 0);
         writer.stop();
+    }
+
+    #[test]
+    fn callbacks_answer_in_order_and_after_a_stop() {
+        let writer = Writer::start(Memory::default(), Config::default()).expect("start");
+        let h = writer.handle();
+        let (tx, rx) = mpsc::channel();
+        let opened = tx.clone();
+        h.submit_then(
+            Operation::OpenWallet {
+                key: "a".into(),
+                kind: Kind::System,
+            },
+            move |answer| {
+                let _ = opened.send(format!("{answer:?}"));
+            },
+        );
+        let read = tx.clone();
+        // Asked right after the open, so it sees the wallet.
+        h.balance_then(WalletId(0), move |answer| {
+            let _ = read.send(format!("{answer:?}"));
+        });
+        assert!(rx.recv().expect("open").starts_with("Ok(Opened"));
+        assert_eq!(rx.recv().expect("balance"), "Ok(0)");
+        writer.stop();
+        // The writer is gone: the callback runs at once, with the refusal.
+        h.balance_then(WalletId(0), move |answer| {
+            let _ = tx.send(format!("{answer:?}"));
+        });
+        assert_eq!(rx.recv().expect("stopped"), "Err(Stopped)");
     }
 }

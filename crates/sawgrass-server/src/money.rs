@@ -6,15 +6,16 @@
 //! for money until resources move it through the scripting API, so the server takes the event only when started
 //! for it (`--money-events`).
 //!
-//! The ledger answers only after the batch that holds an operation is on disk, so its calls block. Connection
-//! tasks wait for them on tokio's blocking pool, never on the tick thread: the tick thread only keeps the map from
-//! entity ids to wallets that payments look up.
+//! The ledger answers only after the batch that holds an operation is on disk. Connection tasks await those answers
+//! through the writer's callbacks, holding no thread while a batch commits; the tick thread only keeps the map
+//! from entity ids to wallets that payments look up.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use sawgrass_protocol::game::PayResult;
-use sawgrass_store::{Error, Handle, Kind, Operation, Outcome, Pending, WalletId};
+use sawgrass_store::{Error, Handle, Kind, Operation, Outcome, WalletId};
+use tokio::sync::oneshot;
 
 /// Players' wallets, and how payments between them reach the ledger.
 #[derive(Debug)]
@@ -52,73 +53,63 @@ impl Money {
         }))
     }
 
-    /// Opens connection `connection`'s wallet and funds it. Waits for the disk, off the async threads.
-    pub(crate) async fn open_wallet(self: &Arc<Self>, connection: u32) -> Result<WalletId, Error> {
-        let money = self.clone();
-        blocking(move || {
-            let wallet = match money
-                .ledger
-                .submit(Operation::OpenWallet {
-                    key: format!("player/{}/{connection}", money.run),
-                    kind: Kind::Character,
-                })
-                .wait()?
-            {
-                Outcome::Opened { wallet, .. } => wallet,
-                Outcome::Transferred { .. } => {
-                    return Err(Error::Corrupt("wallet key names a transfer".to_owned()));
-                }
-            };
-            if money.start_cash > 0 {
-                money
-                    .ledger
-                    .submit(Operation::Transfer {
-                        key: format!("start/{}/{connection}", money.run),
-                        from: money.treasury,
-                        to: wallet,
-                        amount: money.start_cash,
-                    })
-                    .wait()?;
+    /// Opens connection `connection`'s wallet and funds it, once both are on disk.
+    pub(crate) async fn open_wallet(&self, connection: u32) -> Result<WalletId, Error> {
+        let opened = submit(
+            &self.ledger,
+            Operation::OpenWallet {
+                key: format!("player/{}/{connection}", self.run),
+                kind: Kind::Character,
+            },
+        );
+        let wallet = match opened.await? {
+            Outcome::Opened { wallet, .. } => wallet,
+            Outcome::Transferred { .. } => {
+                return Err(Error::Corrupt("wallet key names a transfer".to_owned()));
             }
-            Ok(wallet)
-        })
-        .await
+        };
+        if self.start_cash > 0 {
+            submit(
+                &self.ledger,
+                Operation::Transfer {
+                    key: format!("start/{}/{connection}", self.run),
+                    from: self.treasury,
+                    to: wallet,
+                    amount: self.start_cash,
+                },
+            )
+            .await?;
+        }
+        Ok(wallet)
     }
 
     /// Pays `amount` from `from` to the player with entity id `to`, once per client `key`, and returns the result
     /// with the payer's balance.
-    pub(crate) async fn pay(
-        self: &Arc<Self>,
-        from: WalletId,
-        key: u64,
-        to: u32,
-        amount: u32,
-    ) -> (PayResult, i64) {
+    pub(crate) async fn pay(&self, from: WalletId, key: u64, to: u32, amount: u32) -> (PayResult, i64) {
         let payee = self.payees.read().ok().and_then(|p| p.get(&to).copied());
-        let money = self.clone();
-        blocking(move || {
-            let result = match payee {
-                None => PayResult::UnknownPayee,
-                Some(payee) => match money
-                    .ledger
-                    .submit(Operation::Transfer {
-                        // Keys are per payer, so one client cannot spend another's key.
-                        key: format!("pay/{}/{key}", from.0),
-                        from,
-                        to: payee,
-                        amount: i64::from(amount),
-                    })
-                    .wait()
-                {
-                    Ok(_) => PayResult::Done,
-                    Err(e) => result_of(&e),
-                },
-            };
-            let balance = wait_or(money.ledger.balance(from), 0);
-            Ok((result, balance))
-        })
-        .await
-        .unwrap_or((PayResult::Failed, 0))
+        let Some(payee) = payee else {
+            return (
+                PayResult::UnknownPayee,
+                balance(&self.ledger, from).await.unwrap_or(0),
+            );
+        };
+        // Both requests go in together: the balance is read after the transfer, in the same batch.
+        let paid = submit(
+            &self.ledger,
+            Operation::Transfer {
+                // Keys are per payer, so one client cannot spend another's key.
+                key: format!("pay/{}/{key}", from.0),
+                from,
+                to: payee,
+                amount: i64::from(amount),
+            },
+        );
+        let after = balance(&self.ledger, from);
+        let result = match paid.await {
+            Ok(_) => PayResult::Done,
+            Err(e) => result_of(&e),
+        };
+        (result, after.await.unwrap_or(0))
     }
 
     /// Records that entity `wire` pays and is paid through `wallet`.
@@ -158,14 +149,20 @@ fn result_of(error: &Error) -> PayResult {
     }
 }
 
-fn wait_or<T>(pending: Pending<T>, fallback: T) -> T {
-    pending.wait().unwrap_or(fallback)
+/// Submits `operation` and returns its answer without holding a thread while the batch commits.
+fn submit(ledger: &Handle, operation: Operation) -> impl Future<Output = Result<Outcome, Error>> + use<> {
+    let (tx, rx) = oneshot::channel();
+    ledger.submit_then(operation, move |answer| {
+        let _ = tx.send(answer);
+    });
+    async move { rx.await.unwrap_or(Err(Error::Stopped)) }
 }
 
-async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, Error> + Send + 'static,
-) -> Result<T, Error> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .unwrap_or(Err(Error::Stopped))
+/// The balance of `wallet` once everything submitted before is durable, without holding a thread.
+fn balance(ledger: &Handle, wallet: WalletId) -> impl Future<Output = Result<i64, Error>> + use<> {
+    let (tx, rx) = oneshot::channel();
+    ledger.balance_then(wallet, move |answer| {
+        let _ = tx.send(answer);
+    });
+    async move { rx.await.unwrap_or(Err(Error::Stopped)) }
 }
