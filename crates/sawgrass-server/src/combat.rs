@@ -1,9 +1,10 @@
 //! What the server accepts from a shot, and the damage it does (ADR 0006, section 5). The shooter's client reports
 //! its hits; the server checks each against what it knows and computes the damage itself.
 //!
-//! A hit is accepted only if the shooter is alive and holds the weapon, the weapon's fire rate allows the shot, the
-//! target is in the shooter's visible set and within the weapon's range, the shot's tick is at most
-//! [`REWIND`] old, and the target was within [`HIT_TOLERANCE`] of the hit point at that tick. `net.rs` runs these
+//! A shot is accepted only if the shooter is alive and holds the weapon, the weapon's fire rate allows it, its tick
+//! is at most [`REWIND`] old, and the position it was fired from is within [`FROM_TOLERANCE`] of where the server
+//! holds the shooter. A hit is then accepted only if the target was in the snapshot the shooter was sent for that
+//! tick, is within the weapon's range, and was within [`HIT_TOLERANCE`] of the hit point at that tick. `net.rs` runs these
 //! checks; this module holds the figures and the arithmetic.
 //!
 //! - *Assumption:* every weapon has the figures of [`WeaponRules::default`] until the game's are known.
@@ -25,6 +26,10 @@ pub const REWIND: Duration = Duration::from_millis(250);
 /// Farthest the hit point may be from where the server had the target at the shot's tick, in metres: a ped's
 /// size plus the 1 cm quantization, and the movement within one tick at a run.
 pub const HIT_TOLERANCE: f32 = 2.0;
+
+/// Farthest the shooter's reported position may be from where the server holds it, in metres: about what a
+/// sprint covers in the rewind window.
+pub const FROM_TOLERANCE: f32 = 3.0;
 
 /// A weapon's figures.
 #[derive(Debug, Clone, Copy, PartialEq)]

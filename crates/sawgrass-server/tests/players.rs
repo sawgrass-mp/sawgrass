@@ -1097,46 +1097,48 @@ fn a_checked_hit_damages_and_kills() {
     for _ in 0..3 {
         tick_loop.run_tick();
     }
-    let mut fire = |tick_loop: &mut TickLoop, weapon: AssetId, ago: u32, point: f32, zone: Zone| {
-        // Past the fire interval of the last shot.
-        std::thread::sleep(Duration::from_millis(80));
-        let tick = lock(&players).tick() - ago;
-        let mut shot = Shot::new(tick, weapon, at(10.0));
-        assert!(shot.push(Hit {
-            target: id_b,
-            zone,
-            point: at(point),
-        }));
-        let mut packet = vec![0; PacketHeader::SIZE];
-        PacketHeader {
-            kind: PacketKind::Event,
-            sequence: 0,
-            tick: 0,
-        }
-        .encode(&mut packet)
-        .expect("header");
-        ClientEvent::Shot(Box::new(shot)).encode(&mut packet);
-        runtime.block_on(a.send_event(&packet)).expect("send");
-        let seen = traffic.shots_received.load(Ordering::Relaxed) + 1;
-        assert!(wait_for(&traffic.shots_received, seen, || {
+    let mut fire =
+        |tick_loop: &mut TickLoop, weapon: AssetId, ago: u32, from: f32, point: f32, zone: Zone| {
+            // Past the fire interval of the last shot.
+            std::thread::sleep(Duration::from_millis(80));
+            let tick = lock(&players).tick() - ago;
+            let mut shot = Shot::new(tick, weapon, at(from));
+            assert!(shot.push(Hit {
+                target: id_b,
+                zone,
+                point: at(point),
+            }));
+            let mut packet = vec![0; PacketHeader::SIZE];
+            PacketHeader {
+                kind: PacketKind::Event,
+                sequence: 0,
+                tick: 0,
+            }
+            .encode(&mut packet)
+            .expect("header");
+            ClientEvent::Shot(Box::new(shot)).encode(&mut packet);
+            runtime.block_on(a.send_event(&packet)).expect("send");
+            let seen = traffic.shots_received.load(Ordering::Relaxed) + 1;
+            assert!(wait_for(&traffic.shots_received, seen, || {
+                tick_loop.run_tick();
+            }));
             tick_loop.run_tick();
-        }));
-        tick_loop.run_tick();
-    };
+        };
     // A torso hit where B was a tick ago: 25 points.
-    fire(&mut tick_loop, gun, 1, 20.3, Zone::Torso);
+    fire(&mut tick_loop, gun, 1, 10.0, 20.3, Zone::Torso);
     assert_eq!(traffic.hits_accepted.load(Ordering::Relaxed), 1);
     assert_eq!(b_ped(&players).health, 75);
-    // A weapon A does not hold, and a tick past the rewind limit: refused whole.
-    fire(&mut tick_loop, AssetId(8), 1, 20.0, Zone::Torso);
-    fire(&mut tick_loop, gun, 10, 20.0, Zone::Torso);
-    assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), 2);
+    // A weapon A does not hold, a tick past the rewind limit, and a shot from 10 m off where A is: refused whole.
+    fire(&mut tick_loop, AssetId(8), 1, 10.0, 20.0, Zone::Torso);
+    fire(&mut tick_loop, gun, 10, 10.0, 20.0, Zone::Torso);
+    fire(&mut tick_loop, gun, 1, 0.0, 20.0, Zone::Torso);
+    assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), 3);
     // A hit point 5 m from where B was: that hit is refused.
-    fire(&mut tick_loop, gun, 1, 25.0, Zone::Torso);
+    fire(&mut tick_loop, gun, 1, 10.0, 25.0, Zone::Torso);
     assert_eq!(traffic.hits_refused.load(Ordering::Relaxed), 1);
     assert_eq!(b_ped(&players).health, 75);
     // A head hit is 100 points: B is dead, and stays dead whatever its client says.
-    fire(&mut tick_loop, gun, 1, 20.0, Zone::Head);
+    fire(&mut tick_loop, gun, 1, 10.0, 20.0, Zone::Head);
     assert_eq!(
         (b_ped(&players).health, b_ped(&players).motion),
         (0, Motion::Dead)

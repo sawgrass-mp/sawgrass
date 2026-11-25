@@ -56,7 +56,7 @@ use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
-use crate::combat::{HIT_TOLERANCE, REWIND, WeaponRules, hit_ped, hit_vehicle};
+use crate::combat::{FROM_TOLERANCE, HIT_TOLERANCE, REWIND, WeaponRules, hit_ped, hit_vehicle};
 use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
 use crate::movement::{Movement, MovementRules, Violation};
@@ -246,12 +246,13 @@ pub struct Traffic {
     pub corrections: AtomicU64,
     /// Shots admitted from clients ([`ClientEvent::Shot`]).
     pub shots_received: AtomicU64,
-    /// Shots refused whole: a dead shooter, a weapon it does not hold, faster than the fire rate, or a tick older
-    /// than the rewind limit (SRV-16).
+    /// Shots refused whole: a dead shooter, a weapon it does not hold, faster than the fire rate, fired from too
+    /// far from where the server holds the shooter, or a tick older than the rewind limit (SRV-16).
     pub shots_refused: AtomicU64,
     /// Hits accepted and applied.
     pub hits_accepted: AtomicU64,
-    /// Hits refused: an unknown or invisible target, out of range, or too far from where the target was.
+    /// Hits refused: a target not in the shooter's snapshot of that tick, out of range, or too far from where it
+    /// was.
     pub hits_refused: AtomicU64,
 }
 
@@ -808,18 +809,24 @@ impl Players {
             self.traffic.shots_refused.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        if shooter.motion == Motion::Dead || shot.weapon != shooter.weapon {
+        let seen = pl.view.sent_at(shot.tick);
+        if shooter.motion == Motion::Dead
+            || shot.weapon != shooter.weapon
+            || distance(shot.from, own.position) > FROM_TOLERANCE
+            || seen.is_none()
+        {
             self.traffic.shots_refused.fetch_add(1, Ordering::Relaxed);
             return;
         }
         pl.last_shot = Some(now);
+        let seen = seen.unwrap_or_default();
         let mut accepted = Vec::new();
         for hit in shot.hits() {
             let slot = hit.target >> 16;
             let current = self.states.get(slot as usize).copied().flatten();
             let past = then.get(slot as usize).copied().flatten();
             let ok = slot != player
-                && pl.view.visible().contains(EntityId(slot))
+                && seen.binary_search(&slot).is_ok()
                 && current
                     .is_some_and(|c| c.id == hit.target && distance(c.position, own.position) <= rules.range)
                 && past
