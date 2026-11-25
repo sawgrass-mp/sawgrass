@@ -2,8 +2,8 @@
 //! server decides. One [`Shot`] is one pull of the trigger, so a shotgun's pellets are one shot with several hits,
 //! and a shot that hit nothing still counts against the weapon's fire rate.
 //!
-//! Wire layout, after the event code: the snapshot tick the shooter saw its targets at (`u32`), the weapon
-//! ([`AssetId`], `u32`), the shooter's position (9 bytes), the number of hits (`u8`, at most [`MAX_HITS`]), then
+//! Wire layout, after the event code: the snapshot tick the shooter drew its targets from (`u32`), how far its
+//! render time was past that tick toward the next (`u8`, out of 256; NET-22), the weapon ([`AssetId`], `u32`), the shooter's position (9 bytes), the number of hits (`u8`, at most [`MAX_HITS`]), then
 //! each hit: the target's entity id (`u32`), the body zone (`u8`, [`Zone`]) and the hit point (9 bytes). All
 //! integers are little-endian.
 
@@ -71,9 +71,12 @@ impl Default for Hit {
 /// One shot and what it hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Shot {
-    /// The newest snapshot tick the shooter's client had when it fired: the server checks the hits against where
-    /// the targets were then.
+    /// The snapshot tick the shooter's client drew the targets from when it fired: the older of the two it
+    /// interpolated between, at its render time (NET-22). The server checks the hits against where the targets
+    /// were then.
     pub tick: u32,
+    /// How far the render time was from `tick` toward `tick + 1`, out of 256: 0 is `tick` itself.
+    pub frac: u8,
     /// The weapon fired.
     pub weapon: AssetId,
     /// Where the shooter was when it fired, as its client saw it.
@@ -91,6 +94,7 @@ impl Shot {
     pub fn new(tick: u32, weapon: AssetId, from: Position) -> Self {
         Self {
             tick,
+            frac: 0,
             weapon,
             from,
             hits: [Hit::default(); MAX_HITS],
@@ -116,6 +120,7 @@ impl Shot {
 
     pub(crate) fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.tick.to_le_bytes());
+        out.push(self.frac);
         out.extend_from_slice(&self.weapon.0.to_le_bytes());
         put_position(self.from, out);
         out.push(self.count);
@@ -128,6 +133,7 @@ impl Shot {
 
     pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let tick = u32::from_le_bytes(r.array()?);
+        let [frac] = r.array::<1>()?;
         let weapon = AssetId(u32::from_le_bytes(r.array()?));
         let from = Position::read(r)?;
         let [count] = r.array::<1>()?;
@@ -138,6 +144,7 @@ impl Shot {
             return Err(DecodeError::Truncated);
         }
         let mut shot = Self::new(tick, weapon, from);
+        shot.frac = frac;
         for _ in 0..count {
             let target = u32::from_le_bytes(r.array()?);
             let [zone] = r.array::<1>()?;
