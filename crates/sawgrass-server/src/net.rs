@@ -1018,6 +1018,10 @@ impl Players {
                 let killed = hit_ped(&mut ped, damage, zone);
                 self.peds[slot] = ped;
                 self.infos[slot] = ped_info(&ped);
+                if killed {
+                    // A dead player leaves its seat, and a driver its vehicle to the next owner.
+                    self.leave_seat(slot as u32);
+                }
                 killed
             }
             EntityKind::Npc => {

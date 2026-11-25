@@ -1317,8 +1317,10 @@ fn a_player_enters_drives_and_leaves_a_vehicle() {
 fn a_checked_hit_damages_and_kills() {
     use sawgrass_protocol::combat::{Hit, Shot, Zone};
     use sawgrass_protocol::entity::AssetId;
+    use sawgrass_protocol::entity::{EntityKind, Info};
     use sawgrass_protocol::game::ClientEvent;
     use sawgrass_protocol::ped::{Motion, PedBlock};
+    use sawgrass_protocol::vehicle::VehicleBlock;
     use std::sync::{Arc, Mutex};
 
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -1383,6 +1385,33 @@ fn a_checked_hit_damages_and_kills() {
     assert!(tick_until(&mut tick_loop, |_| lock(&players)
         .entity(id_b)
         .is_some()));
+    // B drives a car parked a metre from it, so its death must also end its seat and its hold on the car.
+    let info =
+        Info::with_fields(EntityKind::Vehicle, AssetId(3), &VehicleBlock::INTACT.to_fields()).expect("info");
+    let car_state = ClientState {
+        position: at(21.0),
+        velocity: Velocity::from_metres_per_second([0.0; 3]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let car = lock(&players).spawn(info, car_state).expect("spawned");
+    let mut enter = vec![0; PacketHeader::SIZE];
+    PacketHeader {
+        kind: PacketKind::Event,
+        sequence: 0,
+        tick: 0,
+    }
+    .encode(&mut enter)
+    .expect("header");
+    ClientEvent::EnterSeat {
+        vehicle: car,
+        seat: 0,
+    }
+    .encode(&mut enter);
+    let mut b = b;
+    runtime.block_on(b.send_event(&enter)).expect("send");
+    assert!(tick_until(&mut tick_loop, |_| lock(&players)
+        .seat_of(id_b)
+        .is_some()));
     // Far enough into the game that a shot can name a tick past the rewind limit.
     while lock(&players).tick() < 20 {
         tick_loop.run_tick();
@@ -1444,6 +1473,7 @@ fn a_checked_hit_damages_and_kills() {
         (b_ped(&players).health, b_ped(&players).motion),
         (0, Motion::Dead)
     );
+    assert_eq!(lock(&players).seat_of(id_b), None);
     send(&b, 20.0, AssetId::NONE);
     for _ in 0..3 {
         tick_loop.run_tick();
