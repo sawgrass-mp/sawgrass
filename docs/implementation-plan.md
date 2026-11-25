@@ -86,8 +86,10 @@ says so with the numbers, and the order is revisited.
 Gate: 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under 70% of the interval, on the
 same 4-core machine as BOT-3.
 
-Result (2026-11-25, [two-machine load](research/two-machine-load/README.md)): met. 3,800 bots on a 4-core machine,
-server on two of its cores: tick p99 23.8 and 24.4 ms, no overrun, no dropped bot.
+Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.md)): not counted as met. On a
+dedicated 4-core machine, server on two of its cores, 3,800 bots ran at tick p99 23.8 and 24.4 ms with no overrun
+and no dropped bot; on the BOT-3 VM, 3,000 bots ran at p99 37 to 38 ms. Whether the gate names the dedicated machine
+is the maintainer's decision.
 
 ### Phase 2: fewer bytes, then 30 Hz
 
@@ -102,8 +104,8 @@ Gate: 4,096 bots with the bots on a second machine, as the
 [bots README](../crates/sawgrass-bots/README.md#bots-and-server-on-separate-machines) describes. This is stage
 1's gate in the roadmap.
 
-Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.md)), at 20 Hz since SRV-8 is not
-done: 4,096 bots with no overrun. On two server cores the gateway is the limit: with one gateway thread, tick p99
+Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.md)): not met. At 20 Hz, with 3,700
+of the 4,096 bots on the server's machine, 4,096 bots ran with no overrun. On two server cores the gateway is the limit: with one gateway thread, tick p99
 28 to 30 ms and 7 to 12% of snapshots dropped; with two, every snapshot delivered and p99 38 to 39 ms.
 
 ### Phase 3: reliability of the realtime core

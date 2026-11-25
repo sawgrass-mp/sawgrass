@@ -486,12 +486,16 @@ server, two for local bots) and a second machine sending bots over the network. 
 | 4,096 | 1 | 28.4 to 30.5 ms | 0 | 88 to 93% | 1.48 to 1.51 |
 | 4,096 | 2 | 38.0 to 39.1 ms | 0 | 100% | 1.85 to 1.86 |
 
-- **3,800 players fit with room to spare**, which meets phase 1's gate (3,000 bots, p99 under 35 ms).
+- **3,800 players fit with room to spare** on this dedicated machine. On the cloud VM that phase 1's gate names,
+  3,000 bots ran at p99 37 to 38 ms, so the gate is not counted as met yet.
 - **At 4,096 players the tick is not the limit, the gateway is.** The tick used half a core; the gateway the rest.
   On two cores the server either drops some snapshots or runs over its p99 budget, never over a whole tick.
   A server with more cores gives the gateway threads of its own; the stand could not drive one, so that is not
   measured yet.
-- Runs with a saturated load generator were thrown out; the page says which and why.
+- Phase 2's gate (4,096 bots from a second machine) is not met yet: most bots ran on the server's machine, and no
+  configuration kept the budget without dropping snapshots.
+- Runs with a saturated load generator were thrown out; the page says which and why. The 4,096 runs used the
+  server and bots of BOT-6 (#141), not merged at the time.
 
 Full results, method and limits: [docs/research/two-machine-load](docs/research/two-machine-load/).
 

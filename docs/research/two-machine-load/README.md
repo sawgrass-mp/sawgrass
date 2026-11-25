@@ -1,7 +1,7 @@
 # 3,800 and 4,096 players on the project's own servers
 
 Measured 2026-11-25 on two dedicated machines, in three series. Server and bots were built from `main` at
-SRV-10, NET-12 and BOT-4 for series 1 and 2, and from BOT-6 (#141, commit 23c0266) for series 3. Task: DOC-12 (#151).
+SRV-10, NET-12 and BOT-4 for series 1 and 2, and for series 3 from the BOT-6 branch (#141, commit 23c0266), which was not merged when the runs were made. Task: DOC-12 (#151).
 
 The [load-test bots page](../load-test-bots/README.md) measured the server on one 4-vCPU VM, with the bots
 sharing the machine, and stopped at 3,000 players. This page takes the same server and bots to the plan's
@@ -13,7 +13,8 @@ machine). The bots speak the real protocol through the QUIC gateway. They are de
 
 - **3,800 players in a city-density crowd fit with room to spare.** Two runs gave tick p99 24.4 and 23.8 ms against
   the 35 ms budget (70% of the 50 ms tick at 20 Hz), with no overrun and 1.41 to 1.42 server cores. The load
-  generator was not saturated in either. These are the figures to quote for phase 1's gate.
+  generator was not saturated in either. They were measured on a dedicated machine, not on the VM that phase 1's gate
+  names; see [What this means for the gates](#what-this-means-for-the-gates).
 - **4,096 players run with no overrun, but two server cores are the limit.** With one gateway thread the tick held
   p99 28.4 to 30.5 ms, but the gateway dropped 59 to 98 whole ticks of snapshots: bots received 17.6 to 18.6
   snapshots a second out of 20. With two gateway threads sharing the same two cores, every snapshot arrived, but
@@ -92,15 +93,18 @@ because the bots barely loaded it, and they must not be quoted.
 
 ## What this means for the gates
 
-- **Phase 1's gate is met.** It asks for 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under
-  35 ms, on a 4-core machine. Series 2 ran 3,800 bots on a 4-core machine with half its cores for the server: p99
+- **Phase 1's gate: met on dedicated hardware, not on the machine the gate names.** The gate asks for 3,000 bots in
+  the 1.5 km square with no dropped bots and tick p99 under 35 ms, on the same 4-core machine as BOT-3, a cloud VM.
+  Series 2 ran 3,800 bots on a 4-core machine with half its cores for the server: p99
   23.8 to 24.4 ms, no dropped bots. Machine A's spare core also carried 2,500 light bots against a 3-core server
   at p99 8.2 ms. On the shared cloud VM of the BOT-3 page, 3,000 bots measured 37 to 38 ms p99 on 2026-11-25 (BOT-6
-  runs). There the bots and the server share hyperthreads of one 4-vCPU guest, so that VM is the less reliable
-  measure.
-- **Phase 2's gate is met at 20 Hz, but without margin on two cores.** 4,096 bots, some from a second machine, ran
-  with no overrun. On two server cores, though, either 7 to 12% of snapshots were dropped or tick p99 went over
-  35 ms. The gate's 30 Hz (SRV-8) and NET-10 are not done, so phase 2 stays open in the plan anyway.
+  runs), over the budget. There the bots and the server share hyperthreads of one 4-vCPU guest. Whether the gate
+  should name the dedicated machine instead is the maintainer's decision; until then the gate is not counted as met.
+- **Phase 2's gate: not met yet.** It asks for 4,096 bots on a second machine. Here 3,700 of the 4,096 ran on the
+  server's own machine and only 396 on the second one. No configuration kept tick p99 within budget without losing
+  snapshots: one gateway thread dropped 7 to 12% of them, two kept them all at p99 38 to 39 ms. The runs had no
+  overrun, and they show the gateway, not the tick, as the limit on two cores. Phase 2's tasks NET-10 and SRV-8
+  (30 Hz) are not done either.
 
 ## Limits of the stand
 
