@@ -342,6 +342,13 @@ impl View {
             .map_or(&[], |(_, slots)| slots)
     }
 
+    /// The slots in the snapshot built for `tick`, ascending, while it is among the last [`HISTORY_TICKS`].
+    #[must_use]
+    pub fn sent_at(&self, tick: u32) -> Option<&[u32]> {
+        let (t, slots) = self.sent.get(tick as usize % HISTORY_TICKS)?;
+        (*t == Some(tick)).then_some(&slots[..])
+    }
+
     /// How many times a visible player was left out of a ranked cut since the last call (IM-7: only when more
     /// than [`SNAPSHOT_LIMIT`] players are visible).
     pub fn take_players_cut(&mut self) -> u64 {

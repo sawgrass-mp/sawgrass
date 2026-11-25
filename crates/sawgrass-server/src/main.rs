@@ -546,6 +546,7 @@ fn main() -> ExitCode {
                 line += &format!(
                     ", limits: dropped {} states {} events, closed {} floods {} bad events, \
                      handshakes retried {} refused {}, refused per address {}, players cut {}, \
+                     shots {} refused {}, hits {} refused {}, \
                      seats granted {} refused {}",
                     count(&traffic.dropped_states),
                     count(&traffic.dropped_events),
@@ -555,6 +556,10 @@ fn main() -> ExitCode {
                     count(&traffic.refused_handshakes),
                     count(&traffic.refused_per_address),
                     count(&traffic.players_cut),
+                    count(&traffic.shots_received),
+                    count(&traffic.shots_refused),
+                    count(&traffic.hits_accepted),
+                    count(&traffic.hits_refused),
                     count(&traffic.seats_granted),
                     count(&traffic.seats_refused)
                 );
