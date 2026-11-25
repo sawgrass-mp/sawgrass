@@ -89,6 +89,12 @@ const EVENT_QUEUE: usize = 16 + 2 * OWNERSHIP_CAP as usize;
 /// changes of owner can lose.
 const MAX_OWNER_RETRIES: usize = 4096;
 
+/// Whether an owned entity at `entity` is within `radius` of its owner at `owner`: on the ground plane, as
+/// `Ownership` measures the keep radius, so an entity it keeps is never one whose every state is refused.
+fn within_keep(owner: [f32; 3], entity: [f32; 2], radius: f32) -> bool {
+    (entity[0] - owner[0]).powi(2) + (entity[1] - owner[1]).powi(2) <= radius * radius
+}
+
 /// Whether a lost ownership event for `player` still says what is true: "yours" while it owns the spawned entity
 /// with `epoch` (`owner` as [`Ownership::owner`] gives it), "not yours" while it does not own it.
 fn still_holds(owner: Option<(Option<u32>, u8)>, spawned: bool, player: u32, epoch: u8, yours: bool) -> bool {
@@ -1007,17 +1013,13 @@ impl Players {
             self.traffic.refused_owned_stale.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let [x, y, z] = o.state.position.to_metres();
+        let [x, y, _] = o.state.position.to_metres();
         let near = self
             .states
             .get(player as usize)
             .copied()
             .flatten()
-            .is_some_and(|p| {
-                let [px, py, pz] = p.position.to_metres();
-                let r = self.ownership_rules.keep_radius;
-                (x - px).powi(2) + (y - py).powi(2) + (z - pz).powi(2) <= r * r
-            });
+            .is_some_and(|p| within_keep(p.position.to_metres(), [x, y], self.ownership_rules.keep_radius));
         if !near {
             self.traffic.refused_owned_far.fetch_add(1, Ordering::Relaxed);
             return;
@@ -1184,6 +1186,14 @@ mod tests {
 
     /// A lost "yours" is sent again only while the player still owns the entity with that epoch; a lost "not
     /// yours" only while it does not own it (again).
+    /// The keep radius ignores height, as in `Ownership`: an entity high above its owner is still near.
+    #[test]
+    fn the_keep_radius_is_measured_on_the_ground_plane() {
+        assert!(within_keep([0.0, 0.0, 0.0], [100.0, 100.0], 150.0));
+        assert!(within_keep([0.0, 0.0, 500.0], [0.0, 10.0], 150.0));
+        assert!(!within_keep([0.0, 0.0, 0.0], [120.0, 120.0], 150.0));
+    }
+
     #[test]
     fn a_lost_ownership_event_is_retried_only_while_it_holds() {
         assert!(still_holds(Some((Some(3), 5)), true, 3, 5, true));
