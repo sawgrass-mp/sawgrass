@@ -1189,7 +1189,8 @@ fn a_checked_hit_damages_and_kills() {
     assert!(tick_until(&mut tick_loop, |_| lock(&players)
         .entity(id_b)
         .is_some()));
-    for _ in 0..3 {
+    // Far enough into the game that a shot can name a tick past the rewind limit.
+    while lock(&players).tick() < 20 {
         tick_loop.run_tick();
     }
     let mut fire =
