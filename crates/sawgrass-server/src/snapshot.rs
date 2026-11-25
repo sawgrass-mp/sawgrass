@@ -19,7 +19,7 @@
 
 use bytes::{Bytes, BytesMut};
 use sawgrass_protocol::delta::{
-    DeltaLists, FRAGMENT_PAYLOAD, MAX_ENTITIES, encode_added, encode_changed, fragments,
+    DeltaLists, FRAGMENT_PAYLOAD, MAX_ENTITIES, encode_added, encode_block, encode_changed, fragments,
 };
 use sawgrass_protocol::entity::Info;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
@@ -85,8 +85,8 @@ impl Bodies {
     fn push(&mut self, id: u32, write: impl FnOnce(&mut Vec<u8>) -> Option<()>) {
         let start = self.bytes.len();
         let body = match write(&mut self.bytes) {
-            // A body is at most 32 bytes for a player (an added one: its state, kind, model 0 and no fields), so it
-            // fits in a u8 below NONE's length.
+            // A body is at most 29 bytes of state and 87 of info (an added entity with every field), so it fits
+            // in a u8 below NONE's length.
             Some(()) => Body {
                 id,
                 start: start as u32,
@@ -132,6 +132,10 @@ pub struct History {
     changed: Vec<Bodies>,
     /// Bit `age` is set if `changed` holds that age for the newest tick.
     shared: u32,
+    /// Every slot's kind, model and block fields at the newest tick.
+    infos: Vec<Info>,
+    /// The tick each slot's info last changed at: a view whose baseline is older sends that slot's block.
+    info_ticks: Vec<u32>,
 }
 
 impl History {
@@ -144,7 +148,21 @@ impl History {
     /// Records the states of `tick`, by slot, replacing the tick [`HISTORY_TICKS`] before it, and encodes the
     /// bodies its snapshots share: every addition, and the changes against the tick each of `acks` names, the
     /// players' acknowledgements. Called on a rayon pool, it encodes them on that pool.
-    pub fn record(&mut self, tick: u32, states: &[Option<EntityState>], acks: impl IntoIterator<Item = u32>) {
+    ///
+    /// `infos` holds each slot's info and `info_ticks` the tick it last changed at; a slot past their ends is a
+    /// player with no block that never changed.
+    pub fn record(
+        &mut self,
+        tick: u32,
+        states: &[Option<EntityState>],
+        infos: &[Info],
+        info_ticks: &[u32],
+        acks: impl IntoIterator<Item = u32>,
+    ) {
+        self.infos.clear();
+        self.infos.extend_from_slice(infos);
+        self.info_ticks.clear();
+        self.info_ticks.extend_from_slice(info_ticks);
         let i = tick as usize % HISTORY_TICKS;
         self.states.resize_with(HISTORY_TICKS, Vec::new);
         self.states[i].clear();
@@ -175,11 +193,11 @@ impl History {
             .filter(|(_, old)| old.is_some())
             .fold(0, |bits, (k, _)| bits | 1 << (k + 1));
         self.changed.resize_with(HISTORY_TICKS - 1, Bodies::default);
-        let (added, changed) = (&mut self.added, &mut self.changed);
+        let (added, changed, infos) = (&mut self.added, &mut self.changed, &self.infos[..]);
         // Inside a pool (the tick's), the bodies are encoded in parallel, one task per age; elsewhere on this thread.
         if rayon::current_thread_index().is_some() {
             rayon::scope(|scope| {
-                scope.spawn(|_| fill_added(added, states));
+                scope.spawn(|_| fill_added(added, states, infos));
                 for (bodies, old) in changed.iter_mut().zip(olds) {
                     if let Some(old) = old {
                         scope.spawn(move |_| fill_changed(bodies, old, states));
@@ -187,13 +205,23 @@ impl History {
                 }
             });
         } else {
-            fill_added(added, states);
+            fill_added(added, states, infos);
             for (bodies, old) in changed.iter_mut().zip(olds) {
                 if let Some(old) = old {
                     fill_changed(bodies, old, states);
                 }
             }
         }
+    }
+
+    /// The info of `slot` at the newest tick.
+    fn info(&self, slot: usize) -> Info {
+        self.infos.get(slot).copied().unwrap_or(Info::PLAYER)
+    }
+
+    /// Whether the info of `slot` changed after `tick`.
+    fn info_changed_after(&self, slot: usize, tick: u32) -> bool {
+        self.info_ticks.get(slot).is_some_and(|&t| t > tick)
     }
 
     /// The shared changes against the baseline `age` ticks before the newest tick, if `record` encoded them.
@@ -215,15 +243,29 @@ impl History {
     }
 }
 
-/// Encodes every slot's state of `states` as an addition.
-fn fill_added(bodies: &mut Bodies, states: &[Option<EntityState>]) {
+/// Encodes every slot's state of `states` and info of `infos` as an addition.
+fn fill_added(bodies: &mut Bodies, states: &[Option<EntityState>], infos: &[Info]) {
     bodies.clear();
-    for state in states {
+    for (slot, state) in states.iter().enumerate() {
         bodies.push(state.map_or(NO_ID, |s| s.id), |out| {
-            encode_added(state.as_ref()?, &Info::PLAYER, out);
+            encode_added(state.as_ref()?, infos.get(slot).unwrap_or(&Info::PLAYER), out);
             Some(())
         });
     }
+}
+
+/// Appends a block entry for `id` that sends every field of `info`: the view does not know which of them the
+/// client's baseline lacks, and the client takes each sent field as is.
+fn push_block(lists: &mut DeltaLists, scratch: &mut Vec<u8>, id: u32, info: &Info) -> Option<()> {
+    let mut differs = *info;
+    for (i, &v) in info.fields().iter().enumerate() {
+        differs.set_field(i, v ^ 1).ok()?;
+    }
+    scratch.clear();
+    if encode_block(id, &differs, info, scratch) {
+        lists.block(id, scratch).ok()?;
+    }
+    Some(())
 }
 
 /// Encodes every slot's change from `old` to `states`.
@@ -442,7 +484,7 @@ impl View {
                     return Some(false);
                 };
                 body.clear();
-                encode_added(&state, &Info::PLAYER, body);
+                encode_added(&state, &history.info(slot), body);
                 lists.add(state.id, body).ok()?;
             }
             Some(true)
@@ -479,6 +521,9 @@ impl View {
                         if !tail.is_empty() {
                             lists.change(id, tail).ok()?;
                         }
+                        if history.info_changed_after(slot, ack) {
+                            push_block(lists, change, id, &history.info(slot))?;
+                        }
                         continue;
                     }
                 }
@@ -499,6 +544,9 @@ impl View {
                 current.push(sb);
                 if encode_changed(&old, &new, change) {
                     lists.change(id, change).ok()?;
+                }
+                if history.info_changed_after(slot, ack) {
+                    push_block(lists, change, id, &history.info(slot))?;
                 }
             }
             Some(())
@@ -570,7 +618,10 @@ fn cut_datagrams(mut buffer: Bytes, lens: &[usize], out: &mut Vec<Bytes>) {
 mod tests {
     use super::*;
     use rayon::prelude::*;
-    use sawgrass_protocol::delta::{Baseline, DeltaEncoder, Reassembler, baseline_age, decode_delta};
+    use sawgrass_protocol::delta::{
+        Baseline, DeltaEncoder, Reassembler, baseline_age, decode_delta_with_info,
+    };
+    use sawgrass_protocol::entity::{AssetId, EntityKind};
     use sawgrass_protocol::{Position, Rotation, Velocity};
 
     struct Rng(u64);
@@ -593,6 +644,13 @@ mod tests {
         }
     }
 
+    fn ped(motion: u32) -> Info {
+        let mut fields = [0; 14];
+        fields[0] = motion;
+        fields[12] = 100;
+        Info::with_fields(EntityKind::Player, AssetId::NONE, &fields).expect("fields")
+    }
+
     /// A dense crowd on a 600 m square, so most players see well over one datagram of others, and one joined
     /// player not placed yet (the last slot). Each tick everyone moves a little.
     struct Crowd {
@@ -602,6 +660,9 @@ mod tests {
         history: History,
         /// Each slot's generation, the low bits of its wire id; raised to reuse a slot.
         generations: Vec<u32>,
+        /// Each slot's info and the tick it last changed; empty unless the crowd has ped blocks.
+        infos: Vec<Info>,
+        info_ticks: Vec<u32>,
     }
 
     impl Crowd {
@@ -616,7 +677,18 @@ mod tests {
                 grid: DenseGrid::default(),
                 history: History::new(),
                 generations: vec![0; players],
+                infos: Vec::new(),
+                info_ticks: Vec::new(),
             }
+        }
+
+        /// The same crowd with ped blocks, one in fifty of which changes its motion each tick: about every 2.5 s at
+        /// 20 Hz, as often as a walker stops or starts.
+        fn with_peds(players: usize) -> Self {
+            let mut crowd = Self::new(players);
+            crowd.infos = vec![ped(0); players + 1];
+            crowd.info_ticks = vec![0; players + 1];
+            crowd
         }
 
         /// Moves everyone and records the tick, sharing bodies for the baselines `acks` names.
@@ -629,8 +701,15 @@ mod tests {
                 states.push(Some(state((id as u32) << 16 | self.generations[id], *p)));
             }
             states.push(None);
+            for slot in 0..self.infos.len() {
+                if self.rng.unit() < 0.02 {
+                    self.infos[slot] = ped((self.rng.unit() * 4.0) as u32);
+                    self.info_ticks[slot] = tick;
+                }
+            }
             self.grid.rebuild();
-            self.history.record(tick, &states, acks.iter().copied());
+            self.history
+                .record(tick, &states, &self.infos, &self.info_ticks, acks.iter().copied());
         }
     }
 
@@ -689,11 +768,13 @@ mod tests {
     /// it decodes, and the deltas against its acknowledgements are much smaller than whole snapshots.
     #[test]
     fn a_client_rebuilds_the_view_through_lost_datagrams() {
-        let mut crowd = Crowd::new(400);
+        // Ped blocks change all the time, so the blocks list is rebuilt through the losses too.
+        let mut crowd = Crowd::with_peds(400);
         let config = VisibilityConfig::default();
         let mut view = View::new();
         let mut reassembler = Reassembler::new();
-        let mut decoded: Vec<Option<(u32, Vec<EntityState>)>> = vec![None; HISTORY_TICKS];
+        type Decoded = (u32, Vec<EntityState>, Vec<Info>);
+        let mut decoded: Vec<Option<Decoded>> = vec![None; HISTORY_TICKS];
         let (mut ack, mut rng, mut checked) = (0u32, Rng(7), 0);
         let (mut whole_bytes, mut delta_bytes) = (0usize, 0usize);
         for tick in 1..60u32 {
@@ -722,22 +803,35 @@ mod tests {
                 delta_bytes = delta_bytes.max(bytes);
             }
             let base = (age > 0).then(|| {
-                let (t, e) = decoded[(tick - age) as usize % HISTORY_TICKS]
+                let (t, e, i) = decoded[(tick - age) as usize % HISTORY_TICKS]
                     .as_ref()
                     .expect("baseline kept");
                 assert_eq!(*t, tick - age);
-                Baseline {
-                    tick: *t,
-                    entities: e,
-                }
+                (
+                    Baseline {
+                        tick: *t,
+                        entities: e,
+                    },
+                    &i[..],
+                )
             });
-            let mut out = Vec::new();
-            decode_delta(&payload, tick, base, &mut out).expect("decode");
+            let (mut out, mut infos) = (Vec::new(), Vec::new());
+            decode_delta_with_info(
+                &payload,
+                tick,
+                base.map(|b| b.0),
+                base.map_or(&[], |b| b.1),
+                &mut out,
+                &mut infos,
+            )
+            .expect("decode");
             let states = crowd.history.at(tick).expect("states");
             let expected: Vec<EntityState> = view.sent().iter().filter_map(|&s| states[s as usize]).collect();
             assert_eq!(out, expected, "tick {tick}");
+            let expected: Vec<Info> = view.sent().iter().map(|&s| crowd.infos[s as usize]).collect();
+            assert_eq!(infos, expected, "tick {tick}");
             assert!(!out.iter().any(|s| s.id >> 16 == 7));
-            decoded[tick as usize % HISTORY_TICKS] = Some((tick, out));
+            decoded[tick as usize % HISTORY_TICKS] = Some((tick, out, infos));
             ack = tick;
             checked += 1;
         }
@@ -817,7 +911,7 @@ mod tests {
                 states.push(Some(state(i as u32, [x, 0.0])));
             }
             grid.rebuild();
-            history.record(tick, &states, []);
+            history.record(tick, &states, &[], &[], []);
         };
         place(&mut grid, &mut history, 1, 150.0);
         view.build(0, &grid, &history, &config, 1, 0);
