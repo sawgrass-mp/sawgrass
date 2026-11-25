@@ -27,7 +27,7 @@ pub struct Limits {
     /// Handshakes in progress beyond which new ones are refused. Only addresses QUIC has validated count: every
     /// unvalidated attempt gets a Retry first, so spoofed packets take no place. A slot is held until the Sawgrass
     /// hello is done, about two round trips; 1024 lets a full server's players come back within seconds of a
-    /// restart at 300 ms of round trip (task NET-15).
+    /// restart at 300 ms of round trip (task BOT-5).
     pub max_handshakes: usize,
     /// Connections, handshakes included, from one validated IPv4 address or IPv6 /64.
     pub max_per_address: usize,

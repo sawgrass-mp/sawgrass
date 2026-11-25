@@ -53,7 +53,7 @@ Other options: `--send-hz` (default 20), `--area` (side of the square in metres,
 (the name in the server certificate, default `localhost`).
 
 A bot the server refuses, or whose handshake times out, tries again after a pause drawn between half and all of
-250 ms, doubling up to 4 s, until the run ends, as a game client does when a server is busy (NET-15). The first line
+250 ms, doubling up to 4 s, until the run ends, as a game client does when a server is busy (BOT-5). The first line
 counts those retries; a bot counts as failed only if it never got in.
 
 ### A lighter generator
