@@ -370,6 +370,13 @@ fn main() -> ExitCode {
                     count(&traffic.refused_per_address),
                     count(&traffic.players_cut)
                 );
+                line += &format!(
+                    ", owned states refused {} stale {} movement {} far, owner events lost {}",
+                    count(&traffic.refused_owned_stale),
+                    count(&traffic.refused_owned_movement),
+                    count(&traffic.refused_owned_far),
+                    count(&traffic.lost_owner_events)
+                );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);
                 }
