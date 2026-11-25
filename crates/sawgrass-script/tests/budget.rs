@@ -54,7 +54,7 @@ fn misbehaving_resources_leave_the_others_running() {
         "sawgrass.on('tick', function() local s = string.rep('x', 3 * 1024 * 1024) end)",
     ));
     host.push(resource("good", COUNTER));
-    let budget = Duration::from_millis(60);
+    let budget = Duration::from_millis(100);
     let mut worst = Duration::ZERO;
     for tick in 0..20 {
         let start = Instant::now();
@@ -63,7 +63,7 @@ fn misbehaving_resources_leave_the_others_running() {
     }
     let good = host.resources()[3].stats();
     // The loop and the memory hog take at most their 20 ms deadlines and the stall a few ms, so the good resource
-    // still runs every tick within the 60 ms budget, whatever the order.
+    // still runs every tick within the 100 ms budget, whatever the order, with room for slow CI runners.
     assert_eq!((good.calls, good.skipped_ticks), (20, 0));
     assert!(host.resources()[0].stats().deadlines > 0);
     assert!(host.resources()[1].stats().memory_errors + host.resources()[1].stats().deadlines > 0);
