@@ -2,7 +2,7 @@
 //!
 //! | Kind | Payload |
 //! |---|---|
-//! | [`ClientState`](crate::PacketKind::ClientState) | [`ClientState`]: position, velocity, rotation, 19 bytes |
+//! | [`ClientState`](crate::PacketKind::ClientState) | [`ClientState`]: position, velocity, rotation, 19 bytes; then, optionally, the player's [`PedBlock`]: field count and fields as varints |
 //! | [`Snapshot`](crate::PacketKind::Snapshot) | count (`u8`), then that many [`EntityState`]s |
 //! | [`DeltaSnapshot`](crate::PacketKind::DeltaSnapshot) | a fragment byte and part of a delta payload ([`crate::delta`]) |
 //! | [`Event`](crate::PacketKind::Event) | [`ServerEvent`] or [`ClientEvent`]: a code byte, then its fields |
@@ -12,6 +12,9 @@
 //! [`SNAPSHOT_MAX_ENTITIES`] entities is split over several datagrams with the same tick, so each one fits in
 //! [`MAX_DATAGRAM`] bytes on any path quinn accepts.
 
+use crate::delta::{put_varint, take_varint};
+use crate::entity::MAX_FIELDS;
+use crate::ped::PedBlock;
 use crate::{
     DecodeError, EncodeError, EntityState, PacketHeader, Position, Reader, Rotation, Velocity, Writer,
 };
@@ -47,16 +50,48 @@ impl ClientState {
         Ok(w.pos)
     }
 
-    /// Reads a whole payload. Bytes after the state are an error: one encoding per packet (NET-4).
+    /// Appends the state and then the player's ped block to `out`.
+    pub fn encode_with_ped(&self, ped: &PedBlock, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+        let mut buf = [0; Self::SIZE];
+        self.encode(&mut buf)?;
+        out.extend_from_slice(&buf);
+        let fields = ped.to_fields();
+        put_varint(out, fields.len() as u64);
+        for v in fields {
+            put_varint(out, u64::from(v));
+        }
+        Ok(())
+    }
+
+    /// Reads a whole payload, with or without a ped block, and returns the state. Anything after the state but a
+    /// valid ped block is an error: one encoding per packet (NET-4).
     pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_with_ped(input).map(|(state, _)| state)
+    }
+
+    /// Reads a whole payload: the state, and the ped block if one follows. A block with more than
+    /// [`MAX_FIELDS`] fields, or fields [`PedBlock::from_fields`] refuses, is an error.
+    pub fn decode_with_ped(input: &[u8]) -> Result<(Self, Option<PedBlock>), DecodeError> {
         let mut r = Reader { input };
         let state = Self {
             position: Position::read(&mut r)?,
             velocity: Velocity::read(&mut r)?,
             rotation: Rotation::read(&mut r)?,
         };
-        r.finish()?;
-        Ok(state)
+        let mut rest = r.input;
+        if rest.is_empty() {
+            return Ok((state, None));
+        }
+        let n = usize::try_from(take_varint(&mut rest)?).map_err(|_| DecodeError::OutOfRange)?;
+        if n > MAX_FIELDS {
+            return Err(DecodeError::OutOfRange);
+        }
+        let mut fields = [0u32; MAX_FIELDS];
+        for v in &mut fields[..n] {
+            *v = u32::try_from(take_varint(&mut rest)?).map_err(|_| DecodeError::OutOfRange)?;
+        }
+        Reader { input: rest }.finish()?;
+        Ok((state, Some(PedBlock::from_fields(&fields[..n])?)))
     }
 }
 

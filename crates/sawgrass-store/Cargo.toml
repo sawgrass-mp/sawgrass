@@ -1,0 +1,18 @@
+[package]
+name = "sawgrass-store"
+description = "The single writer for roleplay state with value, and its RocksDB store (ADR 0003)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# ADR 0003: the store. Compiles RocksDB from C++ through its build script (needs clang); no default features, so no
+# compression libraries are built in.
+rocksdb = { version = "0.24", default-features = false }
+
+
+[lints]
+workspace = true

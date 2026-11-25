@@ -83,8 +83,12 @@ says so with the numbers, and the order is revisited.
 | IM-5 (#97) | Dense 50 m grid and bitset visible sets in `interest.rs`, as IM-2 measured them | Visible sets 1.8 to 2.8 times faster on the bots' movement (IM-3) | IM-4 |
 | SRV-7 (#98) | Visible sets and snapshot encoding per player in parallel on rayon | Crowd tick p50 2.7 to 3.2 times lower on 4 threads (SRV-4) | NET-9, IM-5 |
 
-Gate: 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under 70% of the interval, on the
-same 4-core machine as BOT-3.
+Gate: 3,000 bots in the 1.5 km square with no dropped bots and tick p99 under 70% of the interval, on a dedicated
+4-core machine with the server on two of its cores. Until 2026-11-25 the gate named BOT-3's shared cloud VM; the
+maintainer moved it to a dedicated machine because a shared VM's figures are noisy and cannot be reproduced.
+
+Result (2026-11-25, [two-machine load](research/two-machine-load/README.md)): met. 3,800 bots ran at tick p99 23.8
+and 24.4 ms with no overrun and no dropped bot. For reference, 3,000 bots on the BOT-3 VM ran at p99 37 to 38 ms.
 
 ### Phase 2: fewer bytes, then 30 Hz
 
@@ -98,6 +102,10 @@ same 4-core machine as BOT-3.
 Gate: 4,096 bots with the bots on a second machine, as the
 [bots README](../crates/sawgrass-bots/README.md#bots-and-server-on-separate-machines) describes. This is stage
 1's gate in the roadmap.
+
+Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.md)): not met. At 20 Hz, with 3,700
+of the 4,096 bots on the server's machine, 4,096 bots ran with no overrun. On two server cores the gateway is the limit: with one gateway thread, tick p99
+28 to 30 ms and 7 to 12% of snapshots dropped; with two, every snapshot delivered and p99 38 to 39 ms.
 
 ### Phase 3: reliability of the realtime core
 
@@ -121,6 +129,27 @@ Gate: 4,096 bots with the bots on a second machine, as the
 Phase 4 waits for phase 1's gate, so the tick it adds work to has room for it. Scaling step 2 of
 architecture.md (gateways in their own processes) is not planned here: the gateway used about one core at 3,000
 players in BOT-3, so it is started only if the 4,096 gate shows the gateway, not the tick, as the limit.
+
+### Phase 5: sync before the game
+
+The server and protocol side of roadmap step 8, as [ADR 0006](adr/0006-entity-sync-before-the-game.md) designs it.
+None of it needs the game; every task is tested on the bots. The protocol tasks change what the client's network
+core decodes, so they land in this order.
+
+| ID | Task | Depends on |
+|---|---|---|
+| NET-15 | Entity kinds and model ids in added entities, and the `blocks` list in delta snapshots; `PROTOCOL_VERSION` 4 | ADR 0006 |
+| NET-16 | The ped block: motion, flags, weapon, aim, seat, action layers, health and armour | NET-15 |
+| NET-17 | The vehicle block, and owned-entity states with their epoch in the client state | NET-15 |
+| SRV-13 | Vehicles, NPCs and objects as server entities that scripts and admin commands spawn and remove | NET-15 |
+| SRV-14 | Owners for vehicles and NPCs: the four rules, epochs, hand-off and the checks on owned states | SRV-13, NET-17 |
+| SRV-15 | Seats: enter and leave requests, decided by the server | SRV-14, NET-16 |
+| SRV-16 | Hit reports checked against the snapshot history; health, armour and death on the server | NET-16 |
+| SRV-17 | World state: time, weather, doors and routing buckets, sent on join and on change | NET-15 |
+| BOT-5 | Bots that drive, change seats and owners and shoot, as a load-test scenario with bytes per player | SRV-14, SRV-15, SRV-16 |
+
+Gate: the BOT-5 scenario at 3,000 bots in the 1.5 km square, with phase 1's tick budget, no refused state from a
+well-behaved bot, and the bytes per player reported against architecture.md's budget.
 
 ## What this plan does not change
 
