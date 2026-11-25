@@ -77,10 +77,10 @@ So the work is split in three, in this order:
 
 Tooling and docs run alongside every step: 22 of 29 tasks done.
 
-Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🟢 [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
+Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🔍 [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
 
 <details>
-<summary><b>All tasks</b>: 101 done, 0 in review, 4 in progress, 3 ready, 9 planned</summary>
+<summary><b>All tasks</b>: 102 done, 1 in review, 5 in progress, 2 ready, 8 planned</summary>
 
 | | Task | Step | Size | Status |
 |---|---|---|---|---|
@@ -157,7 +157,8 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [CLIENT-10](https://github.com/sawgrass-mp/sawgrass/issues/181): Measure corners that fall between snapshots | 7. In game | M | done |
 | ✅ | [CLIENT-11](https://github.com/sawgrass-mp/sawgrass/issues/185): Connect the client module to a server, and two clients that see each other | 7. In game | M | done |
 | ✅ | [CLIENT-12](https://github.com/sawgrass-mp/sawgrass/issues/189): Send owned entities' states from the network core | 7. In game | M | done |
-| 🛠️ | [CLIENT-13](https://github.com/sawgrass-mp/sawgrass/issues/207): Send owned entity states from the client module | 7. In game | M | in progress |
+| ✅ | [CLIENT-13](https://github.com/sawgrass-mp/sawgrass/issues/207): Send owned entity states from the client module | 7. In game | M | done |
+| 🛠️ | [CLIENT-14](https://github.com/sawgrass-mp/sawgrass/issues/235): Apply the server's clock, weather and doors in the client module | 7. In game | M | in progress |
 | ✅ | [NET-15](https://github.com/sawgrass-mp/sawgrass/issues/136): Entity kinds, model ids and the blocks list in delta snapshots | 9. Sync | M | done |
 | ✅ | [NET-16](https://github.com/sawgrass-mp/sawgrass/issues/148): The ped block in the protocol | 9. Sync | M | done |
 | ✅ | [SRV-18](https://github.com/sawgrass-mp/sawgrass/issues/152): Send entity infos and relay the players' ped blocks | 9. Sync | M | done |
@@ -170,7 +171,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [SRV-17](https://github.com/sawgrass-mp/sawgrass/issues/215): Clock, weather and doors sent on joining and on change | 9. Sync | M | done |
 | ✅ | [BOT-5](https://github.com/sawgrass-mp/sawgrass/issues/219): Bots that drive, change seats and shoot | 9. Sync | M | done |
 | ⚪ | [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122): Show movement refusals per player for admins | Outside the plan | M | planned |
-| 🟢 | [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232): Bots shoot only intact vehicles, keep driving speed and check their seat | Outside the plan | M | ready |
+| 🔍 | [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232): Bots shoot only intact vehicles, keep driving speed and check their seat | Outside the plan | M | in review |
 | 🛠️ | [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157): Turn off a resource that keeps overrunning | Outside the plan | M | in progress |
 | ⚪ | [OPS-1](https://github.com/sawgrass-mp/sawgrass/issues/9): Benchmark regression gate | Tooling and docs | M | planned |
 | ⚪ | [OPS-2](https://github.com/sawgrass-mp/sawgrass/issues/10): Markdown link check | Tooling and docs | S | planned |
@@ -200,7 +201,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [DOC-14](https://github.com/sawgrass-mp/sawgrass/issues/199): A guide to run a server for a playtest | Tooling and docs | M | done |
 | ✅ | [DOC-15](https://github.com/sawgrass-mp/sawgrass/issues/211): Redraw the README pictures with every README update | Tooling and docs | M | done |
 | ✅ | [DOC-16](https://github.com/sawgrass-mp/sawgrass/issues/222): Record DB\-8's change to the store writer, and ask scopes to list every crate | Tooling and docs | M | done |
-| ⚪ | [DOC-17](https://github.com/sawgrass-mp/sawgrass/issues/233): Regenerate the README progress and pictures on current main | Tooling and docs | M | planned |
+| 🛠️ | [DOC-17](https://github.com/sawgrass-mp/sawgrass/issues/233): Regenerate the README progress and pictures on current main | Tooling and docs | M | in progress |
 
 </details>
 
