@@ -342,7 +342,7 @@ impl Players {
     /// Applies what arrived since the last tick, then sends every player its snapshot for `info.tick`.
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
         self.apply_inbound(world, info);
-        self.apply_states(world, info.dt.as_secs_f32());
+        self.apply_states(world);
         self.grid.rebuild();
         self.send_snapshots(info.tick as u32);
         // Every visible set has been recomputed without the players who left: their slots may be reused.
@@ -406,14 +406,14 @@ impl Players {
 
     /// Takes each player's latest state, if a new one arrived and passes the movement checks, into the world, the
     /// grid and the wire states. A refused state is counted and dropped: the player stays where it was.
-    fn apply_states(&mut self, world: &mut World, dt: f32) {
+    fn apply_states(&mut self, world: &mut World) {
         let rules = &self.movement;
+        let now = std::time::Instant::now();
         for player in self.players.iter_mut().flatten() {
-            player.movement.tick(rules, dt);
             let Some(state) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
                 continue;
             };
-            if let Err(violation) = player.movement.check(rules, &state) {
+            if let Err(violation) = player.movement.check(rules, &state, now) {
                 let counter = match violation {
                     Violation::Bounds => &self.traffic.refused_bounds,
                     Violation::Speed => &self.traffic.refused_speed,
