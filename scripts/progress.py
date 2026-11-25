@@ -60,7 +60,7 @@ ICON = {"done": "✅", "in review": "🔍", "in progress": "🛠️", "ready": "
 # `difficulty` (easy, medium, hard, very hard) is the maintainers' estimate of a step's risk and unknowns, not of its
 # size, and `why` says in one line what makes it so.
 STEPS = (
-    {"name": "Foundation", "short": "Foundation", "stage": 0, "state": "done", "difficulty": "easy",
+    {"name": "Foundation", "short": "Setup", "stage": 0, "state": "done", "difficulty": "easy",
      "why": "Known tools, no game and no server code",
      "covers": "Workspace, rules, CI, claim bot, review agent"},
     {"name": "Prototype and measurements", "short": "Prototype", "stage": 1, "state": "done", "difficulty": "medium",
@@ -84,11 +84,11 @@ STEPS = (
      "difficulty": "medium", "why": "Well-known techniques; the work is covering every abuse case and testing it "
                                    "with hostile bots",
      "covers": "Movement validation, per-connection limits, overload policy, misbehaving bots as a load test"},
-    {"name": "Roleplay base", "short": "Roleplay", "stage": 2, "phase": 4, "areas": ("RP",), "difficulty": "hard",
+    {"name": "Roleplay foundations", "short": "Infra", "stage": 2, "phase": 4, "difficulty": "hard",
      "why": "Money must never be lost: a durable single writer with a replicated log, plus a sandboxed script "
             "runtime",
      "covers": "One writer with RocksDB, WAL copy to a second machine, PostgreSQL archive, Luau runtime with "
-               "deadlines and memory caps, voice relay, then characters, money, inventory, jobs and admin tools"},
+               "deadlines and memory caps, wallets in the server, voice relay; no roleplay gameplay yet"},
     {"name": "Client module in the game", "short": "In game", "stage": 3, "areas": ("CLIENT",), "state": "waiting",
      "difficulty": "very hard",
      "why": "The hardest part: an undocumented game on a young runtime, functions found by pattern per runtime "
@@ -96,8 +96,16 @@ STEPS = (
      "covers": "VIctory adapter with module loading through an API proposed upstream; game functions found per "
                "build; hooks for the frame, peds, vehicles, input, camera and streaming; single-player systems "
                "turned off; the real GameApi; XCL's adapter later",
-     "gate": "Starts when the game runs on PC through VIctory or XCL with a controllable character"},
-    {"name": "Sync in the game", "short": "Sync", "stage": 3, "state": "waiting", "difficulty": "very hard",
+     "gate": "Starts when the game runs on PC through VIctory or XCL with a controllable character; done when "
+             "two clients on one server see each other move"},
+    {"name": "Roleplay base", "short": "Roleplay", "stage": 3, "areas": ("RP",), "state": "waiting",
+     "difficulty": "medium",
+     "why": "Resources over a finished scripting API and ledger; the risk is an API that is hard to change once "
+            "resources depend on it",
+     "covers": "Characters, money, inventory, property, jobs and admin tools as resources over the public "
+               "scripting API",
+     "gate": "Starts once two clients see each other in one world (step 7's gate)"},
+    {"name": "Sync in the game", "short": "Sync", "stage": 3, "phase": 5, "difficulty": "very hard",
      "why": "Game physics and animation the server does not own; animations and ped tasks are the largest piece "
             "of work",
      "covers": "Interpolation and prediction of players, animations and ped tasks, vehicles with owners, weapons "
@@ -116,7 +124,7 @@ STEPS = (
 )
 DIFFICULTY = {"easy": ("🟢", "Easy", "#7cf000"), "medium": ("🟡", "Medium", "#f5d547"),
               "hard": ("🟠", "Hard", "#ff9f43"), "very hard": ("🔴", "Very hard", "#ff5c5c")}
-STAGE_NAMES = {0: "repository foundation", 1: "server without the game", 2: "roleplay base",
+STAGE_NAMES = {0: "repository foundation", 1: "server without the game", 2: "roleplay foundations",
                3: "client in the game", 4: "launcher and releases", 5: "scale"}
 TRACK = {"name": "Tooling and docs", "areas": ("OPS", "DOC")}
 OUTSIDE = "Outside the plan"
