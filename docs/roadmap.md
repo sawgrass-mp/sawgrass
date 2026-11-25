@@ -17,6 +17,9 @@ whichever comes first, runs the game to a world with a controllable character (A
 5. **Stage 4: launcher and releases.** Signing, auto-update, server list.
 6. **Stage 5: scale.** Real players, zones only if measurements call for them.
 
+The order in which the measured choices move into the server, with task IDs and gates, is in
+[implementation-plan.md](implementation-plan.md).
+
 ## First tasks
 
 Each is an issue that starts in `triage`. A maintainer labels it `ready` when it may start; until then it cannot be

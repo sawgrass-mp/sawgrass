@@ -11,7 +11,7 @@
 //! - **The id on the wire changes with every reuse.** Each slot carries a generation, bumped when it is freed, and
 //!   [`Slot::wire_id`] packs both, so a client never sees the same id for two entities.
 
-/// Slots the wire id can address: the index takes the low 16 bits.
+/// Slots the wire id can address: the index takes the high 16 bits.
 pub const MAX_SLOTS: usize = 1 << 16;
 
 /// One allocated slot.
@@ -24,10 +24,11 @@ pub struct Slot {
 }
 
 impl Slot {
-    /// The entity's id in snapshots and events: generation in the high 16 bits, index in the low 16.
+    /// The entity's id in snapshots and events: index in the high 16 bits, generation in the low 16. Index first,
+    /// so entities listed in slot order are also in id order, which delta snapshots need, with no sort.
     #[must_use]
     pub const fn wire_id(self) -> u32 {
-        ((self.generation as u32) << 16) | self.index
+        (self.index << 16) | self.generation as u32
     }
 }
 
@@ -117,6 +118,8 @@ mod tests {
         let d = slots.alloc().expect("d");
         assert_eq!(d.index, a.index);
         assert_ne!(d.wire_id(), a.wire_id(), "a reused slot has a new wire id");
+        // Slot order is id order.
+        assert!(a.wire_id() < b.wire_id() && b.wire_id() < c.wire_id());
         assert!(!slots.is_live(a));
         assert!(slots.is_live(d));
         assert_eq!(slots.capacity(), 3);
