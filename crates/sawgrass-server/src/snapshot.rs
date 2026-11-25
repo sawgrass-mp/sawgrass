@@ -10,9 +10,17 @@
 //! [`HISTORY_TICKS`] ticks, and [`History`] holds every slot's wire state in those ticks, so the baseline is rebuilt
 //! exactly as the client has it. An acknowledgement older than that, or one that names a tick this view did not
 //! send, gets a whole snapshot (a delta against nothing).
+//!
+//! An entity's change between two ticks is the same bytes for every player who has it in a baseline of the older
+//! tick. [`History::record`] therefore encodes, once per tick, every slot's state as an addition and its change
+//! against each baseline age some player acknowledged; a view only merges its slot lists and copies those bodies,
+//! so the per-player cost is about that of a whole snapshot. A view whose acknowledgement was not passed to
+//! `record` encodes its changes itself.
 
-use bytes::Bytes;
-use sawgrass_protocol::delta::{Baseline, DeltaEncoder, MAX_ENTITIES, fragments};
+use bytes::{Bytes, BytesMut};
+use sawgrass_protocol::delta::{
+    DeltaLists, FRAGMENT_PAYLOAD, MAX_ENTITIES, encode_added, encode_changed, fragments,
+};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
@@ -35,11 +43,93 @@ pub const RANK_EVERY: usize = 4;
 /// Ticks of history kept for baselines: 0.8 s at 20 Hz, several round trips.
 pub const HISTORY_TICKS: usize = 16;
 
-/// The wire state of every slot in each of the last [`HISTORY_TICKS`] ticks.
+/// No entity in the slot. Wire ids never take this value: the generation's low 16 bits would be 0xffff in slot
+/// 65,535, beyond [`crate::slots::MAX_SLOTS`].
+const NO_ID: u32 = u32::MAX;
+
+/// Where a slot's encoded body is in a [`Bodies`] buffer.
+#[derive(Debug, Clone, Copy)]
+struct Body {
+    /// The wire id of the entity in the slot now.
+    id: u32,
+    start: u32,
+    len: u8,
+}
+
+impl Body {
+    /// The slot holds no state now, or (for a change) none at the older tick or another entity then, the slot
+    /// having been reused.
+    const NONE: Body = Body {
+        id: NO_ID,
+        start: 0,
+        len: u8::MAX,
+    };
+}
+
+/// One body per slot, back to back.
+#[derive(Debug, Default)]
+struct Bodies {
+    bytes: Vec<u8>,
+    at: Vec<Body>,
+}
+
+impl Bodies {
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.at.clear();
+    }
+
+    /// Appends the next slot's body, written by `write` for the entity `id`, or [`Body::NONE`] when it returns
+    /// `None`.
+    fn push(&mut self, id: u32, write: impl FnOnce(&mut Vec<u8>) -> Option<()>) {
+        let start = self.bytes.len();
+        let body = match write(&mut self.bytes) {
+            // A body is at most 37 bytes (an entity's worst change), so it fits in a u8 below NONE's length.
+            Some(()) => Body {
+                id,
+                start: start as u32,
+                len: (self.bytes.len() - start) as u8,
+            },
+            None => {
+                self.bytes.truncate(start);
+                Body::NONE
+            }
+        };
+        self.at.push(body);
+    }
+
+    /// The wire id and body of `slot`; `None` for [`Body::NONE`].
+    #[inline]
+    fn get(&self, slot: usize) -> Option<(u32, &[u8])> {
+        let body = self.at.get(slot).copied().unwrap_or(Body::NONE);
+        (body.len != u8::MAX).then(|| {
+            (
+                body.id,
+                self.bytes
+                    .get(body.start as usize..body.start as usize + usize::from(body.len))
+                    .unwrap_or(&[]),
+            )
+        })
+    }
+}
+
+/// The wire state of every slot in each of the last [`HISTORY_TICKS`] ticks, and the newest tick's bodies shared
+/// by every player's snapshot.
 #[derive(Debug, Default)]
 pub struct History {
     ticks: [Option<u32>; HISTORY_TICKS],
     states: Vec<Vec<Option<EntityState>>>,
+    /// The wire id in each slot, [`NO_ID`] for none: what a view's merge reads, a tenth of the states' bytes.
+    ids: Vec<Vec<u32>>,
+    /// The newest tick, whose bodies these are.
+    newest: Option<u32>,
+    /// Every slot's state of the newest tick, encoded as an addition.
+    added: Bodies,
+    /// Every slot's change from the tick `age` before the newest, at `age - 1`, for the ages in `shared`; empty if
+    /// it did not change.
+    changed: Vec<Bodies>,
+    /// Bit `age` is set if `changed` holds that age for the newest tick.
+    shared: u32,
 }
 
 impl History {
@@ -49,13 +139,70 @@ impl History {
         Self::default()
     }
 
-    /// Records the states of `tick`, by slot, replacing the tick [`HISTORY_TICKS`] before it.
-    pub fn record(&mut self, tick: u32, states: &[Option<EntityState>]) {
+    /// Records the states of `tick`, by slot, replacing the tick [`HISTORY_TICKS`] before it, and encodes the
+    /// bodies its snapshots share: every addition, and the changes against the tick each of `acks` names, the
+    /// players' acknowledgements. Called on a rayon pool, it encodes them on that pool.
+    pub fn record(&mut self, tick: u32, states: &[Option<EntityState>], acks: impl IntoIterator<Item = u32>) {
         let i = tick as usize % HISTORY_TICKS;
         self.states.resize_with(HISTORY_TICKS, Vec::new);
         self.states[i].clear();
         self.states[i].extend_from_slice(states);
+        self.ids.resize_with(HISTORY_TICKS, Vec::new);
+        self.ids[i].clear();
+        self.ids[i].extend(states.iter().map(|s| s.map_or(NO_ID, |s| s.id)));
         self.ticks[i] = Some(tick);
+        self.newest = Some(tick);
+        let mut wanted = 0u32;
+        for ack in acks {
+            if ack != 0 && ack < tick && ((tick - ack) as usize) < HISTORY_TICKS {
+                wanted |= 1 << (tick - ack);
+            }
+        }
+        let olds: [Option<&[Option<EntityState>]>; HISTORY_TICKS - 1] = std::array::from_fn(|k| {
+            let age = k as u32 + 1;
+            if wanted & (1 << age) == 0 {
+                return None;
+            }
+            let t = tick - age;
+            let j = t as usize % HISTORY_TICKS;
+            (self.ticks[j] == Some(t)).then(|| &self.states[j][..])
+        });
+        self.shared = olds
+            .iter()
+            .enumerate()
+            .filter(|(_, old)| old.is_some())
+            .fold(0, |bits, (k, _)| bits | 1 << (k + 1));
+        self.changed.resize_with(HISTORY_TICKS - 1, Bodies::default);
+        let (added, changed) = (&mut self.added, &mut self.changed);
+        // Inside a pool (the tick's), the bodies are encoded in parallel, one task per age; elsewhere on this thread.
+        if rayon::current_thread_index().is_some() {
+            rayon::scope(|scope| {
+                scope.spawn(|_| fill_added(added, states));
+                for (bodies, old) in changed.iter_mut().zip(olds) {
+                    if let Some(old) = old {
+                        scope.spawn(move |_| fill_changed(bodies, old, states));
+                    }
+                }
+            });
+        } else {
+            fill_added(added, states);
+            for (bodies, old) in changed.iter_mut().zip(olds) {
+                if let Some(old) = old {
+                    fill_changed(bodies, old, states);
+                }
+            }
+        }
+    }
+
+    /// The shared changes against the baseline `age` ticks before the newest tick, if `record` encoded them.
+    fn changes(&self, age: u32) -> Option<&Bodies> {
+        (age < 32 && self.shared & (1 << age) != 0).then(|| &self.changed[age as usize - 1])
+    }
+
+    /// The wire ids of `tick`, by slot, [`NO_ID`] for none, if it is still recorded.
+    fn ids_at(&self, tick: u32) -> Option<&[u32]> {
+        let i = tick as usize % HISTORY_TICKS;
+        (self.ticks[i] == Some(tick)).then(|| &self.ids[i][..])
     }
 
     /// The states of `tick`, by slot, if it is still recorded.
@@ -63,6 +210,32 @@ impl History {
     pub fn at(&self, tick: u32) -> Option<&[Option<EntityState>]> {
         let i = tick as usize % HISTORY_TICKS;
         (self.ticks[i] == Some(tick)).then(|| &self.states[i][..])
+    }
+}
+
+/// Encodes every slot's state of `states` as an addition.
+fn fill_added(bodies: &mut Bodies, states: &[Option<EntityState>]) {
+    bodies.clear();
+    for state in states {
+        bodies.push(state.map_or(NO_ID, |s| s.id), |out| {
+            encode_added(state.as_ref()?, out);
+            Some(())
+        });
+    }
+}
+
+/// Encodes every slot's change from `old` to `states`.
+fn fill_changed(bodies: &mut Bodies, old: &[Option<EntityState>], states: &[Option<EntityState>]) {
+    bodies.clear();
+    for (slot, state) in states.iter().enumerate() {
+        bodies.push(state.map_or(NO_ID, |s| s.id), |out| {
+            let (old, new) = (old.get(slot).copied().flatten()?, state.as_ref()?);
+            if old.id != new.id {
+                return None;
+            }
+            encode_changed(&old, new, out);
+            Some(())
+        });
     }
 }
 
@@ -74,22 +247,21 @@ pub struct View {
     changes: VisibilityChanges,
     /// The slots sent in each of the last ticks, with the tick.
     sent: Vec<(Option<u32>, Vec<u32>)>,
-    states: Vec<EntityState>,
-    /// The slots of the last snapshot, one bit each, for the cut's hysteresis.
-    kept: Vec<u64>,
+    lists: DeltaLists,
+    /// An addition encoded for this view alone, when the shared bodies are not of this tick.
+    body: Vec<u8>,
+    /// A change encoded for this view alone, for a baseline age without shared bodies.
+    change: Vec<u8>,
+    payload: Vec<u8>,
     /// This build's candidates for the cut, in slot order: ranking key and slot.
     ranked: Vec<(f32, u32)>,
-    /// The slots chosen for this snapshot, ascending.
+    /// The slots that may go into this snapshot, ascending: the visible set, or its cut.
     chosen: Vec<u32>,
     /// Scratch for finding the cut's threshold.
     keys: Vec<f32>,
     /// The tick of the last snapshot built.
     last: Option<u32>,
-    base: Vec<EntityState>,
-    encoder: DeltaEncoder,
-    payload: Vec<u8>,
-    /// This tick's datagrams back to back, and the length of each, before they are cut into their own buffer.
-    packet: Vec<u8>,
+    /// The length of each of this tick's datagrams, to cut them from their buffer.
     lens: Vec<usize>,
     out: Vec<Bytes>,
 }
@@ -149,52 +321,54 @@ impl View {
             &mut self.changes,
         );
         let limit = SNAPSHOT_LIMIT.min(MAX_ENTITIES);
-        self.chosen.clear();
-        let previous = self.last.and_then(|t| self.sent.get(t as usize % HISTORY_TICKS));
-        if self.visible.len() <= limit {
-            // Everything visible fits: no ranking.
-            self.chosen.extend(self.visible.members().iter().map(|id| id.0));
-        } else if let Some((_, slots)) = previous.filter(|_| (tick as usize + me) % RANK_EVERY != 0) {
-            // Between rankings the cut stays: the entities of the last snapshot that are still visible.
-            let visible = &self.visible;
-            self.chosen
-                .extend(slots.iter().copied().filter(|&s| visible.contains(EntityId(s))));
-        } else {
-            self.rank(states, own, limit);
-        }
-        self.kept.iter_mut().for_each(|w| *w = 0);
         self.sent.resize_with(HISTORY_TICKS, Default::default);
-        let slot = &mut self.sent[tick as usize % HISTORY_TICKS];
-        slot.0 = Some(tick);
-        slot.1.clear();
-        self.states.clear();
-        for &id in &self.chosen {
-            let Some(state) = states.get(id as usize).copied().flatten() else {
-                continue;
-            };
-            let word = id as usize / 64;
-            if self.kept.len() <= word {
-                self.kept.resize(word + 1, 0);
+        let cut = self.visible.len() > limit;
+        if cut {
+            self.chosen.clear();
+            let previous = self.last.map(|t| &self.sent[t as usize % HISTORY_TICKS].1);
+            match previous {
+                Some(slots) if (tick as usize + me) % RANK_EVERY != 0 => {
+                    // Between rankings the cut stays: the entities of the last snapshot that are still visible.
+                    let visible = &self.visible;
+                    self.chosen
+                        .extend(slots.iter().copied().filter(|&s| visible.contains(EntityId(s))));
+                }
+                _ => self.rank(states, own, limit),
             }
-            self.kept[word] |= 1 << (id % 64);
-            slot.1.push(id);
-            self.states.push(state);
         }
+        let i = tick as usize % HISTORY_TICKS;
+        let mut current = std::mem::take(&mut self.sent[i].1);
+        self.sent[i].0 = None;
+        let encoded = if cut {
+            let chosen = std::mem::take(&mut self.chosen);
+            let encoded = self.encode(history, |m| chosen.get(m).copied(), &mut current, tick, ack);
+            self.chosen = chosen;
+            encoded
+        } else {
+            // Everything visible fits: no cut, and no copy of the visible set.
+            let visible = std::mem::take(&mut self.visible);
+            let members = visible.members();
+            let encoded = self.encode(
+                history,
+                |m| members.get(m).map(|id| id.0),
+                &mut current,
+                tick,
+                ack,
+            );
+            self.visible = visible;
+            encoded
+        };
+        self.sent[i] = (Some(tick), current);
         self.last = Some(tick);
-        // Slots ascend, and so do wire ids (slot index in the high bits): the order the encoder needs.
-        let base = baseline(&self.sent, history, tick, ack, &mut self.base);
-        self.payload.clear();
-        if self
-            .encoder
-            .encode(tick, &self.states, base, &mut self.payload)
-            .is_err()
-        {
+        if !encoded {
             return;
         }
         let Ok(parts) = fragments(&self.payload) else {
             return;
         };
-        self.packet.clear();
+        let count = self.payload.len().div_ceil(FRAGMENT_PAYLOAD).max(1);
+        // Written straight into one buffer of exactly this player's bytes for the tick.
+        let mut packet = BytesMut::with_capacity(self.payload.len() + count * (PacketHeader::SIZE + 1));
         self.lens.clear();
         for (fragment, part) in parts {
             let header = PacketHeader {
@@ -206,30 +380,157 @@ impl View {
             let mut buf = [0; PacketHeader::SIZE];
             // The buffer is exactly the header size, so encoding cannot fail.
             let _ = header.encode(&mut buf);
-            self.packet.extend_from_slice(&buf);
-            self.packet.push(fragment);
-            self.packet.extend_from_slice(part);
+            packet.extend_from_slice(&buf);
+            packet.extend_from_slice(&[fragment]);
+            packet.extend_from_slice(part);
             self.lens.push(PacketHeader::SIZE + 1 + part.len());
         }
-        cut_datagrams(&self.packet, &self.lens, &mut self.out);
+        cut_datagrams(packet.freeze(), &self.lens, &mut self.out);
     }
+}
 
+impl View {
+    /// Writes into `payload` the snapshot for `tick` of the candidates that have a state, at most
+    /// [`MAX_ENTITIES`], and puts their slots into `current`. `candidate(m)` is the `m`-th candidate slot,
+    /// ascending. Encodes against the snapshot sent
+    /// for `ack` if this view and `history` still hold it, else whole. Slots ascend, and so do wire ids (slot index
+    /// in the high bits), the order the lists need. Returns `false` if it could not be encoded, which the lists'
+    /// checks make a server bug, not a client's doing.
+    fn encode(
+        &mut self,
+        history: &History,
+        candidate: impl Fn(usize) -> Option<u32>,
+        current: &mut Vec<u32>,
+        tick: u32,
+        ack: u32,
+    ) -> bool {
+        let (Some(states), Some(ids)) = (history.at(tick), history.ids_at(tick)) else {
+            return false;
+        };
+        self.lists.clear();
+        self.payload.clear();
+        current.clear();
+        let shared = history.newest == Some(tick);
+        let base = (ack != 0 && ack < tick && ((tick - ack) as usize) < HISTORY_TICKS)
+            .then(|| {
+                let (sent_tick, slots) = self.sent.get(ack as usize % HISTORY_TICKS)?;
+                (*sent_tick == Some(ack)).then_some(())?;
+                Some((&slots[..], history.ids_at(ack)?, history.at(ack)?))
+            })
+            .flatten();
+        let age = base.map_or(0, |_| tick - ack);
+        let changes = if shared && age > 0 {
+            history.changes(age)
+        } else {
+            None
+        };
+        let (old_slots, old_ids, old_states) = base.unwrap_or((&[], &[], &[]));
+        let Self {
+            lists, body, change, ..
+        } = self;
+        // Adds the entity in `slot` now, with the shared body or one encoded here; `Some(false)` if it has no state.
+        let mut add = |lists: &mut DeltaLists, slot: usize| -> Option<bool> {
+            if shared {
+                let Some((id, tail)) = history.added.get(slot) else {
+                    return Some(false);
+                };
+                lists.add(id, tail).ok()?;
+            } else {
+                let Some(state) = states.get(slot).copied().flatten() else {
+                    return Some(false);
+                };
+                body.clear();
+                encode_added(&state, body);
+                lists.add(state.id, body).ok()?;
+            }
+            Some(true)
+        };
+        let merged = (|| -> Option<()> {
+            let (mut a, mut m) = (0, 0);
+            loop {
+                let sa = old_slots.get(a).copied().unwrap_or(u32::MAX);
+                let sb = match candidate(m) {
+                    Some(slot) if current.len() < MAX_ENTITIES => slot,
+                    _ => u32::MAX,
+                };
+                if sa < sb {
+                    lists.remove(*old_ids.get(sa as usize)?).ok()?;
+                    a += 1;
+                    continue;
+                }
+                if sb == u32::MAX {
+                    break;
+                }
+                m += 1;
+                let slot = sb as usize;
+                if sb < sa {
+                    if add(lists, slot)? {
+                        current.push(sb);
+                    }
+                    continue;
+                }
+                a += 1;
+                if let Some(bodies) = changes {
+                    // The common case: the change against this baseline age is already encoded.
+                    if let Some((id, tail)) = bodies.get(slot) {
+                        current.push(sb);
+                        if !tail.is_empty() {
+                            lists.change(id, tail).ok()?;
+                        }
+                        continue;
+                    }
+                }
+                let (old_id, id) = (*old_ids.get(slot)?, *ids.get(slot)?);
+                if old_id != id {
+                    // Reused, or gone: the client drops the old entity and takes the new one, if any.
+                    lists.remove(old_id).ok()?;
+                    if add(lists, slot)? {
+                        current.push(sb);
+                    }
+                    continue;
+                }
+                change.clear();
+                let (old, new) = (
+                    old_states.get(slot).copied().flatten()?,
+                    states.get(slot).copied().flatten()?,
+                );
+                current.push(sb);
+                if encode_changed(&old, &new, change) {
+                    lists.change(id, change).ok()?;
+                }
+            }
+            Some(())
+        })();
+        if merged.is_none() {
+            return false;
+        }
+        self.lists.finish(age, &mut self.payload);
+        true
+    }
+}
+
+impl View {
     /// Chooses the `limit` nearest visible entities into `chosen`, in slot order. One in the last snapshot counts as
     /// [`KEEP_FACTOR`] times nearer. Ties at the cut go to the lowest slots, so the result does not depend on how
     /// the candidates are ordered.
     fn rank(&mut self, states: &[Option<EntityState>], own: EntityState, limit: usize) {
         let own_cm = own.position.cm().map(|c| c as f32);
         self.ranked.clear();
+        // The last snapshot's slots, ascending like the visible set: walked alongside it.
+        let previous = self
+            .last
+            .map_or(&[][..], |t| &self.sent[t as usize % HISTORY_TICKS].1[..]);
+        let mut p = 0;
         for id in self.visible.members() {
             let Some(state) = states.get(id.0 as usize).copied().flatten() else {
                 continue;
             };
             let cm = state.position.cm();
             let (dx, dy) = (cm[0] as f32 - own_cm[0], cm[1] as f32 - own_cm[1]);
-            let kept = self
-                .kept
-                .get(id.0 as usize / 64)
-                .is_some_and(|w| w & (1 << (id.0 % 64)) != 0);
+            while previous.get(p).is_some_and(|&s| s < id.0) {
+                p += 1;
+            }
+            let kept = previous.get(p) == Some(&id.0);
             self.ranked
                 .push(((dx * dx + dy * dy) * if kept { KEEP_FACTOR } else { 1.0 }, id.0));
         }
@@ -254,50 +555,20 @@ impl View {
     }
 }
 
-/// Copies `bytes`, datagrams back to back with the lengths in `lens`, into one buffer of exactly that size and
-/// appends each datagram, cut from it, to `out` in order. The datagrams share that buffer and nothing else, so a
-/// datagram quinn still holds for a slow client keeps only its own player's bytes of that tick alive (NET-9).
-fn cut_datagrams(bytes: &[u8], lens: &[usize], out: &mut Vec<Bytes>) {
-    let mut buffer = Bytes::copy_from_slice(bytes);
+/// Appends each datagram of `buffer`, back to back with the lengths in `lens`, cut from it, to `out` in order.
+/// `buffer` holds exactly those bytes, so the datagrams share it and nothing else: a datagram quinn still holds
+/// for a slow client keeps only its own player's bytes of that tick alive (NET-9).
+fn cut_datagrams(mut buffer: Bytes, lens: &[usize], out: &mut Vec<Bytes>) {
     for &len in lens {
         out.push(buffer.split_to(len));
     }
-}
-
-/// The snapshot `sent` holds for `ack`, rebuilt into `base` from the slots sent then and their states in `history`,
-/// if both are still kept.
-fn baseline<'b>(
-    sent: &[(Option<u32>, Vec<u32>)],
-    history: &History,
-    tick: u32,
-    ack: u32,
-    base: &'b mut Vec<EntityState>,
-) -> Option<Baseline<'b>> {
-    if ack == 0 || ack >= tick || (tick - ack) as usize >= HISTORY_TICKS {
-        return None;
-    }
-    let (sent_tick, slots) = sent.get(ack as usize % HISTORY_TICKS)?;
-    let states = history.at(ack)?;
-    if *sent_tick != Some(ack) {
-        return None;
-    }
-    base.clear();
-    base.extend(
-        slots
-            .iter()
-            .filter_map(|&s| states.get(s as usize).copied().flatten()),
-    );
-    Some(Baseline {
-        tick: ack,
-        entities: base,
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rayon::prelude::*;
-    use sawgrass_protocol::delta::{Reassembler, baseline_age, decode_delta};
+    use sawgrass_protocol::delta::{Baseline, DeltaEncoder, Reassembler, baseline_age, decode_delta};
     use sawgrass_protocol::{Position, Rotation, Velocity};
 
     struct Rng(u64);
@@ -327,6 +598,8 @@ mod tests {
         points: Vec<[f32; 2]>,
         grid: DenseGrid,
         history: History,
+        /// Each slot's generation, the low bits of its wire id; raised to reuse a slot.
+        generations: Vec<u32>,
     }
 
     impl Crowd {
@@ -340,20 +613,22 @@ mod tests {
                 points,
                 grid: DenseGrid::default(),
                 history: History::new(),
+                generations: vec![0; players],
             }
         }
 
-        fn step(&mut self, tick: u32) {
+        /// Moves everyone and records the tick, sharing bodies for the baselines `acks` names.
+        fn step(&mut self, tick: u32, acks: &[u32]) {
             let mut states = Vec::new();
             for (id, p) in self.points.iter_mut().enumerate() {
                 p[0] += self.rng.unit() - 0.5;
                 p[1] += self.rng.unit() - 0.5;
                 self.grid.upsert(EntityId(id as u32), Point::new(p[0], p[1]));
-                states.push(Some(state(id as u32, *p)));
+                states.push(Some(state((id as u32) << 16 | self.generations[id], *p)));
             }
             states.push(None);
             self.grid.rebuild();
-            self.history.record(tick, &states);
+            self.history.record(tick, &states, acks.iter().copied());
         }
     }
 
@@ -367,7 +642,7 @@ mod tests {
         let config = VisibilityConfig::default();
         let mut sent = Vec::new();
         for tick in 1..4 {
-            crowd.step(tick);
+            crowd.step(tick, &[tick - 1]);
             let (grid, history) = (&crowd.grid, &crowd.history);
             pool.install(|| {
                 views
@@ -388,7 +663,7 @@ mod tests {
         let bytes: Vec<u8> = (0..2500u32).map(|i| i as u8).collect();
         let lens = [1100, 1100, 300];
         let mut cut = Vec::new();
-        cut_datagrams(&bytes, &lens, &mut cut);
+        cut_datagrams(Bytes::copy_from_slice(&bytes), &lens, &mut cut);
         assert_eq!(cut.iter().map(Bytes::len).collect::<Vec<_>>(), lens);
         assert_eq!(cut.concat(), bytes);
         for pair in cut.windows(2) {
@@ -420,7 +695,9 @@ mod tests {
         let (mut ack, mut rng, mut checked) = (0u32, Rng(7), 0);
         let (mut whole_bytes, mut delta_bytes) = (0usize, 0usize);
         for tick in 1..60u32 {
-            crowd.step(tick);
+            // Shared bodies on odd ticks, the view's own encoding on even ones: both must rebuild the same.
+            let shared = [ack];
+            crowd.step(tick, if tick % 2 == 1 { &shared[..] } else { &[] });
             view.build(7, &crowd.grid, &crowd.history, &config, tick, ack);
             let datagrams: Vec<Bytes> = view.out().collect();
             let bytes: usize = datagrams.iter().map(Bytes::len).sum();
@@ -457,7 +734,7 @@ mod tests {
             let states = crowd.history.at(tick).expect("states");
             let expected: Vec<EntityState> = view.sent().iter().filter_map(|&s| states[s as usize]).collect();
             assert_eq!(out, expected, "tick {tick}");
-            assert!(!out.iter().any(|s| s.id == 7));
+            assert!(!out.iter().any(|s| s.id >> 16 == 7));
             decoded[tick as usize % HISTORY_TICKS] = Some((tick, out));
             ack = tick;
             checked += 1;
@@ -467,6 +744,57 @@ mod tests {
             delta_bytes * 3 < whole_bytes,
             "delta {delta_bytes} B, whole {whole_bytes} B"
         );
+    }
+
+    /// The shared bodies give the very bytes the protocol's own encoder writes, for every baseline age, with the
+    /// changes shared or encoded by the view, and for a slot reused between the baseline and now.
+    #[test]
+    fn shared_bodies_encode_what_the_encoder_does() {
+        let mut crowd = Crowd::new(400);
+        let config = VisibilityConfig::default();
+        let mut view = View::new();
+        let mut encoder = DeltaEncoder::default();
+        let ages = [0u32, 1, 2, 3, 4, 5, 7, 1, 2];
+        let mut compared = 0;
+        for tick in 1..40u32 {
+            if tick == 20 {
+                // Slots seen by player 7 change hands.
+                for id in view.visible().members().iter().take(5) {
+                    crowd.generations[id.0 as usize] += 1;
+                }
+            }
+            let age = ages[tick as usize % ages.len()];
+            let ack = tick.saturating_sub(age);
+            // Shared bodies on all but every third tick, where the view encodes its changes itself.
+            let shared = [ack];
+            crowd.step(tick, if tick % 3 == 0 { &[][..] } else { &shared });
+            view.build(7, &crowd.grid, &crowd.history, &config, tick, ack);
+            let states = crowd.history.at(tick).expect("states");
+            let of = |slots: &[u32], states: &[Option<EntityState>]| -> Vec<EntityState> {
+                slots.iter().filter_map(|&s| states[s as usize]).collect()
+            };
+            let (_, slots) = &view.sent[tick as usize % HISTORY_TICKS];
+            let current = of(slots, states);
+            let base_states;
+            let base = if age > 0 && tick > age {
+                let (sent_tick, old) = &view.sent[ack as usize % HISTORY_TICKS];
+                assert_eq!(*sent_tick, Some(ack));
+                base_states = of(old, crowd.history.at(ack).expect("old states"));
+                Some(Baseline {
+                    tick: ack,
+                    entities: &base_states,
+                })
+            } else {
+                None
+            };
+            let mut expected = Vec::new();
+            encoder
+                .encode(tick, &current, base, &mut expected)
+                .expect("encode");
+            assert_eq!(view.payload, expected, "tick {tick}, age {age}");
+            compared += 1;
+        }
+        assert_eq!(compared, 39);
     }
 
     /// More visible than the limit: the nearest are sent; one already sent stays until a newcomer is clearly nearer.
@@ -487,7 +815,7 @@ mod tests {
                 states.push(Some(state(i as u32, [x, 0.0])));
             }
             grid.rebuild();
-            history.record(tick, &states);
+            history.record(tick, &states, []);
         };
         place(&mut grid, &mut history, 1, 150.0);
         view.build(0, &grid, &history, &config, 1, 0);
@@ -515,9 +843,9 @@ mod tests {
         let mut view = View::new();
         let config = VisibilityConfig::default();
         for tick in 1..40u32 {
-            crowd.step(tick);
             // Acknowledges tick 1 forever, or a tick never sent.
             let ack = if tick < 30 { 1 } else { tick + 5 };
+            crowd.step(tick, &[ack]);
             view.build(3, &crowd.grid, &crowd.history, &config, tick, ack);
             let mut r = Reassembler::new();
             let mut payload = None;

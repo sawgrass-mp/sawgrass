@@ -257,7 +257,8 @@ async fn serve(
             && let Ok(mut slot) = inbox.state.lock()
         {
             *slot = Some(state);
-            inbox.ack.store(header.tick, Ordering::Relaxed);
+            // The newest acknowledgement wins: a reordered datagram does not move it back.
+            inbox.ack.fetch_max(header.tick, Ordering::Relaxed);
         }
     }
     datagrams.close();
@@ -415,9 +416,17 @@ impl Players {
     }
 
     fn send_snapshots(&mut self, tick: u32) {
-        self.history.record(tick, &self.states);
-        let (grid, history, config) = (&self.grid, &self.history, &self.visibility);
-        let build = |player: &mut Player| {
+        let (grid, config) = (&self.grid, &self.visibility);
+        let (history, states, players) = (&mut self.history, &self.states, &mut self.players);
+        // The baselines the players acknowledged, so the changes against each are encoded once for all of them.
+        let acks = |players: &[Option<Player>]| -> Vec<u32> {
+            players
+                .iter()
+                .flatten()
+                .map(|p| p.inbox.ack.load(Ordering::Relaxed))
+                .collect()
+        };
+        let build = |history: &History, player: &mut Player| {
             let ack = player.inbox.ack.load(Ordering::Relaxed);
             player
                 .view
@@ -425,12 +434,20 @@ impl Players {
         };
         match &self.pool {
             Some(pool) => pool.install(|| {
-                self.players
+                history.record(tick, states, acks(players));
+                let history = &*history;
+                players
                     .par_iter_mut()
                     .filter_map(Option::as_mut)
-                    .for_each(build);
+                    .for_each(|player| build(history, player));
             }),
-            None => self.players.iter_mut().flatten().for_each(build),
+            None => {
+                history.record(tick, states, acks(players));
+                players
+                    .iter_mut()
+                    .flatten()
+                    .for_each(|player| build(history, player));
+            }
         }
         let mut batch = self.recycle.try_recv().unwrap_or_default();
         for player in self.players.iter_mut().flatten() {

@@ -55,6 +55,7 @@ pub struct Baseline<'a> {
     pub entities: &'a [EntityState],
 }
 
+#[inline]
 fn put(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
         out.push(v as u8 | 0x80);
@@ -80,12 +81,158 @@ fn ascending(entities: &[EntityState]) -> bool {
     entities.windows(2).all(|w| w[0].id < w[1].id)
 }
 
+/// Appends what an added entity carries after the gap in its id's high bits: the low 16 bits of its id and its
+/// whole state.
+pub fn encode_added(e: &EntityState, out: &mut Vec<u8>) {
+    put(out, u64::from(e.id & 0xffff));
+    for v in e.position.cm() {
+        put_signed(out, i64::from(v));
+    }
+    for v in e.velocity.cm_per_s {
+        put_signed(out, i64::from(v));
+    }
+    put(out, u64::from(e.rotation.bits));
+}
+
+/// Appends what a changed entity carries after the gap in its id's high bits: the low 16 bits of its id, its change
+/// mask and the fields that differ from `old`. Writes nothing and returns `false` if nothing differs, as the entity
+/// is then left out of the payload. `old` and `new` are the same entity; their ids are not compared.
+pub fn encode_changed(old: &EntityState, new: &EntityState, out: &mut Vec<u8>) -> bool {
+    let (pa, pb) = (old.position.cm(), new.position.cm());
+    let (va, vb) = (old.velocity.cm_per_s, new.velocity.cm_per_s);
+    let mut mask = 0u8;
+    for k in 0..3 {
+        if pa[k] != pb[k] {
+            mask |= 1 << k;
+        }
+        if va[k] != vb[k] {
+            mask |= 1 << (3 + k);
+        }
+    }
+    let (ra, rb) = (rot_parts(old.rotation.bits), rot_parts(new.rotation.bits));
+    if ra != rb {
+        mask |= if ra[0] == rb[0] { 1 << 6 } else { 1 << 7 };
+    }
+    if mask == 0 {
+        return false;
+    }
+    put(out, u64::from(new.id & 0xffff));
+    out.push(mask);
+    for k in 0..3 {
+        if mask & (1 << k) != 0 {
+            put_signed(out, i64::from(pb[k]) - i64::from(pa[k]));
+        }
+    }
+    for k in 0..3 {
+        if mask & (1 << (3 + k)) != 0 {
+            put_signed(out, i64::from(vb[k]) - i64::from(va[k]));
+        }
+    }
+    if mask & (1 << 6) != 0 {
+        for k in 1..4 {
+            put_signed(out, rb[k] - ra[k]);
+        }
+    }
+    if mask & (1 << 7) != 0 {
+        put(out, u64::from(new.rotation.bits));
+    }
+    true
+}
+
+/// A payload put together entity by entity, from what [`encode_added`] and [`encode_changed`] wrote. A server that
+/// sends the same entity to many players encodes each of those once per tick and only copies it here, after the
+/// one part that depends on the list, the gap in the id's high bits; the payload is the same bytes
+/// [`DeltaEncoder`] writes for the same snapshot.
+#[derive(Debug, Default)]
+pub struct DeltaLists {
+    lists: [Vec<u8>; 3],
+    counts: [u64; 3],
+    last: [Option<u32>; 3],
+}
+
+const REMOVED: usize = 0;
+const CHANGED: usize = 1;
+const ADDED: usize = 2;
+
+impl DeltaLists {
+    /// Empties the lists for the next payload.
+    pub fn clear(&mut self) {
+        for list in &mut self.lists {
+            list.clear();
+        }
+        self.counts = [0; 3];
+        self.last = [None; 3];
+    }
+
+    #[inline]
+    fn push(&mut self, list: usize, id: u32, tail: &[u8]) -> Result<(), EncodeError> {
+        let last = self.last[list];
+        if last.is_some_and(|last| id <= last) || self.counts[list] as usize >= MAX_ENTITIES {
+            return Err(EncodeError::OutOfRange);
+        }
+        let out = &mut self.lists[list];
+        put(out, u64::from((id >> 16) - (last.unwrap_or(0) >> 16)));
+        out.extend_from_slice(tail);
+        self.last[list] = Some(id);
+        self.counts[list] += 1;
+        Ok(())
+    }
+
+    /// Adds an entity of the baseline that is gone. Ids must ascend in each list, up to [`MAX_ENTITIES`].
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::OutOfRange`] if `id` does not ascend or the list is full.
+    #[inline]
+    pub fn remove(&mut self, id: u32) -> Result<(), EncodeError> {
+        let mut low = [0; 3];
+        let mut n = 0;
+        let mut v = id & 0xffff;
+        while v >= 0x80 {
+            low[n] = v as u8 | 0x80;
+            v >>= 7;
+            n += 1;
+        }
+        low[n] = v as u8;
+        self.push(REMOVED, id, &low[..=n])
+    }
+
+    /// Adds an entity of the baseline that changed, with what [`encode_changed`] wrote for it; the caller vouches
+    /// that `tail` is that, for this `id`.
+    ///
+    /// # Errors
+    ///
+    /// As [`DeltaLists::remove`].
+    #[inline]
+    pub fn change(&mut self, id: u32, body: &[u8]) -> Result<(), EncodeError> {
+        self.push(CHANGED, id, body)
+    }
+
+    /// Adds an entity not in the baseline, with what [`encode_added`] wrote for it, for this `id`.
+    ///
+    /// # Errors
+    ///
+    /// As [`DeltaLists::remove`].
+    #[inline]
+    pub fn add(&mut self, id: u32, body: &[u8]) -> Result<(), EncodeError> {
+        self.push(ADDED, id, body)
+    }
+
+    /// Appends the payload against a baseline `age` ticks old (0 for none) to `out`.
+    pub fn finish(&self, age: u32, out: &mut Vec<u8>) {
+        put(out, u64::from(age));
+        for (list, count) in self.lists.iter().zip(self.counts) {
+            put(out, count);
+            out.extend_from_slice(list);
+        }
+    }
+}
+
 /// Encodes snapshots; keeps its buffers between calls.
 #[derive(Debug, Default)]
 pub struct DeltaEncoder {
-    removed: Vec<u8>,
-    changed: Vec<u8>,
-    added: Vec<u8>,
+    lists: DeltaLists,
+    body: Vec<u8>,
 }
 
 impl DeltaEncoder {
@@ -109,89 +256,28 @@ impl DeltaEncoder {
         {
             return Err(EncodeError::OutOfRange);
         }
-        self.removed.clear();
-        self.changed.clear();
-        self.added.clear();
-        let (mut n_removed, mut n_changed, mut n_added) = (0u64, 0u64, 0u64);
-        let (mut last_removed, mut last_changed, mut last_added) = (0u32, 0u32, 0u32);
-        let put_id = |out: &mut Vec<u8>, id: u32, last: &mut u32| {
-            put(out, u64::from((id >> 16) - (*last >> 16)));
-            put(out, u64::from(id & 0xffff));
-            *last = id;
-        };
+        self.lists.clear();
         let (mut i, mut j) = (0, 0);
         while i < old.len() || j < current.len() {
             let ida = old.get(i).map_or(u64::MAX, |e| u64::from(e.id));
             let idb = current.get(j).map_or(u64::MAX, |e| u64::from(e.id));
+            self.body.clear();
             if ida < idb {
-                let id = old[i].id;
-                put_id(&mut self.removed, id, &mut last_removed);
-                n_removed += 1;
+                self.lists.remove(old[i].id)?;
                 i += 1;
             } else if idb < ida {
-                let e = &current[j];
-                put_id(&mut self.added, e.id, &mut last_added);
-                for v in e.position.cm() {
-                    put_signed(&mut self.added, i64::from(v));
-                }
-                for v in e.velocity.cm_per_s {
-                    put_signed(&mut self.added, i64::from(v));
-                }
-                put(&mut self.added, u64::from(e.rotation.bits));
-                n_added += 1;
+                encode_added(&current[j], &mut self.body);
+                self.lists.add(current[j].id, &self.body)?;
                 j += 1;
             } else {
-                let (a, b) = (&old[i], &current[j]);
-                let (pa, pb) = (a.position.cm(), b.position.cm());
-                let (va, vb) = (a.velocity.cm_per_s, b.velocity.cm_per_s);
-                let mut mask = 0u8;
-                for k in 0..3 {
-                    if pa[k] != pb[k] {
-                        mask |= 1 << k;
-                    }
-                    if va[k] != vb[k] {
-                        mask |= 1 << (3 + k);
-                    }
-                }
-                let (ra, rb) = (rot_parts(a.rotation.bits), rot_parts(b.rotation.bits));
-                if ra != rb {
-                    mask |= if ra[0] == rb[0] { 1 << 6 } else { 1 << 7 };
-                }
-                if mask != 0 {
-                    let c = &mut self.changed;
-                    put_id(c, b.id, &mut last_changed);
-                    c.push(mask);
-                    for k in 0..3 {
-                        if mask & (1 << k) != 0 {
-                            put_signed(c, i64::from(pb[k]) - i64::from(pa[k]));
-                        }
-                    }
-                    for k in 0..3 {
-                        if mask & (1 << (3 + k)) != 0 {
-                            put_signed(c, i64::from(vb[k]) - i64::from(va[k]));
-                        }
-                    }
-                    if mask & (1 << 6) != 0 {
-                        for k in 1..4 {
-                            put_signed(c, rb[k] - ra[k]);
-                        }
-                    }
-                    if mask & (1 << 7) != 0 {
-                        put(c, u64::from(b.rotation.bits));
-                    }
-                    n_changed += 1;
+                if encode_changed(&old[i], &current[j], &mut self.body) {
+                    self.lists.change(current[j].id, &self.body)?;
                 }
                 i += 1;
                 j += 1;
             }
         }
-        put(out, u64::from(age));
-        put(out, n_removed);
-        out.extend_from_slice(&self.removed);
-        put(out, n_changed);
-        out.extend_from_slice(&self.changed);
-        put(out, n_added);
-        out.extend_from_slice(&self.added);
+        self.lists.finish(age, out);
         Ok(())
     }
 }
