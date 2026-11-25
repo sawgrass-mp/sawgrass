@@ -9,8 +9,18 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytes = "1"
+# The module's own connection to a server (connection.rs): the client side of the gateway crate, and a
+# current-thread tokio runtime on the connection's thread. Both are already in the workspace.
+sawgrass-gateway = { path = "../sawgrass-gateway" }
 sawgrass-netcode = { path = "../sawgrass-netcode" }
 sawgrass-protocol = { path = "../sawgrass-protocol" }
+tokio = { version = "1.54.1", features = ["rt", "time", "macros"] }
+
+[dev-dependencies]
+# The end-to-end test runs the real server over loopback, as the network core's does; rcgen makes its certificate.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+sawgrass-server = { path = "../sawgrass-server" }
 
 [lints]
 workspace = true
