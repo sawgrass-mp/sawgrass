@@ -1390,6 +1390,7 @@ dependencies = [
  "rcgen",
  "sawgrass-gateway",
  "sawgrass-protocol",
+ "sawgrass-script",
  "tikv-jemallocator",
  "tokio",
 ]
