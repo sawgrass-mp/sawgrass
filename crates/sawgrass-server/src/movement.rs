@@ -5,9 +5,12 @@
 //! than the player could have covered since its last accepted state. A refused state is not applied: the player
 //! stays where it last was, for everyone, and the refusal is counted by kind for admins.
 //!
-//! A move may be as long as the speed limit times the wall-clock time since the last accepted state, plus
-//! [`MovementRules::slack_seconds`] of movement for states that arrive bunched by network jitter. Measuring wall
-//! time, not ticks run, keeps an overloaded server that skips tick slots from refusing honest players. And a refusal
+//! A move may be as long as the speed limit times the wall-clock time since the last accepted state, plus a
+//! slack for states that arrive bunched by network jitter. The slack is a purse of at most
+//! [`MovementRules::slack_seconds`] of movement: an accepted move keeps what it left unused of its allowance, up to
+//! that cap, so a bunched state may spend it but a client moving faster than the limit soon has none, and is held to
+//! the limit. Measuring wall time, not ticks run, keeps an overloaded server that skips tick slots from refusing
+//! honest players. And a refusal
 //! is never permanent: the allowance keeps growing at the speed limit from the last accepted state, faster than a
 //! player within it moves away, so a client cut off by a stall is accepted again once the allowance catches up.
 //! Navmesh checks wait for the game's map data.
@@ -27,8 +30,8 @@ pub struct MovementRules {
     /// Fastest a player may move, in m/s, on foot or in any vehicle. 150 m/s is above a fast plane's cruise in a
     /// city-sized map; the game's real figures replace it once known.
     pub max_speed: f32,
-    /// Seconds of movement at the speed limit allowed on top of the time since the last accepted state: how much
-    /// jitter is forgiven.
+    /// Most seconds of movement at the speed limit a player may keep as slack and spend on top of the time since
+    /// the last accepted state: how much jitter is forgiven.
     pub slack_seconds: f32,
     /// Lowest and highest height allowed, in metres.
     pub height: (f32, f32),
@@ -91,6 +94,8 @@ impl Violations {
 pub struct Movement {
     /// The last accepted position, in metres, and when it was accepted.
     last: Option<([f32; 3], Instant)>,
+    /// Metres of slack left, from the allowance accepted moves did not use.
+    slack: f32,
     /// What was refused.
     violations: Violations,
 }
@@ -108,6 +113,10 @@ impl Movement {
         self.last = None;
     }
 
+    fn full_slack(rules: &MovementRules) -> f32 {
+        rules.max_speed * rules.slack_seconds
+    }
+
     /// Checks `state`, received at `now`; on success it becomes the last accepted one. A refusal is counted and
     /// changes nothing else.
     ///
@@ -121,7 +130,8 @@ impl Movement {
         now: Instant,
     ) -> Result<(), Violation> {
         match self.judge(rules, state, now) {
-            Ok(()) => {
+            Ok(left) => {
+                self.slack = left.min(Self::full_slack(rules));
                 self.last = Some((state.position.to_metres(), now));
                 Ok(())
             }
@@ -132,7 +142,8 @@ impl Movement {
         }
     }
 
-    fn judge(&self, rules: &MovementRules, state: &ClientState, now: Instant) -> Result<(), Violation> {
+    /// The allowance left after the move, or why it is refused.
+    fn judge(&self, rules: &MovementRules, state: &ClientState, now: Instant) -> Result<f32, Violation> {
         let [x, y, z] = state.position.to_metres();
         let (min, size) = (rules.bounds.min, rules.bounds.size);
         let inside = x >= min.x && x < min.x + size && y >= min.y && y < min.y + size;
@@ -145,14 +156,14 @@ impl Movement {
         }
         // The first state places the player: only the bounds apply.
         let Some(([lx, ly, lz], then)) = self.last else {
-            return Ok(());
+            return Ok(Self::full_slack(rules));
         };
-        let seconds = now.saturating_duration_since(then).as_secs_f32() + rules.slack_seconds;
+        let allowed = rules.max_speed * now.saturating_duration_since(then).as_secs_f32() + self.slack;
         let distance = ((x - lx).powi(2) + (y - ly).powi(2) + (z - lz).powi(2)).sqrt();
-        if distance > rules.max_speed * seconds {
+        if distance > allowed {
             return Err(Violation::Teleport);
         }
-        Ok(())
+        Ok(allowed - distance)
     }
 
     /// What this player had refused.
@@ -309,6 +320,48 @@ mod tests {
             m.check(&rules, &at([x, 0.0, 10.0], [150.0, 0.0, 0.0]), now)
                 .expect("at the limit");
         }
+    }
+
+    #[test]
+    fn a_client_faster_than_the_limit_is_held_to_it() {
+        // 82 m a tick with velocity 0: 1,640 m/s. The slack covers the first tick at most; after that every state is
+        // refused, because each is further from the last accepted one than the limit allows.
+        let rules = MovementRules::default();
+        let mut m = Movement::new();
+        let mut now = Instant::now();
+        let mut x = 0.0f32;
+        m.check(&rules, &at([x, 0.0, 10.0], [0.0; 3]), now)
+            .expect("spawn");
+        let mut accepted = Vec::new();
+        for i in 0..50 {
+            now += DT;
+            x += 82.0;
+            if m.check(&rules, &at([x, 0.0, 10.0], [0.0; 3]), now).is_ok() {
+                accepted.push(i);
+            }
+        }
+        assert!(accepted.iter().all(|&i| i < 1), "accepted at ticks {accepted:?}");
+        assert_eq!(m.violations().teleport, 49);
+    }
+
+    #[test]
+    fn a_car_keeps_driving_after_a_two_second_stall() {
+        // 80 m/s, one state a tick; the uplink drops for two seconds, then states resume where the car really is.
+        let rules = MovementRules::default();
+        let mut m = Movement::new();
+        let mut now = Instant::now();
+        let mut x = 0.0f32;
+        let speed = [80.0, 0.0, 0.0];
+        for tick in 0..300 {
+            now += DT;
+            x += 80.0 * DT.as_secs_f32();
+            if (100..140).contains(&tick) {
+                continue;
+            }
+            m.check(&rules, &at([x, 0.0, 10.0], speed), now)
+                .unwrap_or_else(|v| panic!("tick {tick}: {v:?}"));
+        }
+        assert_eq!(m.violations().total(), 0);
     }
 
     #[test]
