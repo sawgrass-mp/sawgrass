@@ -165,6 +165,25 @@ impl Walker {
         self.yaw = dy.atan2(dx);
     }
 
+    /// Heads straight for `target` at `speed`, then pauses there until told otherwise (BOT-5: walking to a
+    /// vehicle).
+    pub fn go_to(&mut self, target: [f32; 2], speed: f32) {
+        self.target = target;
+        self.speed = speed;
+        self.pause = f32::INFINITY;
+    }
+
+    /// Starts a leg at driving speed to a new waypoint (BOT-5: a bot that took the driver's seat).
+    pub fn drive(&mut self) {
+        self.next_leg();
+        self.speed = GAITS[2].0;
+    }
+
+    /// Ends whatever the walker was doing and picks a new leg, as after a pause.
+    pub fn walk_on(&mut self) {
+        self.next_leg();
+    }
+
     /// Position in metres.
     #[must_use]
     pub fn position(&self) -> [f32; 3] {

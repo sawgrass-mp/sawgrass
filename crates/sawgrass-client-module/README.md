@@ -18,7 +18,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 | `GameApi`: every change the module makes to the game, handles with generations | `game.rs` | trait and fake done; the real one waits for the game |
 | Single-player systems switched off, ambient peds and vehicles removed | `module.rs` | done over `GameApi` |
 | Protocol asset ids to game assets, per build | `assets.rs` | done; tables live outside the repository |
-| The network core (`sawgrass-netcode`) in the module: remote entities shown, the local player sent and corrected, owned entities left to the game | `link.rs` | done; sending owned states waits for SRV-14 |
+| The network core (`sawgrass-netcode`) in the module: remote entities shown, the local player sent and corrected, owned entities left to the game and their states sent | `link.rs` | done; ped and vehicle blocks are not read from the game yet |
 | The module's own connection to a server | `connection.rs` | done |
 | The server's clock, weather and doors applied to the game | `world_state.rs` | done over `GameApi` |
 
@@ -66,6 +66,9 @@ ped = 0x2000      # the ped model for players and peds with no model
 - The runtime installs a hook given a function address and calls the module's handler with the original available.
 - The game has no generation for its entity handles; the adapter counts them (`game::Generations`).
 - Each single-player system is switched off by one game function.
+- Until the game's ped and vehicle state is read, the player is sent as a standing, unarmed ped, and an owned
+  entity's block is sent back as the server last sent it. The server keeps health, armour, seats and damage itself
+  (ADR 0006), so only the kinematics of owned entities change on the server.
 - The game keeps a door's state whether or not the door is streamed in, and lets the module hold its clock still
   between the frames that set it.
 - Weather and door ids share the asset table with models, as opaque protocol ids (ADR 0006, section 2).

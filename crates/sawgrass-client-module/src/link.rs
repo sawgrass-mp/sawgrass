@@ -14,7 +14,8 @@ use sawgrass_netcode::local::Correction;
 use sawgrass_netcode::{Client, ClientConfig, Pose as NetPose};
 use sawgrass_protocol::EntityState;
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
-use sawgrass_protocol::game::ServerEvent;
+use sawgrass_protocol::game::{OwnedState, ServerEvent};
+use sawgrass_protocol::ped::PedBlock;
 
 use crate::entity_pool::NetId;
 use crate::game::{EntityKind, Pose};
@@ -132,6 +133,8 @@ pub struct NetLink {
     last_local: Option<[f32; 3]>,
     /// Entities this client simulates, by the server's ownership epoch, with the last position measured.
     owned: BTreeMap<NetId, Owned>,
+    /// The owned states built for this frame's datagram, kept to reuse the allocation.
+    owned_states: Vec<OwnedState>,
     /// Spawns, moves and removals the world refused, for diagnostics.
     pub world_errors: u64,
 }
@@ -160,6 +163,7 @@ impl NetLink {
             shown: BTreeMap::new(),
             last_local: None,
             owned: BTreeMap::new(),
+            owned_states: Vec::new(),
             world_errors: 0,
         }
     }
@@ -188,9 +192,8 @@ impl NetLink {
         }
     }
 
-    /// The entities this client simulates and their measured state, for the owned states it sends.
-    ///
-    /// TODO(SRV-14): send these with the client state once the protocol's owned-state encoding lands.
+    /// The entities this client simulates and their measured state. Each frame's datagram carries the owned
+    /// states of those the game has spawned.
     pub fn owned(&self) -> &BTreeMap<NetId, Owned> {
         &self.owned
     }
@@ -356,7 +359,28 @@ impl NetLink {
         // smoothed over several frames, which keeps that small.
         let measured = velocity(self.last_local, local.position, dt);
         self.last_local = Some(local.position);
-        if let Some(datagram) = client.outgoing(self.now, &net_pose(&local, measured)) {
+        // Every owned entity the game has spawned and measured, in id order; `outgoing_with` rotates them across
+        // datagrams when more are owned than one carries.
+        self.owned_states.clear();
+        for (&id, owned) in &self.owned {
+            let (Some(pose), Some(info)) = (owned.pose, self.shown.get(&id)) else {
+                continue;
+            };
+            // ASSUMPTION: until the blocks task reads vehicle and NPC blocks from the game, the server's own block
+            // is sent back, so its merge (ADR 0006) keeps the block as it is and takes only the kinematics.
+            if let Ok(state) = pose.to_owned_state(id, owned.epoch, info.fields()) {
+                self.owned_states.push(state);
+            }
+        }
+        // ASSUMPTION: the player's ped block is a standing, unarmed ped until the blocks task reads it from the
+        // game. Health, armour, vehicle and seat are the server's, so this cannot change them.
+        // An error means the player's pose is off the wire ranges; the slot is spent and the server corrects.
+        if let Ok(Some(datagram)) = client.outgoing_with(
+            self.now,
+            &net_pose(&local, measured),
+            &PedBlock::default(),
+            &self.owned_states,
+        ) {
             self.outbox.push(datagram);
         }
     }

@@ -11,7 +11,7 @@ use sawgrass_client_module::table::FunctionTable;
 use sawgrass_netcode::{Client, ClientConfig};
 use sawgrass_protocol::delta::{DeltaEncoder, fragments};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
-use sawgrass_protocol::game::ServerEvent;
+use sawgrass_protocol::game::{ClientState, OwnedState, ServerEvent};
 use sawgrass_protocol::world::{Door, Environment};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position, Rotation, Velocity};
 
@@ -212,6 +212,78 @@ fn an_owned_entity_is_left_to_the_game_and_measured() {
     run(90..120, &mut module, &mut game, &mut link, &mut encoder);
     assert!(link.owned().is_empty());
     assert_ne!(game.entities[&handle].2, parked);
+}
+
+/// The owned states in the newest datagram the link sent, emptying the outbox.
+fn last_owned(link: &NetLink) -> Vec<OwnedState> {
+    let sent = link.outbox().take();
+    let last = sent.last().expect("a datagram went out");
+    let mut owned = Vec::new();
+    let (_, ped) = ClientState::decode_with_owned(&last[PacketHeader::SIZE..], &mut owned).expect("decodes");
+    assert!(ped.is_some(), "the player's ped block goes with its state");
+    owned
+}
+
+#[test]
+fn owned_entities_go_out_with_the_player_state() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [-38.0, 3.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    let inbox = link.inbox();
+    let mut encoder = DeltaEncoder::default();
+    let car = Info::with_fields(NetKind::Vehicle, AssetId(5), &[3, 4]).expect("info");
+    let mut run = |frames: std::ops::Range<u32>,
+                   module: &mut Module<FakeRuntime>,
+                   game: &mut FakeGame,
+                   link: &mut NetLink| {
+        for frame in frames {
+            if frame % 3 == 0 {
+                let tick = frame / 3;
+                let states = [state(1, tick as f32 * 0.5), state(LOCAL, 0.0)];
+                for d in snapshot_with(&mut encoder, tick, &states, &[car, Info::PLAYER]) {
+                    inbox.push(d);
+                }
+            }
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        }
+    };
+    run(0..60, &mut module, &mut game, &mut link);
+    assert!(last_owned(&link).is_empty());
+    link.set_ownership(1, 7, true);
+    let handle = module.entities().handle(1).expect("shown");
+    let parked = Pose {
+        position: [-40.0, 3.0, 30.0],
+        heading: 1.0,
+    };
+    game.set_pose(handle, parked).expect("moved by the game");
+    run(60..90, &mut module, &mut game, &mut link);
+    let owned = last_owned(&link);
+    assert_eq!(owned.len(), 1);
+    assert_eq!((owned[0].id, owned[0].epoch), (1, 7));
+    // The server's own block goes back until the game's is read, so the merge keeps it.
+    assert_eq!(owned[0].fields(), car.fields());
+    let at = owned[0].state.position.to_metres();
+    for (a, b) in at.iter().zip(parked.position) {
+        assert!(
+            (a - b).abs() < 0.01,
+            "sent {at:?}, the game has {:?}",
+            parked.position
+        );
+    }
+
+    // The server takes it back: the player's state goes out alone.
+    link.set_ownership(1, 7, false);
+    run(90..120, &mut module, &mut game, &mut link);
+    assert!(last_owned(&link).is_empty());
 }
 
 #[test]

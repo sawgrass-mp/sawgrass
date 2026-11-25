@@ -80,6 +80,9 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
         sockets: Vec::new(),
         pay_every: None,
         payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
     });
     let (tx, bot_joined) = tokio::sync::oneshot::channel::<Joined>();
     tokio::spawn(run(
