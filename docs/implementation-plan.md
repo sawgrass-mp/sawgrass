@@ -143,7 +143,7 @@ core decodes, so they land in this order.
 | SRV-18 | The server sends each entity's info and relays the players' ped blocks, keeping its own fields | NET-16 |
 | NET-17 | The vehicle block, and owned-entity states with their epoch in the client state | NET-15 |
 | SRV-13 | Vehicles, NPCs and objects as server entities that scripts and admin commands spawn and remove | NET-15 |
-| SRV-14 | Owners for vehicles and NPCs: the four rules, epochs, hand-off and the checks on owned states | SRV-13, NET-17 |
+| SRV-14 | Owners for vehicles and NPCs: the four rules, epochs, hand-off and the checks on owned states; an owner's damage values taken only for NPCs and vehicles nobody owns as property, and only as decreases | SRV-13, NET-17 |
 | SRV-15 | Seats: enter and leave requests, decided by the server | SRV-14, NET-16 |
 | SRV-16 | Hit reports checked against the snapshot history; health, armour and death on the server | NET-16 |
 | SRV-17 | World state: time, weather, doors and routing buckets, sent on join and on change | NET-15 |

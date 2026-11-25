@@ -12,9 +12,10 @@ use sawgrass_bots::walker::Area;
 use sawgrass_bots::{BotConfig, Joined, run};
 use sawgrass_gateway::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sawgrass_gateway::{Gateway, RootCertStore, connect};
-use sawgrass_netcode::interp::Sample;
+use sawgrass_netcode::interp::{Event, Sample};
 use sawgrass_netcode::local::Correction;
 use sawgrass_netcode::{Client, ClientConfig, Pose};
+use sawgrass_protocol::entity::EntityKind;
 use sawgrass_protocol::game::ServerEvent;
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader};
 use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState};
@@ -146,6 +147,7 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
     let mut shown: Vec<(f64, [f32; 3])> = Vec::new();
     let mut out: Vec<Sample> = Vec::new();
     let mut frame_count = 0usize;
+    let mut appeared = 0usize;
     while Instant::now() < stop {
         frames.tick().await;
         let now = start.elapsed().as_secs_f64();
@@ -155,7 +157,15 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
         client.remote(now, &mut out);
         if let (Some(render), Some(s)) = (client.render_tick(), out.iter().find(|s| s.id == bot.entity)) {
             shown.push((render, s.pose.position));
+            if s.event == Some(Event::Appeared) {
+                appeared += 1;
+            }
+            assert_eq!(s.info.kind, EntityKind::Player);
         }
+        assert!(
+            !client.removed().contains(&bot.entity),
+            "the bot never left the view"
+        );
         if client.clock().synced() {
             frame_count += 1;
         }
@@ -199,6 +209,7 @@ async fn an_observer_interpolates_a_walking_bot_close_to_the_server() {
         client.clock().jitter_secs() * 1000.0,
     );
     assert!(errors.len() > 100, "compared {} frames", errors.len());
+    assert_eq!(appeared, 1, "the bot is spawned once");
     // The bot was shown in almost every frame once the clock had a snapshot.
     assert!(
         shown.len() * 10 >= frame_count * 9,

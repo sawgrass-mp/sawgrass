@@ -40,6 +40,17 @@ pub struct MovementRules {
     pub bounds: MapBounds,
 }
 
+impl MovementRules {
+    /// Whether a state's position is inside the map's ground area and height range.
+    #[must_use]
+    pub fn contains(&self, state: &ClientState) -> bool {
+        let [x, y, z] = state.position.to_metres();
+        let (min, size) = (self.bounds.min, self.bounds.size);
+        let inside = x >= min.x && x < min.x + size && y >= min.y && y < min.y + size;
+        inside && z >= self.height.0 && z <= self.height.1
+    }
+}
+
 impl Default for MovementRules {
     fn default() -> Self {
         Self {
@@ -145,12 +156,10 @@ impl Movement {
 
     /// The allowance left after the move, or why it is refused.
     fn judge(&self, rules: &MovementRules, state: &ClientState, now: Instant) -> Result<f32, Violation> {
-        let [x, y, z] = state.position.to_metres();
-        let (min, size) = (rules.bounds.min, rules.bounds.size);
-        let inside = x >= min.x && x < min.x + size && y >= min.y && y < min.y + size;
-        if !inside || z < rules.height.0 || z > rules.height.1 {
+        if !rules.contains(state) {
             return Err(Violation::Bounds);
         }
+        let [x, y, z] = state.position.to_metres();
         let [vx, vy, vz] = state.velocity.to_metres_per_second();
         if vx * vx + vy * vy + vz * vz > rules.max_speed * rules.max_speed {
             return Err(Violation::Speed);

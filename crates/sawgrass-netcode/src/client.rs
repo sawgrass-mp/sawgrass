@@ -23,7 +23,8 @@ pub struct ClientConfig {
 /// The network state of one connected client.
 ///
 /// Each frame the game module passes the datagrams that arrived to [`Client::receive`], asks
-/// [`Client::remote`] where to show remote entities, applies [`Client::frame`]'s correction offset to the local
+/// [`Client::remote`] where to show remote entities (spawning those whose sample says
+/// [`Event::Appeared`](crate::interp::Event::Appeared) and removing those in [`Client::removed`]), applies [`Client::frame`]'s correction offset to the local
 /// player, and sends what [`Client::outgoing`] returns.
 #[derive(Debug)]
 pub struct Client {
@@ -72,10 +73,11 @@ impl Client {
     /// Takes one datagram from the server that arrived at local time `now`, in seconds. Returns the tick of the
     /// snapshot it completed.
     pub fn receive(&mut self, datagram: &[u8], now: f64) -> Result<u32, Skipped> {
-        let (tick, states) = self.receiver.push(datagram)?;
-        self.clock.observe(tick, now);
-        self.interp.insert(tick, states, Some(self.entity));
-        Ok(tick)
+        let snapshot = self.receiver.push(datagram)?;
+        self.clock.observe(snapshot.tick, now);
+        self.interp
+            .insert(snapshot.tick, snapshot.states, snapshot.infos, Some(self.entity));
+        Ok(snapshot.tick)
     }
 
     /// Writes the remote entities to show at local time `now` into `out`, cleared first, ascending by id. Empty
@@ -86,6 +88,13 @@ impl Client {
             Some(render) => self.interp.sample(render, out),
             None => out.clear(),
         }
+    }
+
+    /// The remote entities that stopped being shown in the last [`Client::remote`] call, ascending: remove them from
+    /// the game.
+    #[must_use]
+    pub fn removed(&self) -> &[u32] {
+        self.interp.removed()
     }
 
     /// The render tick of the last [`Client::remote`] call.
