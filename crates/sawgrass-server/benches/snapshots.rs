@@ -31,9 +31,9 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-/// Runs `ticks` ticks of `players` players in a square of `area` metres on `threads` threads; returns p50, p99 and
-/// the mean number of datagrams per player.
-fn run(players: usize, area: f32, threads: usize, ticks: usize) -> (Duration, Duration, f64) {
+/// Runs `ticks` ticks of `players` players in a square of `area` metres on `threads` threads and times all but the
+/// first `warmup`; returns p50, p99 and the mean number of datagrams per player.
+fn run(players: usize, area: f32, threads: usize, ticks: usize, warmup: usize) -> (Duration, Duration, f64) {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
@@ -78,15 +78,19 @@ fn run(players: usize, area: f32, threads: usize, ticks: usize) -> (Duration, Du
         }
         grid.rebuild();
         let tick = tick as u32 + 1;
-        history.record(tick, &states);
         pool.install(|| {
+            // Every client acknowledged the previous tick, as on a link without loss.
+            history.record(tick, &states, [tick - 1]);
+            let history = &history;
             views
                 .par_iter_mut()
                 .enumerate()
-                // Every client acknowledged the previous tick, as on a link without loss.
-                .for_each(|(me, view)| view.build(me, &grid, &history, &config, tick, tick - 1));
+                .for_each(|(me, view)| view.build(me, &grid, history, &config, tick, tick - 1));
         });
-        times.push(start.elapsed());
+        // The first ticks fill the history and every view's rings, which a running server did long ago.
+        if tick as usize > warmup {
+            times.push(start.elapsed());
+        }
         // The gateway's part: take the datagrams and drop them once sent.
         datagrams += views.iter_mut().map(|v| v.out().count()).sum::<usize>();
     }
@@ -100,10 +104,10 @@ fn run(players: usize, area: f32, threads: usize, ticks: usize) -> (Duration, Du
 
 fn main() {
     let full = std::env::args().any(|a| a == "--bench");
-    let (players, ticks) = if full { (4096, 200) } else { (256, 5) };
+    let (players, ticks, warmup) = if full { (4096, 220, 20) } else { (256, 5, 0) };
     for (name, area) in [("city, 3 km square", 3000.0), ("crowd, 1.5 km square", 1500.0)] {
         for threads in [1, 2, 4] {
-            let (p50, p99, datagrams) = run(players, area, threads, ticks);
+            let (p50, p99, datagrams) = run(players, area, threads, ticks, warmup);
             println!(
                 "{players} players, {name}, {threads} threads: tick p50 {:.1} ms, p99 {:.1} ms, \
                  {datagrams:.1} datagrams per player",
@@ -113,3 +117,8 @@ fn main() {
         }
     }
 }
+
+/// The server's allocator (SRV-6), so the per-tick buffers cost what they cost in the server.
+#[cfg(unix)]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
