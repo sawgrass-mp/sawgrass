@@ -183,6 +183,23 @@ The script runs only code from `main`, so this does not break the rule that the 
 code. When a step changes (a new step is planned, the game runs under VIctory or XCL and the client step stops waiting),
 a maintainer updates `STEPS` in `scripts/progress.py` in a normal pull request.
 
+### README pictures
+
+Every picture in `README.md` is drawn by a script from data in the repository, never by hand:
+
+| Picture | Drawn by |
+|---|---|
+| `docs/assets/progress.svg` | `python3 -I scripts/progress.py --write` (with the README's progress section) |
+| `docs/assets/load.svg` | `docs/research/two-machine-load/chart.py`, from the counted runs of its README |
+| `docs/assets/<topic>.svg` of a measured choice | `chart.py` in that topic's folder under `docs/research/`, from its `results/` |
+| `docs/assets/storage.svg` | No script yet: its figures are the tables of `docs/research/spacetimedb-vs-postgresql`; redraw it if they change |
+
+A pull request that changes what a picture shows (new results, a new load run, a changed step, merged work that the
+README describes) runs that picture's script in the same pull request and commits the new SVG with the text. Every
+README update ends with `python3 -I scripts/progress.py --write`, so the progress bar matches `main` when it merges.
+A picture's `alt` text carries its figures, so it is updated with the picture. The architecture diagram in "How it
+fits together" is Mermaid text in the README and is edited with that section.
+
 ## Security
 
 - Enable private vulnerability reporting, Dependabot alerts and secret scanning with push protection.
