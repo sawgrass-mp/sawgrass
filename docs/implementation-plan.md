@@ -122,6 +122,27 @@ Phase 4 waits for phase 1's gate, so the tick it adds work to has room for it. S
 architecture.md (gateways in their own processes) is not planned here: the gateway used about one core at 3,000
 players in BOT-3, so it is started only if the 4,096 gate shows the gateway, not the tick, as the limit.
 
+### Phase 5: sync before the game
+
+The server and protocol side of roadmap step 8, as [ADR 0006](adr/0006-entity-sync-before-the-game.md) designs it.
+None of it needs the game; every task is tested on the bots. The protocol tasks change what the client's network
+core decodes, so they land in this order.
+
+| ID | Task | Depends on |
+|---|---|---|
+| NET-15 | Entity kinds and model ids in added entities, and the `blocks` list in delta snapshots; `PROTOCOL_VERSION` 4 | ADR 0006 |
+| NET-16 | The ped block: motion, flags, weapon, aim, seat, action layers, health and armour | NET-15 |
+| NET-17 | The vehicle block, and owned-entity states with their epoch in the client state | NET-15 |
+| SRV-13 | Vehicles, NPCs and objects as server entities that scripts and admin commands spawn and remove | NET-15 |
+| SRV-14 | Owners for vehicles and NPCs: the four rules, epochs, hand-off and the checks on owned states | SRV-13, NET-17 |
+| SRV-15 | Seats: enter and leave requests, decided by the server | SRV-14, NET-16 |
+| SRV-16 | Hit reports checked against the snapshot history; health, armour and death on the server | NET-16 |
+| SRV-17 | World state: time, weather, doors and routing buckets, sent on join and on change | NET-15 |
+| BOT-5 | Bots that drive, change seats and owners and shoot, as a load-test scenario with bytes per player | SRV-14, SRV-15, SRV-16 |
+
+Gate: the BOT-5 scenario at 3,000 bots in the 1.5 km square, with phase 1's tick budget, no refused state from a
+well-behaved bot, and the bytes per player reported against architecture.md's budget.
+
 ## What this plan does not change
 
 - The decisions themselves. A step that finds a chosen option does not work on the real server stops and proposes

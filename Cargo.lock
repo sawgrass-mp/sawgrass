@@ -1130,6 +1130,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sawgrass-client-module"
+version = "0.0.0"
+dependencies = [
+ "sawgrass-protocol",
+]
+
+[[package]]
 name = "sawgrass-db"
 version = "0.0.0"
 dependencies = [
