@@ -157,6 +157,48 @@ fn players_pay_each_other_once_per_key_and_the_money_survives_a_reopen() {
 }
 
 #[test]
+fn a_retried_key_gets_its_first_answer_after_the_payee_has_left() {
+    let dir = temp_dir("left");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let writer = Writer::start(RocksStore::open(&dir).expect("store"), Config::default()).expect("writer");
+    let money = Money::open(writer.handle(), 1_000, 1).expect("money");
+    let (mut a, b, _, id_b, mut tick_loop) = two_players(&runtime, Some(money.clone()), true);
+    runtime.block_on(async {
+        assert_eq!(pay(&mut a, 1, id_b, 300).await, (PayResult::Done, 700));
+        // Refused: the ledger does not keep key 2, so after B leaves it is a new payment.
+        assert_eq!(
+            pay(&mut a, 2, id_b, 5_000).await,
+            (PayResult::InsufficientFunds, 700)
+        );
+    });
+    drop(b);
+    for _ in 0..500 {
+        if !money.knows_payee(id_b) {
+            break;
+        }
+        tick_loop.run_tick();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!money.knows_payee(id_b), "B left");
+    runtime.block_on(async {
+        // The lost-answer retry: the first answer again, and no money moves twice.
+        assert_eq!(pay(&mut a, 1, id_b, 300).await, (PayResult::Done, 700));
+        // The same key with another amount is a reused key, as it is while the payee is connected.
+        assert_eq!(pay(&mut a, 1, id_b, 301).await, (PayResult::Invalid, 700));
+        // The refused key retried with an amount A has: a new payment to a player who left, so no money goes
+        // into the ended connection's wallet.
+        assert_eq!(pay(&mut a, 2, id_b, 500).await, (PayResult::UnknownPayee, 700));
+        // A new key to the player who left.
+        assert_eq!(pay(&mut a, 3, id_b, 10).await, (PayResult::UnknownPayee, 700));
+    });
+    drop((a, tick_loop));
+    drop(runtime);
+    drop(money);
+    writer.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_server_without_money_events_refuses_payments() {
     let dir = temp_dir("refused");
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
