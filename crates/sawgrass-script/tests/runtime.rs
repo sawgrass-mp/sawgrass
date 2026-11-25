@@ -124,7 +124,9 @@ fn guarded_sort_keeps_order() {
          for i = 2, #t do assert(t[i - 1] <= t[i]) end
          local s = {{'b', 'a', 'c'}} table.sort(s, function(a, b) return a > b end)
          assert(table.concat(s) == 'cba')",
-        n = SORT_UNGUARDED * 4
+        // Just past the guard: about 10 ms in a local debug build, well inside the 100 ms test deadline on slower CI
+        // runners (four times as many elements took over 100 ms there).
+        n = SORT_UNGUARDED + 100
     ));
     assert_eq!(r.dispatch(TICK), Ok(()));
 }
