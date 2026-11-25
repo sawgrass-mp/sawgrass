@@ -9,9 +9,15 @@
 //! updates the spatial grid, recomputes each player's visible set and sends each player a whole snapshot of
 //! the entities in it, split into datagrams of at most [`SNAPSHOT_MAX_ENTITIES`] states.
 //!
-//! A player's entity is spawned with a [`NetId`] and a [`PlayerState`]; the state is the last one the client
-//! sent, applied as is. Validating movement (speed limits, teleports) belongs to the authority work and is not
-//! done here.
+//! The tick thread does not hand datagrams to quinn itself (task NET-9). It encodes each player's datagrams
+//! of a tick into one buffer sized to exactly those bytes, cuts them out of it, and passes the whole tick to one
+//! task on the gateway runtime in a single [`Batch`]. That task hands each datagram to its connection. So the tick
+//! wakes the gateway once per tick instead of once per datagram (BOT-3 measured 22% of the tick thread in those
+//! wake-ups) and allocates once per player instead of once per datagram. A datagram keeps only its own player's
+//! buffer of that tick alive, so a client that stops acknowledging pins no more than the bytes quinn queues for it
+//! (the gateway's 64 KiB datagram send buffer), plus one allocation's overhead per queued tick. At most
+//! [`OUTBOX_TICKS`] batches wait for the gateway; if it falls further behind, the tick's snapshots are dropped and
+//! counted rather than queued.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -41,6 +47,16 @@ pub struct PlayerState(pub ClientState);
 /// Events queued for one player before the oldest new one is dropped. The server sends only `Joined` and a
 /// `Stats` every few seconds, so a client that reads its stream never comes near it.
 const EVENT_QUEUE: usize = 16;
+
+/// Ticks of snapshots that may wait for the gateway's send task before a tick's snapshots are dropped.
+const OUTBOX_TICKS: usize = 2;
+
+/// One tick's datagrams for the gateway's send task: each packet with the index of its connection in `senders`.
+#[derive(Debug, Default)]
+struct Batch {
+    senders: Vec<Datagrams>,
+    packets: Vec<(u32, Bytes)>,
+}
 
 /// What one player's connection tasks leave for the tick thread. Each field holds the latest value only.
 #[derive(Debug, Default)]
@@ -91,6 +107,8 @@ pub struct Traffic {
     pub received_bytes: AtomicU64,
     /// Snapshot datagrams quinn refused to queue (connection closing, datagram too large).
     pub send_errors: AtomicU64,
+    /// Ticks whose snapshots were dropped because the gateway had not sent the previous [`OUTBOX_TICKS`] yet.
+    pub dropped_ticks: AtomicU64,
 }
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
@@ -100,6 +118,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let next_id = AtomicU32::new(1);
     let active = Arc::new(AtomicUsize::new(0));
     let accept_traffic = traffic.clone();
+    let (outbox, recycle) = spawn_sender(traffic.clone());
     tokio::spawn(async move {
         while let Some(incoming) = gateway.accept().await {
             if active.load(Ordering::Relaxed) >= config.max_players {
@@ -129,8 +148,39 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         changes: VisibilityChanges::default(),
         states: std::collections::HashMap::new(),
         scratch: Vec::new(),
+        packet: Vec::new(),
+        lens: Vec::new(),
+        outbox,
+        recycle,
         pending_stats: Arc::new(Mutex::new(None)),
     }
+}
+
+/// Starts the task that hands each tick's datagrams to their connections, and returns the channel to send it
+/// batches on and the one it returns them on, emptied, for reuse.
+fn spawn_sender(traffic: Arc<Traffic>) -> (tokio_mpsc::Sender<Batch>, mpsc::Receiver<Batch>) {
+    let (outbox, mut batches) = tokio_mpsc::channel::<Batch>(OUTBOX_TICKS);
+    let (recycle_tx, recycle) = mpsc::channel();
+    tokio::spawn(async move {
+        while let Some(mut batch) = batches.recv().await {
+            let mut sent = 0u64;
+            let mut errors = 0u64;
+            for (index, packet) in batch.packets.drain(..) {
+                let len = packet.len() as u64;
+                match batch.senders[index as usize].send(packet) {
+                    Ok(()) => sent += len,
+                    Err(_) => errors += 1,
+                }
+            }
+            batch.senders.clear();
+            traffic.sent_bytes.fetch_add(sent, Ordering::Relaxed);
+            traffic.send_errors.fetch_add(errors, Ordering::Relaxed);
+            if recycle_tx.send(batch).is_err() {
+                break;
+            }
+        }
+    });
+    (outbox, recycle)
 }
 
 /// Serves one player's connection until it ends: this task reads datagrams, one more reads events and one
@@ -214,6 +264,13 @@ pub struct Players {
     /// This tick's wire state of every placed player, by id.
     states: std::collections::HashMap<u32, EntityState>,
     scratch: Vec<EntityState>,
+    /// One player's datagrams of this tick, back to back, before they are cut into their own buffer.
+    packet: Vec<u8>,
+    /// The length of each datagram in `packet`.
+    lens: Vec<usize>,
+    outbox: tokio_mpsc::Sender<Batch>,
+    /// Batches the send task has emptied, to be filled again.
+    recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
 }
 
@@ -324,8 +381,7 @@ impl Players {
     }
 
     fn send_snapshots(&mut self, tick: u32) {
-        let mut sent = 0u64;
-        let mut errors = 0u64;
+        let mut batch = self.recycle.try_recv().unwrap_or_default();
         for player in &mut self.players {
             let Some(own) = self.states.get(&player.id) else {
                 continue;
@@ -346,25 +402,32 @@ impl Players {
                     .iter()
                     .filter_map(|id| self.states.get(&id.0)),
             );
+            let sender = batch.senders.len() as u32;
+            batch.senders.push(player.sender.clone());
             // At least one datagram: an empty snapshot still tells the client the tick advanced.
             let datagrams = self.scratch.len().div_ceil(SNAPSHOT_MAX_ENTITIES).max(1);
+            self.packet.clear();
+            self.lens.clear();
             for i in 0..datagrams {
                 let start = i * SNAPSHOT_MAX_ENTITIES;
                 let chunk = &self.scratch[start..(start + SNAPSHOT_MAX_ENTITIES).min(self.scratch.len())];
-                let mut packet = header(PacketKind::Snapshot, player.sequence, tick);
+                let begin = self.packet.len();
+                write_header(&mut self.packet, PacketKind::Snapshot, player.sequence, tick);
                 player.sequence = player.sequence.wrapping_add(1);
-                if encode_snapshot(chunk, &mut packet).is_err() {
+                if encode_snapshot(chunk, &mut self.packet).is_err() {
+                    self.packet.truncate(begin);
                     continue;
                 }
-                let len = packet.len() as u64;
-                match player.sender.send(Bytes::from(packet)) {
-                    Ok(()) => sent += len,
-                    Err(_) => errors += 1,
-                }
+                self.lens.push(self.packet.len() - begin);
             }
+            cut_datagrams(&self.packet, &self.lens, |datagram| {
+                batch.packets.push((sender, datagram))
+            });
         }
-        self.traffic.sent_bytes.fetch_add(sent, Ordering::Relaxed);
-        self.traffic.send_errors.fetch_add(errors, Ordering::Relaxed);
+        if self.outbox.try_send(batch).is_err() {
+            // The gateway is still sending the last ticks (or is gone): drop this one rather than queue more.
+            self.traffic.dropped_ticks.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn send_stats(&mut self) {
@@ -383,16 +446,27 @@ impl Players {
     }
 }
 
-fn header(kind: PacketKind, sequence: u16, tick: u32) -> Vec<u8> {
-    let mut out = vec![0; PacketHeader::SIZE];
+/// Copies `bytes`, datagrams back to back with the lengths in `lens`, into one buffer of exactly that size and
+/// hands each datagram, cut from it, to `out` in order. The datagrams share that buffer and nothing else.
+fn cut_datagrams(bytes: &[u8], lens: &[usize], mut out: impl FnMut(Bytes)) {
+    let mut buffer = Bytes::copy_from_slice(bytes);
+    for &len in lens {
+        out(buffer.split_to(len));
+    }
+}
+
+/// Appends a packet header to `out`.
+fn write_header(out: &mut Vec<u8>, kind: PacketKind, sequence: u16, tick: u32) {
+    let mut buf = [0; PacketHeader::SIZE];
     let header = PacketHeader { kind, sequence, tick };
     // The buffer is exactly the header size, so encoding cannot fail.
-    let _ = header.encode(&mut out);
-    out
+    let _ = header.encode(&mut buf);
+    out.extend_from_slice(&buf);
 }
 
 fn event_packet(event: &ServerEvent, tick: u64) -> Vec<u8> {
-    let mut packet = header(PacketKind::Event, 0, tick as u32);
+    let mut packet = Vec::new();
+    write_header(&mut packet, PacketKind::Event, 0, tick as u32);
     event.encode(&mut packet);
     packet
 }
@@ -412,4 +486,28 @@ pub fn bind_gateway(
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One player's datagrams of a tick come out in order, as one buffer of exactly their bytes: contiguous, with
+    /// nothing before or after them that a queued datagram could keep alive.
+    #[test]
+    fn a_players_datagrams_share_one_buffer_of_exactly_their_size() {
+        let bytes: Vec<u8> = (0..2500u32).map(|i| i as u8).collect();
+        let lens = [1100, 1100, 300];
+        let mut cut = Vec::new();
+        cut_datagrams(&bytes, &lens, |d| cut.push(d));
+        assert_eq!(cut.iter().map(Bytes::len).collect::<Vec<_>>(), lens);
+        assert_eq!(cut.concat(), bytes);
+        for pair in cut.windows(2) {
+            assert_eq!(pair[0].as_ptr().wrapping_add(pair[0].len()), pair[1].as_ptr());
+        }
+        // Dropping all but the last leaves it whole and unchanged: it owns nothing but its share of the buffer.
+        let last = cut.pop().expect("last");
+        drop(cut);
+        assert_eq!(&last[..], &bytes[2200..]);
+    }
 }
