@@ -13,12 +13,130 @@ whichever comes first, runs the game to a world with a controllable character (A
 4. **Stage 3: client in the game.** A runtime adapter for the first runtime that gets there (VIctory or XCL), a
    module-loading API proposed upstream, hooks, sync of players, vehicles and damage, in-game UI. The other
    runtime's adapter follows. Runtime-independent client code (sync and prediction over the fake `GameApi`) can
-   start earlier.
+   start earlier. Two steps below: [the client module](#7-client-module-in-the-game) and
+   [sync in the game](#8-sync-in-the-game).
 5. **Stage 4: launcher and releases.** Signing, auto-update, server list.
 6. **Stage 5: scale.** Real players, zones only if measurements call for them.
 
 The order in which the measured choices move into the server, with task IDs and gates, is in
 [implementation-plan.md](implementation-plan.md).
+
+## Steps in detail
+
+The README's progress bar shows these ten steps in order. Each one lists its work, what it depends on, its risks
+and its difficulty. Difficulty estimates risk and unknowns, not size: 🟢 easy, 🟡 medium, 🟠 hard, 🔴 very hard.
+"Before the game" says whether a piece of work can be built and tested on the bots and the fake `GameApi` now, or
+only once the game runs on PC. Steps 3 to 6 have task IDs in [implementation-plan.md](implementation-plan.md); the
+later steps get theirs when they are planned.
+
+### 1. Foundation
+
+🟢 Easy. Stage 0, done. Workspace, rules for people and agents, CI gates, the claim bot, the dispatcher and the review
+agent.
+
+### 2. Prototype and measurements
+
+🟡 Medium. Stage 1, done. A first server, the protocol and the load-test bots, then a measured choice for each part of
+the stack: storage, transport, serialization, compression, the visibility index, scripting, voice, the tick model and
+the allocator, checked again on the real server under the bots (BOT-3). The results are in [research/](research/).
+
+### 3. Make the tick fit
+
+🟠 Hard. Stage 1, plan phase 1. jemalloc, one hand-off of datagrams per tick from reused buffers, dense entity slots
+with generations, the dense 50 m grid with bitset visible sets, per-player work in parallel on rayon.
+
+- Depends on: the measurements of step 2.
+- Risks: parallel work must leave the world bit for bit as the serial tick does; the slot change touches every part
+  of the server.
+- Gate: 3,000 bots in the 1.5 km square on one machine, no dropped bots, tick p99 under 35 ms (70% of 20 Hz).
+
+### 4. Fewer bytes, then 30 Hz
+
+🟡 Medium. Stage 1, plan phase 2. postcard for every payload, delta snapshots against the last acknowledged one,
+visible sets ranked and cut to a byte budget per player, 30 Hz by default.
+
+- Depends on: step 3 (dense slots and the parallel tick).
+- Risks: a delta against a baseline the client no longer has; a protocol version bump that every peer follows.
+- Gate: 4,096 bots from a second machine, the stage 1 gate.
+
+### 5. Reliability of the realtime core
+
+🟡 Medium. Stage 1, plan phase 3. Movement validation (speed, teleport, map bounds), per-connection limits, an
+overload policy that sheds load instead of falling behind, and bots that misbehave on purpose.
+
+- Depends on: step 4 for the final message formats.
+- Risks: abuse cases nobody thought of; the bots only find what they are told to try.
+
+### 6. Roleplay base
+
+🟠 Hard. Stage 2, plan phase 4. The single writer with RocksDB and group commit, its WAL copied to a second machine
+before a change is acknowledged, the PostgreSQL archive, the Luau runtime with deadlines and memory caps, the voice
+relay. Then the base resources: characters, money, inventory, property, jobs, and admin tools.
+
+- Depends on: step 3's gate, so the tick has room for the work this step adds.
+- Risks: money created or lost on a crash or a failover; a script that hangs or exhausts the server; a scripting
+  API that is hard to change once resources depend on it.
+
+### 7. Client module in the game
+
+🔴 Very hard. Stage 3, waits for the game. This is where the hardest part starts: the game is undocumented, it runs on
+a young runtime, and every game or runtime update can move what the module relies on. VIctory first, XCL second ([ADR
+0004](adr/0004-victory-client-runtime.md)).
+
+| Work | Before the game |
+|---|---|
+| `Runtime` adapter for VIctory: load the module after the title starts, through a small module-loading and hook API proposed upstream, not a fork or an injector | Only the upstream proposal |
+| Find game functions at run time per runtime and game build, and keep that table per build; no bytes from the executable in this repository | No |
+| Hooks: the game's frame, creation and removal of peds, vehicles and objects, player input, camera, world streaming around remote players | No |
+| Turn off single-player systems: story, ambient traffic and pedestrians, police and wanted level, saves; the server decides who and what exists | No |
+| The real `GameApi` over the adapter; the fake one already serves the bots and tests | The trait and the fake: yes |
+| Connect to the server, download resources, show errors in the game | The client connection code: yes |
+| XCL adapter, after the licence question in ADR 0004 is settled | No |
+
+- Depends on: VIctory or XCL running the game to a world with a controllable character; the upstream loading API.
+- Risks: every game patch can move functions, so finding them must be automated and checked per build; a runtime
+  that changes faster than the adapter; the licence question for XCL. Nothing here works around protection or keys:
+  the module only runs inside a runtime the player already uses.
+
+### 8. Sync in the game
+
+🔴 Very hard. Stage 3, waits for the game. Making many players look right in one world, on physics and animation the
+server does not own ([architecture.md, Authority](architecture.md#authority)).
+
+| Work | Before the game |
+|---|---|
+| Remote players: interpolation between snapshots, prediction of the local player and correction from the server | Yes, over the fake `GameApi` with the bots |
+| Animations and ped tasks (walking, running, entering vehicles, weapons, emotes, ragdoll): a compact state the game can replay; the largest piece of work | The replicated state and its encoding: yes; mapping it to the game: no |
+| Vehicles: an owner simulates each one and the server checks it; seats and passengers, entering and leaving, damage, hand-off of ownership | The ownership rules and checks on the server: yes |
+| Weapons and damage: the client reports a hit, the server decides it | The server's checks: yes |
+| World state: time, weather, doors, objects, interiors, owned by the server | The server side: yes |
+| NPCs a server spawns, simulated by an owner like vehicles | The server side: yes |
+| In-game UI and chat, client Luau scripts in the sandbox, voice capture and playback by position | Script runtime and voice relay: yes (step 6); the game side: no |
+
+- Depends on: step 7.
+- Risks: game physics that differ between clients; animation states with no clean way to replicate; ownership
+  hand-off at speed; cheating, since the client is open source and nothing on it can be trusted.
+- Gate: players see each other move, drive and fight in one world, at the planned rate and budget.
+
+### 9. Launcher and releases
+
+🟡 Medium. Stage 4. A launcher (Rust and Tauri) that detects the player's runtime, checks its build against that
+runtime's hash manifest, installs the signed client module, keeps it updated, lists servers and downloads their
+resources; a release process with signing keys outside the repository.
+
+- Depends on: step 7 for something to launch; the server list can start earlier.
+- Risks: a security boundary on every player's machine, so signing and updates must not become a way to ship
+  someone else's code. It never downloads the game or a runtime's converted data.
+
+### 10. Scale
+
+🔴 Very hard. Stage 5. Real players on public servers. Gateways in their own processes if the 4,096 gate shows them as
+the limit; zones with entity hand-off only if measurements call for them; operations, monitoring, moderation and
+admin tools.
+
+- Depends on: steps 8 and 9.
+- Risks: real players behave unlike bots; zones are the most error-prone step of the architecture
+  ([Scaling path](architecture.md#scaling-path)).
 
 ## First tasks
 

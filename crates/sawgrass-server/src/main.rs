@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
-//!                 [--max-players N] [--stats-to-clients]
+//!                 [--max-players N] [--tick-threads N] [--stats-to-clients]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -15,6 +15,8 @@
 //!   `sawgrass-bots gen-cert` writes a self-signed pair for tests.
 //! - `--net-threads N`: threads for the gateway runtime (default: all cores but the tick thread's).
 //! - `--max-players N`: refuse connections beyond N (default 4096).
+//! - `--tick-threads N`: threads that build players' snapshots in parallel during a tick (default: every core
+//!   the process may run on; 1 builds them on the tick thread).
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
 
 use std::net::SocketAddr;
@@ -43,6 +45,7 @@ struct Args {
     key: Option<PathBuf>,
     net_threads: Option<usize>,
     max_players: usize,
+    tick_threads: Option<usize>,
     stats_to_clients: bool,
 }
 
@@ -55,6 +58,7 @@ fn parse_args() -> Result<Args, String> {
         key: None,
         net_threads: None,
         max_players: net::ListenConfig::default().max_players,
+        tick_threads: None,
         stats_to_clients: false,
     };
     let mut iter = std::env::args().skip(1);
@@ -85,6 +89,12 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--max-players: {e}"))?;
             }
+            "--tick-threads" => {
+                let n: usize = value("--tick-threads")?
+                    .parse()
+                    .map_err(|e| format!("--tick-threads: {e}"))?;
+                args.tick_threads = Some(n.max(1));
+            }
             "--stats-to-clients" => args.stats_to_clients = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -112,7 +122,7 @@ fn main() -> ExitCode {
             eprintln!("sawgrass-server: {err}");
             eprintln!(
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
-                 [--net-threads N] [--max-players N] [--stats-to-clients]"
+                 [--net-threads N] [--max-players N] [--tick-threads N] [--stats-to-clients]"
             );
             return ExitCode::from(2);
         }
@@ -155,6 +165,7 @@ fn main() -> ExitCode {
                         net::ListenConfig {
                             stats_to_clients: args.stats_to_clients,
                             max_players: args.max_players,
+                            tick_threads: args.tick_threads.unwrap_or(cores),
                         },
                     )
                 }
@@ -210,10 +221,11 @@ fn main() -> ExitCode {
                     received_bytes_per_sec: per_sec(received - last.4),
                 };
                 line += &format!(
-                    ", sent {} kB/s, received {} kB/s, send errors {}",
+                    ", sent {} kB/s, received {} kB/s, send errors {}, dropped ticks {}",
                     report.sent_bytes_per_sec / 1000,
                     report.received_bytes_per_sec / 1000,
-                    traffic.send_errors.load(Ordering::Relaxed)
+                    traffic.send_errors.load(Ordering::Relaxed),
+                    traffic.dropped_ticks.load(Ordering::Relaxed)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);

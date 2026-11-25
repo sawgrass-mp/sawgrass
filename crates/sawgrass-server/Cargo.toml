@@ -13,6 +13,8 @@ hecs = { version = "0.11", default-features = false, features = ["std"] }
 bytes = "1"
 sawgrass-gateway = { path = "../sawgrass-gateway" }
 sawgrass-protocol = { path = "../sawgrass-protocol" }
+# Players' snapshots built in parallel (SRV-4 chose players in parallel on rayon; SRV-7).
+rayon = "1"
 # The gateway runs on tokio (quinn's runtime) next to the tick thread.
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync"] }
 
@@ -28,6 +30,10 @@ rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "
 
 [[bench]]
 name = "visibility"
+harness = false
+
+[[bench]]
+name = "snapshots"
 harness = false
 
 [lints]
