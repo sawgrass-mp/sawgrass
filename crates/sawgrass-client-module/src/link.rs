@@ -14,7 +14,7 @@ use sawgrass_netcode::local::Correction;
 use sawgrass_netcode::{Client, ClientConfig, Pose as NetPose};
 use sawgrass_protocol::combat::{Hit, Shot};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
-use sawgrass_protocol::game::{ClientEvent, OwnedState, ServerEvent};
+use sawgrass_protocol::game::{ClientEvent, OwnedState, SeatAnswer, ServerEvent};
 use sawgrass_protocol::ped::PedBlock;
 use sawgrass_protocol::{EntityState, Position};
 
@@ -158,6 +158,10 @@ pub struct NetLink {
     last_local: Option<[f32; 3]>,
     /// Entities this client simulates, by the server's ownership epoch, with the last position measured.
     owned: BTreeMap<NetId, Owned>,
+    /// The vehicle and seat the server has the local player in.
+    seat: Option<(NetId, u8)>,
+    /// The server's last answer about the local player's seat, with the vehicle and seat it was about.
+    seat_answer: Option<(NetId, u8, SeatAnswer)>,
     /// The owned states built for this frame's datagram, kept to reuse the allocation.
     owned_states: Vec<OwnedState>,
     /// Spawns, moves and removals the world refused, for diagnostics.
@@ -189,6 +193,8 @@ impl NetLink {
             shown: BTreeMap::new(),
             last_local: None,
             owned: BTreeMap::new(),
+            seat: None,
+            seat_answer: None,
             owned_states: Vec::new(),
             world_errors: 0,
         }
@@ -248,8 +254,13 @@ impl NetLink {
                 ServerEvent::Ownership { entity, epoch, yours } => self.set_ownership(entity, epoch, yours),
                 ServerEvent::Environment(environment) => self.world_state.set_environment(environment),
                 ServerEvent::Door(door) => self.world_state.set_door(door),
-                // Server figures are for load tests, and events of later features (payments, seats) are handled by
-                // the code that adds them.
+                ServerEvent::Seat {
+                    vehicle,
+                    seat,
+                    answer,
+                } => self.seat_answered(vehicle, seat, answer, world),
+                // Server figures are for load tests, and events of later features (payments) are handled by the
+                // code that adds them.
                 _ => {}
             }
         }
@@ -264,6 +275,8 @@ impl NetLink {
             self.count(result);
         }
         self.owned.clear();
+        self.seat = None;
+        self.seat_answer = None;
         self.samples.clear();
         self.last_local = None;
         self.client = Some(Client::new(entity, tick_hz, self.config));
@@ -288,6 +301,37 @@ impl NetLink {
             let result = world.set_pose(state.id, game_pose(&NetPose::from_state(state)));
             self.count(result);
         }
+    }
+
+    /// The server's answer to a seat request, or its word that the player left a seat. Answers come in request
+    /// order on the reliable stream, so the last one is the server's current view.
+    fn seat_answered(&mut self, vehicle: NetId, seat: u8, answer: SeatAnswer, world: &mut World<'_>) {
+        self.seat_answer = Some((vehicle, seat, answer));
+        match answer {
+            SeatAnswer::Granted => {
+                self.seat = Some((vehicle, seat));
+                let result = world.seat_local_player(vehicle, seat);
+                self.count(result);
+            }
+            SeatAnswer::Left => {
+                self.seat = None;
+                // The server took the player out (it died, the vehicle went), or confirms what the game did.
+                let result = world.unseat_local_player();
+                self.count(result);
+            }
+            // A refusal changes nothing; the answer is kept for the interface to show.
+            _ => {}
+        }
+    }
+
+    /// The vehicle and seat the server has the local player in.
+    pub fn seat(&self) -> Option<(NetId, u8)> {
+        self.seat
+    }
+
+    /// The server's last seat answer, for the interface: the vehicle and seat it was about, and the answer.
+    pub fn seat_answer(&self) -> Option<(NetId, u8, SeatAnswer)> {
+        self.seat_answer
     }
 
     /// Queues a shot for the server, stamped with the newest snapshot tick, which is what the player saw the targets
@@ -454,6 +498,21 @@ impl NetCore for NetLink {
                 self.shown.remove(id);
             }
             CoreEvent::Shot(report) => self.report_shot(report),
+            CoreEvent::EnterSeat { vehicle, seat } => {
+                if self.client.is_some() {
+                    self.client_events.push(ClientEvent::EnterSeat {
+                        vehicle: *vehicle,
+                        seat: *seat,
+                    });
+                }
+            }
+            // Only a seat the server knows of is left: when the module took the player out on the server's word,
+            // the game reports that too, and the server is not asked again.
+            CoreEvent::LeftSeat => {
+                if self.client.is_some() && self.seat.is_some() {
+                    self.client_events.push(ClientEvent::LeaveSeat);
+                }
+            }
             CoreEvent::Input(_) | CoreEvent::Camera(_) => {}
         }
     }

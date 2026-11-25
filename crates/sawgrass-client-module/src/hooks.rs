@@ -35,10 +35,19 @@ pub enum HookPoint {
     /// ASSUMPTION: one function sees the shooter, the weapon and every hit of the shot, a shotgun's pellets
     /// included. If the hits come one by one, the adapter gathers them per shot before it pushes the event.
     WeaponFire,
+    /// Where a ped starts into a vehicle seat, reported as [`GameEvent::SeatRequested`].
+    ///
+    /// ASSUMPTION: for the local player the adapter refuses the game's own entry (it does not call the original),
+    /// since the server decides who sits where; the module seats the player when the server grants it. Other
+    /// peds are seated by the module only.
+    SeatEnter,
+    /// Where a ped leaves a vehicle seat, by itself or thrown out by the vehicle's physics, reported as
+    /// [`GameEvent::SeatLeft`]. The game goes ahead: the server always grants leaving.
+    SeatLeave,
 }
 
 impl HookPoint {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Frame,
         Self::PedCreate,
         Self::PedRemove,
@@ -50,6 +59,8 @@ impl HookPoint {
         Self::CameraUpdate,
         Self::StreamingUpdate,
         Self::WeaponFire,
+        Self::SeatEnter,
+        Self::SeatLeave,
     ];
 
     /// The function table name of the hooked function.
@@ -66,6 +77,8 @@ impl HookPoint {
             Self::CameraUpdate => "camera_update",
             Self::StreamingUpdate => "streaming_update",
             Self::WeaponFire => "weapon_fire",
+            Self::SeatEnter => "ped_seat_enter",
+            Self::SeatLeave => "ped_seat_leave",
         }
     }
 }
@@ -86,6 +99,16 @@ pub enum GameEvent {
     Camera(CameraPose),
     /// A ped fired once. Only the local player's shots are reported to the server.
     Shot(GameShot),
+    /// A ped tried to get into `seat` (0 the driver's) of `vehicle`.
+    SeatRequested {
+        ped: GameHandle,
+        vehicle: GameHandle,
+        seat: u8,
+    },
+    /// A ped left the seat it sat in.
+    SeatLeft {
+        ped: GameHandle,
+    },
 }
 
 /// Where hooks queue events. Cloning gives another handle to the same queue.

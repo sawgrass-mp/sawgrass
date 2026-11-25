@@ -22,6 +22,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 | The local player's shots reported, and the weapon in hand sent with its state | `module.rs`, `link.rs` | done over `GameApi` and the `weapon_fire` hook |
 | The module's own connection to a server | `connection.rs` | done; it also sends the link's client events |
 | The server's clock, weather and doors applied to the game | `world_state.rs` | done over `GameApi` |
+| The local player's seat: asked of the server, seated on its answer | `module.rs`, `link.rs` | done over `GameApi` and the seat hooks; remote peds' seats wait for the blocks task |
 
 `tests/two_clients.rs` is the first milestone without the game: two modules, each in its own fake game, connect to
 the real server over loopback and each shows the other player's ped where that player stands.
@@ -33,8 +34,9 @@ None of this can be in the repository; it comes from a maintainer with the game:
 1. A VIctory build that loads the module and installs hooks: the upstream API from ADR 0004, or a local build of
    VIctory until it lands. `VictoryRuntime` is written against it.
 2. A function table for the exact game build: one pattern for each function `module::required_functions()` lists
-   (the frame, creation and removal of peds, vehicles and objects, input, camera, streaming, weapon fire, five
-   single-player switches). The module refuses to start without it, and refuses a table for another build.
+   (the frame, creation and removal of peds, vehicles and objects, input, camera, streaming, weapon fire, seat
+   enter and leave, five single-player switches). The module refuses to start without it, and refuses a table for
+   another build.
 3. An asset table for that build, with at least the `ped` line (the model players are shown with) and one vehicle,
    plus each weapon the server's resources allow (a shot with a weapon missing from it is not reported) and a line
    for each weather and each door they name (ADR 0006, assumption A4).
@@ -68,6 +70,8 @@ ped = 0x2000      # the ped model for players and peds with no model
 - The runtime installs a hook given a function address and calls the module's handler with the original available.
 - The game has no generation for its entity handles; the adapter counts them (`game::Generations`).
 - Each single-player system is switched off by one game function.
+- The enter-seat hook can keep the game from seating the local player, so that the server decides; the module
+  then seats it with `GameApi::enter_seat` on the server's grant.
 - One game function resolves a pull of the trigger with all of its hits, a shotgun's pellets included.
 - Until the game's ped and vehicle state is read, the player is sent as a standing ped holding the weapon
   `GameApi::held_weapon` reports, and an owned entity's block is sent back as the server last sent it. The server

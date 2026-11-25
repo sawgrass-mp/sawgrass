@@ -182,6 +182,12 @@ pub trait GameApi {
     fn local_player(&self) -> Option<GameHandle>;
     /// The weapon in a ped's hand; `None` unarmed or for no such ped.
     fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset>;
+    /// The vehicle and seat (0 the driver's) a ped sits in.
+    fn seat(&self, ped: GameHandle) -> Option<(GameHandle, u8)>;
+    /// Puts a ped in `seat` of `vehicle` at once, without the walk to the door.
+    fn enter_seat(&mut self, ped: GameHandle, vehicle: GameHandle, seat: u8) -> Result<(), GameError>;
+    /// Takes a ped out of the seat it sits in.
+    fn leave_seat(&mut self, ped: GameHandle) -> Result<(), GameError>;
     /// Keeps the world loaded around these points, the positions of remote players, besides the camera.
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]);
     fn disable(&mut self, system: SinglePlayerSystem) -> Result<(), GameError>;
@@ -221,6 +227,8 @@ pub struct FakeGame {
     pub disabled: Vec<SinglePlayerSystem>,
     /// The weapon in each armed ped's hand.
     pub weapons: BTreeMap<GameHandle, GameAsset>,
+    /// The vehicle and seat of each seated ped.
+    pub seats: BTreeMap<GameHandle, (GameHandle, u8)>,
     /// The minute of the day last set.
     pub clock: Option<f32>,
     pub weather: Option<WeatherState>,
@@ -272,6 +280,25 @@ impl GameApi for FakeGame {
 
     fn local_player(&self) -> Option<GameHandle> {
         self.local_player
+    }
+
+    fn seat(&self, ped: GameHandle) -> Option<(GameHandle, u8)> {
+        self.seats.get(&ped).copied()
+    }
+
+    fn enter_seat(&mut self, ped: GameHandle, vehicle: GameHandle, seat: u8) -> Result<(), GameError> {
+        for handle in [ped, vehicle] {
+            if !self.entities.contains_key(&handle) {
+                return Err(GameError::NoSuchEntity(handle));
+            }
+        }
+        self.seats.insert(ped, (vehicle, seat));
+        Ok(())
+    }
+
+    fn leave_seat(&mut self, ped: GameHandle) -> Result<(), GameError> {
+        self.seats.remove(&ped);
+        Ok(())
     }
 
     fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset> {
