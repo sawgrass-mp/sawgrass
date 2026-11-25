@@ -197,13 +197,30 @@ class Marker(unittest.TestCase):
         self.assertEqual(tasks["NET-1"]["step"], 1)  # finished work stays in its step
         self.assertEqual(keys(list(tasks.values()), self.plan)[:3], ["done", "done", "current"])
         block = progress.render_markdown(list(tasks.values()), "o/r", self.plan)
-        self.assertIn("We are here: step 3 of 9", block)
+        self.assertIn("We are here: step 3 of 10", block)
         self.assertIn("🟢 [NET-14](https://github.com/o/r/issues/3).", block)
         self.assertIn("| Outside the plan |", block)
 
+    def test_every_step_is_described_with_a_difficulty(self):
+        for step in progress.STEPS:
+            self.assertIn(step["difficulty"], progress.DIFFICULTY, step["name"])
+            self.assertTrue(step["why"] and step["covers"], step["name"])
+        block = progress.render_markdown(self.tasks(), "o/r", self.plan)
+        self.assertIn("| 🔴 **Very hard**<br><sub>", block)
+        svg = progress.render_svg(self.tasks(), self.plan)
+        self.assertEqual(svg.count('class="d"'), len(progress.STEPS))
+
+    def test_every_step_links_to_its_roadmap_section(self):
+        import re
+        roadmap = open(os.path.join(progress.ROOT, progress.ROADMAP), encoding="utf-8").read()
+        headings = {re.sub(r"[^a-z0-9 -]", "", h.lower()).replace(" ", "-")
+                    for h in re.findall(r"^### (.+)$", roadmap, re.M)}
+        for i, step in enumerate(progress.STEPS):
+            self.assertIn(progress.roadmap_anchor(i, step), headings, step["name"])
+
     def test_waiting_step(self):
         rows = progress.step_rows(self.tasks(), self.plan)
-        client = next(r for r in rows if r[0]["name"] == "Client in the game")
+        client = next(r for r in rows if r[0]["name"] == "Client module in the game")
         self.assertEqual((client[2], client[3], client[4]), (0, "waiting for the game", "waiting"))
 
     def test_weighted_fill(self):
@@ -221,7 +238,7 @@ class Render(unittest.TestCase):
         block = progress.render_markdown(self.tasks, "o/r", {"NET-2": (1, "Connection")})
         self.assertTrue(block.startswith(progress.START) and block.endswith(progress.END))
         self.assertIn("[NET-1](https://github.com/o/r/issues/1): Packet \\| format", block)
-        self.assertIn("We are here: step 3 of 9, make the tick fit", block)
+        self.assertIn("We are here: step 3 of 10, make the tick fit", block)
         self.assertIn("0 of 1 done: 🟢 [NET-2](https://github.com/o/r/issues/2) |", block)
         self.assertEqual(block.count(progress.MARKER), 2)  # the sentence and the step's row
 
