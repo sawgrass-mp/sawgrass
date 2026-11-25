@@ -63,6 +63,16 @@ use crate::snapshot::{History, View};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetId(pub u32);
 
+/// A player who joined or left during a tick, by entity id ([`Slot::wire_id`]), for systems after `net` such as
+/// scripts. See [`Players::roster`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Roster {
+    /// The player was given an entity id.
+    Joined(u32),
+    /// The player left; the id may be given to someone else from the next tick.
+    Left(u32),
+}
+
 /// The last state a player's client sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerState(pub ClientState);
@@ -301,6 +311,8 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
             .flatten(),
         states: Vec::new(),
         peds: Vec::new(),
+        spawned: Vec::new(),
+        tick: 0,
         infos: Vec::new(),
         info_ticks: Vec::new(),
         history: History::new(),
@@ -308,6 +320,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
         shutdown: Shutdown(shutdown),
+        roster: None,
     }
 }
 
@@ -494,6 +507,10 @@ pub struct Players {
     states: Vec<Option<EntityState>>,
     /// Every player's ped block, by slot index, as the server holds it.
     peds: Vec<PedBlock>,
+    /// Whether each slot holds an entity [`Players::spawn`] made.
+    spawned: Vec<bool>,
+    /// The tick being run, or the last one run.
+    tick: u32,
     /// The info each slot sends, built from `peds`, and the tick it last changed at.
     infos: Vec<Info>,
     info_ticks: Vec<u32>,
@@ -504,6 +521,7 @@ pub struct Players {
     recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
     shutdown: Shutdown,
+    roster: Option<mpsc::Sender<Roster>>,
 }
 
 /// Closes the gateway from outside the tick: every connection, and no new ones.
@@ -537,6 +555,13 @@ impl Players {
         self.pending_stats.clone()
     }
 
+    /// Joins and leaves from now on, in the order the ticks apply them.
+    pub fn roster(&mut self) -> mpsc::Receiver<Roster> {
+        let (tx, rx) = mpsc::channel();
+        self.roster = Some(tx);
+        rx
+    }
+
     /// Players connected.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -550,7 +575,71 @@ impl Players {
     }
 
     /// Applies what arrived since the last tick, then sends every player its snapshot for `info.tick`.
+    /// Makes room for slot `index` in every per-slot array.
+    fn grow(&mut self, index: usize) {
+        if self.players.len() <= index {
+            self.players.resize_with(index + 1, || None);
+            self.states.resize(index + 1, None);
+            self.peds.resize(index + 1, PedBlock::default());
+            self.infos.resize(index + 1, Info::PLAYER);
+            self.info_ticks.resize(index + 1, 0);
+        }
+    }
+
+    /// Spawns an entity that is not a player (a vehicle, an NPC or an object; ADR 0006) with its info and
+    /// kinematics, and returns its id, which snapshots carry from the next tick on. `None` if `info` is a player's,
+    /// the position is outside the map, or every slot is taken. The server's scripts and admin commands spawn
+    /// through this; who simulates the entity is decided by its ownership (SRV-14).
+    pub fn spawn(&mut self, info: Info, state: ClientState) -> Option<u32> {
+        if info.kind == EntityKind::Player || !self.movement.contains(&state) {
+            return None;
+        }
+        let [x, y, _] = state.position.to_metres();
+        let slot = self.slots.alloc()?;
+        let index = slot.index as usize;
+        self.grow(index);
+        let id = slot.wire_id();
+        self.states[index] = Some(EntityState {
+            id,
+            position: state.position,
+            velocity: state.velocity,
+            rotation: state.rotation,
+        });
+        self.infos[index] = info;
+        self.info_ticks[index] = self.tick;
+        self.grid.upsert(EntityId(slot.index), Point::new(x, y));
+        self.spawned.resize(self.spawned.len().max(index + 1), false);
+        self.spawned[index] = true;
+        Some(id)
+    }
+
+    /// Removes an entity [`Players::spawn`] made. `false` for an id that is not one, or no longer is.
+    pub fn despawn(&mut self, id: u32) -> bool {
+        let slot = Slot {
+            index: id >> 16,
+            generation: id as u16,
+        };
+        let index = slot.index as usize;
+        if self.spawned(id).is_none() {
+            return false;
+        }
+        self.spawned[index] = false;
+        self.states[index] = None;
+        self.infos[index] = Info::PLAYER;
+        self.grid.remove(EntityId(slot.index));
+        self.slots.free(slot)
+    }
+
+    /// The info and state of an entity [`Players::spawn`] made.
+    #[must_use]
+    pub fn spawned(&self, id: u32) -> Option<(Info, EntityState)> {
+        let index = (id >> 16) as usize;
+        let state = self.states.get(index).copied().flatten().filter(|s| s.id == id)?;
+        (self.spawned.get(index) == Some(&true)).then(|| (self.infos[index], state))
+    }
+
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
+        self.tick = info.tick as u32;
         self.apply_inbound(world, info);
         self.apply_states(world, info.tick as u32);
         self.grid.rebuild();
@@ -583,14 +672,11 @@ impl Players {
                         info.tick,
                     ));
                     let index = slot.index as usize;
-                    if self.players.len() <= index {
-                        self.players.resize_with(index + 1, || None);
-                        self.states.resize(index + 1, None);
-                        self.peds.resize(index + 1, PedBlock::default());
-                        self.infos.resize(index + 1, Info::PLAYER);
-                        self.info_ticks.resize(index + 1, 0);
-                    }
+                    self.grow(index);
                     self.by_connection.insert(id, slot);
+                    if let Some(roster) = &self.roster {
+                        let _ = roster.send(Roster::Joined(slot.wire_id()));
+                    }
                     self.peds[index] = PedBlock {
                         health: SPAWN_HEALTH,
                         ..PedBlock::default()
@@ -617,6 +703,9 @@ impl Players {
                     }
                     self.states[index] = None;
                     self.grid.remove(EntityId(slot.index));
+                    if let Some(roster) = &self.roster {
+                        let _ = roster.send(Roster::Left(slot.wire_id()));
+                    }
                     self.slots.free(slot);
                 }
             }

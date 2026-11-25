@@ -16,7 +16,7 @@ use sawgrass_protocol::{
     EntityState, PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity,
 };
 use sawgrass_server::limits::Limits;
-use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState};
+use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState, Roster};
 use sawgrass_server::{TickConfig, TickLoop};
 
 fn gateway() -> (Gateway, RootCertStore) {
@@ -95,6 +95,7 @@ fn players_are_placed_and_see_each_other() {
         (a.expect("a connects"), b.expect("b connects"))
     });
     // Joins reach the tick thread through the channel; ticks send the Joined events.
+    let roster = players.roster();
     tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
     let (id_a, id_b) = std::thread::scope(|scope| {
         let ids = scope.spawn(|| runtime.block_on(async { (joined(&mut a).await, joined(&mut b).await) }));
@@ -151,6 +152,12 @@ fn players_are_placed_and_see_each_other() {
     a.close();
     assert!(tick_until(&mut tick_loop, |t| position_of(t, id_a).is_none()));
     assert!(position_of(&tick_loop, id_b).is_some());
+
+    // Later systems (scripts) heard both joins, then A leaving.
+    let changes: Vec<Roster> = roster.try_iter().collect();
+    assert_eq!(changes.len(), 3, "{changes:?}");
+    assert!(changes[..2].contains(&Roster::Joined(id_a)) && changes[..2].contains(&Roster::Joined(id_b)));
+    assert_eq!(changes[2], Roster::Left(id_a));
 }
 
 /// Snapshots leave through the gateway's send task once per tick (NET-9): each tick's datagram reaches the client,
@@ -512,4 +519,92 @@ fn a_teleport_is_refused_and_counted() {
         let _ = client.send_datagram(step.clone());
         position_of(t, id) == Some([12.0, 5.0, 30.0])
     }));
+}
+
+/// Entities the server spawns (ADR 0006): a vehicle reaches a nearby client's snapshot with its kind, model and
+/// block, and leaves it when despawned. Players and positions off the map are not spawned.
+#[test]
+fn a_spawned_vehicle_is_seen_with_its_info_until_despawned() {
+    use sawgrass_protocol::delta::decode_delta_with_info;
+    use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+    use sawgrass_protocol::vehicle::VehicleBlock;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let players = Arc::new(Mutex::new(players));
+    let parked = |x: f32| ClientState {
+        position: Position::from_metres([x, 5.0, 30.0]).expect("position"),
+        velocity: Velocity::from_metres_per_second([0.0; 3]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let block = VehicleBlock {
+        flags: VehicleBlock::ENGINE,
+        ..VehicleBlock::INTACT
+    };
+    let info = Info::with_fields(EntityKind::Vehicle, AssetId(77), &block.to_fields()).expect("info");
+    let car = {
+        let mut p = players.lock().expect("players");
+        assert_eq!(p.spawn(Info::PLAYER, parked(15.0)), None);
+        assert_eq!(p.spawn(info, parked(9000.0)), None);
+        p.spawn(info, parked(15.0)).expect("spawned")
+    };
+    assert_eq!(
+        players.lock().expect("players").spawned(car).map(|(i, _)| i),
+        Some(info)
+    );
+
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let mut a = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("a connects");
+    std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut a)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    a.send_datagram(state_packet(10.0)).expect("send a");
+
+    // A never acknowledges, so each snapshot is whole: read until one does (or does not) hold the car.
+    let seen = |want: bool, tick_loop: &mut TickLoop| -> Vec<Info> {
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                runtime.block_on(async {
+                    let mut reassembler = Reassembler::new();
+                    loop {
+                        let (header, packet) = a.recv_datagram().await.expect("snapshot");
+                        let Some(payload) = reassembler
+                            .push(header.tick, &packet[PacketHeader::SIZE..])
+                            .expect("fragment")
+                        else {
+                            continue;
+                        };
+                        let (mut states, mut infos) = (Vec::new(), Vec::new());
+                        decode_delta_with_info(payload, header.tick, None, &[], &mut states, &mut infos)
+                            .expect("decode");
+                        if states.iter().any(|s| s.id == car) == want {
+                            return infos;
+                        }
+                    }
+                })
+            });
+            tick_until(tick_loop, |_| reader.is_finished());
+            reader.join().expect("reader")
+        })
+    };
+    assert_eq!(seen(true, &mut tick_loop), vec![info]);
+
+    assert!(players.lock().expect("players").despawn(car));
+    assert!(!players.lock().expect("players").despawn(car));
+    assert!(players.lock().expect("players").spawned(car).is_none());
+    assert!(seen(false, &mut tick_loop).is_empty());
 }
