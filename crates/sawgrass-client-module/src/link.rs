@@ -100,7 +100,7 @@ pub fn net_pose(pose: &Pose, velocity: [f32; 3]) -> NetPose {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Owned {
     /// The server's ownership epoch, sent back with every state so a stale owner is refused.
-    pub epoch: u32,
+    pub epoch: u8,
     /// Where the game has it now, measured on the last frame; `None` until it is spawned.
     pub pose: Option<NetPose>,
 }
@@ -170,18 +170,16 @@ impl NetLink {
         self.outbox.clone()
     }
 
-    /// The server gives (`yours`) or takes back the simulation of `entity`.
+    /// The server gives (`yours`) or takes back the simulation of `entity`, from its `ServerEvent::Ownership`.
     ///
-    /// From the server's ownership event (SRV-14, #170, in review). An owned entity is left to the game's own
-    /// physics instead of being moved to the interpolated pose, and its state is reported by [`NetLink::owned`].
-    pub fn set_ownership(&mut self, entity: NetId, epoch: u32, yours: bool) {
-        let held = self.owned.get(&entity).map(|o| o.epoch);
+    /// An owned entity is left to the game's own physics instead of being moved to the interpolated pose, and its
+    /// state is reported by [`NetLink::owned`]. The epoch is a wrapping byte, so it is stored and never compared:
+    /// ownership events arrive in order on the one reliable event stream, and each one is applied as it comes.
+    pub fn set_ownership(&mut self, entity: NetId, epoch: u8, yours: bool) {
         if yours {
-            // A give older than the one held is stale; the same rule as for a take-back, in the other direction.
-            if held.is_none_or(|h| h < epoch) {
-                self.owned.insert(entity, Owned { epoch, pose: None });
-            }
-        } else if held.is_some_and(|h| h <= epoch) {
+            let pose = self.owned.get(&entity).and_then(|o| o.pose);
+            self.owned.insert(entity, Owned { epoch, pose });
+        } else {
             self.owned.remove(&entity);
         }
     }
@@ -213,6 +211,7 @@ impl NetLink {
                     self.client = Some(Client::new(entity, tick_hz, self.config));
                 }
                 ServerEvent::Corrected(state) => self.corrected(&state, world),
+                ServerEvent::Ownership { entity, epoch, yours } => self.set_ownership(entity, epoch, yours),
                 ServerEvent::Stats(_) => {}
             }
         }

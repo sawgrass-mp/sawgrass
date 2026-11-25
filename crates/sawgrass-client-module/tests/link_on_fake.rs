@@ -203,9 +203,7 @@ fn an_owned_entity_is_left_to_the_game_and_measured() {
     assert_eq!(owned.epoch, 7);
     assert_eq!(owned.pose.map(|p| p.position), Some(parked.position));
 
-    // An older epoch cannot take it back; the current one can, and the snapshots move it again.
-    link.set_ownership(1, 6, false);
-    assert!(link.owned().contains_key(&1));
+    // The server takes it back, and the snapshots move it again.
     link.set_ownership(1, 7, false);
     run(90..120, &mut module, &mut game, &mut link, &mut encoder);
     assert!(link.owned().is_empty());
@@ -255,16 +253,16 @@ fn block_changes_keep_the_entity_and_a_new_model_respawns_it() {
 }
 
 #[test]
-fn a_stale_give_does_not_lower_the_epoch() {
+fn ownership_epochs_wrap_and_each_event_applies_as_it_comes() {
     let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
-    link.set_ownership(1, 7, true);
-    link.set_ownership(1, 5, true);
-    assert_eq!(link.owned()[&1].epoch, 7);
-    link.set_ownership(1, 6, false);
-    assert!(
-        link.owned().contains_key(&1),
-        "a take-back older than the held epoch is ignored"
-    );
+    // 256 hand-offs of one entity: the epoch wraps from 255 to 0, and every give and take-back still applies.
+    for epoch in 0..=300u32 {
+        let epoch = (epoch % 256) as u8;
+        link.set_ownership(1, epoch, true);
+        assert_eq!(link.owned()[&1].epoch, epoch);
+        link.set_ownership(1, epoch, false);
+        assert!(link.owned().is_empty(), "take-back with epoch {epoch} applied");
+    }
 }
 
 #[test]
@@ -348,7 +346,11 @@ fn a_joining_link_waits_for_the_join_and_takes_corrections() {
     );
 
     // ...and taken for one it owns.
-    link.set_ownership(1, 3, true);
+    events.push(ServerEvent::Ownership {
+        entity: 1,
+        epoch: 3,
+        yours: true,
+    });
     events.push(ServerEvent::Corrected(state(1, -500.0)));
     frame_at(92, &mut module, &mut game, &mut link);
     assert!(
