@@ -21,6 +21,7 @@ use bytes::{Bytes, BytesMut};
 use sawgrass_protocol::delta::{
     DeltaLists, FRAGMENT_PAYLOAD, MAX_ENTITIES, encode_added, encode_changed, fragments,
 };
+use sawgrass_protocol::entity::Info;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
@@ -84,7 +85,8 @@ impl Bodies {
     fn push(&mut self, id: u32, write: impl FnOnce(&mut Vec<u8>) -> Option<()>) {
         let start = self.bytes.len();
         let body = match write(&mut self.bytes) {
-            // A body is at most 37 bytes (an entity's worst change), so it fits in a u8 below NONE's length.
+            // A body is at most 32 bytes for a player (an added one: its state, kind, model 0 and no fields), so it
+            // fits in a u8 below NONE's length.
             Some(()) => Body {
                 id,
                 start: start as u32,
@@ -218,7 +220,7 @@ fn fill_added(bodies: &mut Bodies, states: &[Option<EntityState>]) {
     bodies.clear();
     for state in states {
         bodies.push(state.map_or(NO_ID, |s| s.id), |out| {
-            encode_added(state.as_ref()?, out);
+            encode_added(state.as_ref()?, &Info::PLAYER, out);
             Some(())
         });
     }
@@ -440,7 +442,7 @@ impl View {
                     return Some(false);
                 };
                 body.clear();
-                encode_added(&state, body);
+                encode_added(&state, &Info::PLAYER, body);
                 lists.add(state.id, body).ok()?;
             }
             Some(true)

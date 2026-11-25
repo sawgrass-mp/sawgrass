@@ -6,6 +6,7 @@
 //! little-endian. The connection handshake lives in the gateway crate.
 
 pub mod delta;
+pub mod entity;
 pub mod game;
 pub mod quant;
 
@@ -18,8 +19,9 @@ pub use quant::{Position, Rotation, Velocity};
 ///
 /// Version 1 is the first wire format: the packet header and the quantized encodings. Version 2 adds the
 /// payloads in [`game`]. Version 3 sends snapshots delta-encoded ([`delta`], [`PacketKind::DeltaSnapshot`]) and
-/// makes the tick in a client state's header the newest snapshot tick the client decoded.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// makes the tick in a client state's header the newest snapshot tick the client decoded. Version 4 adds each
+/// entity's kind, model and block fields to delta snapshots ([`entity`], ADR 0006).
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///
