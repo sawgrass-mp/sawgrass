@@ -32,7 +32,7 @@ Bots connect at `--connect-per-sec` (default 200), then load the server for `--d
 A report is printed every `--report-every` seconds (default 10) and once for the whole load phase:
 
 ```text
-bots 1000/1000 connected (0 failed, 0 dropped), period 30 s ending at 35 s
+bots 1000/1000 connected (0 failed, 0 dropped), 0 connect retries, period 30 s ending at 35 s
 server: 1000 players, tick p50 4.09 ms, p99 8.22 ms (16.4% of 50 ms, budget 70%), max 14.95 ms, 0 overruns
 server: cpu 0.64 cores (tick thread 0.09, network the rest), down 8.94 kB/s and up 0.52 kB/s per player
 bots: down 9.31 kB/s per bot in 22.3 datagrams/s, 20.0 ticks/s with a snapshot, 19.9 entities per tick; up 0.52 kB/s per bot
@@ -51,6 +51,28 @@ generator: cpu 0.85 of 2 cores, send lateness p50 <2.05 ms p99 <4.10 ms (period 
 Other options: `--send-hz` (default 20), `--area` (side of the square in metres, default 4000), `--hotspots`
 (default 8), `--seed` (same seed, same routes), `--threads` (runtime threads, default all cores) and `--name`
 (the name in the server certificate, default `localhost`).
+
+A bot the server refuses, or whose handshake times out, tries again after a pause drawn between half and all of
+250 ms, doubling up to 4 s, until the run ends, as a game client does when a server is busy (NET-15). The first line
+counts those retries; a bot counts as failed only if it never got in.
+
+### A lighter generator
+
+The bots take more CPU than the server's gateway, so one machine of the same size cannot always load a full
+server. Two options make each bot cheaper without changing what the server sees:
+
+- `--decoders N`: only bots numbered below N decode their snapshots. The others reassemble each tick, check that
+  its baseline is a tick they acknowledged, and acknowledge it without decoding the entities. The server gets the
+  same acknowledgements, so it builds the same deltas and sends the same bytes. The entities-per-tick figure comes
+  from the decoders, so keep a few dozen of them.
+- `--sockets N`: the bots share N UDP sockets, each bot keeping its own QUIC connection, keys and streams, instead
+  of one socket each. The server's work per connection is the same, and its per-address limits count IP
+  addresses, which bots on one machine share either way.
+
+At 3,000 bots on 2 cores over 1,500 m, one socket per bot with every bot decoding was SATURATED at 1.84 cores
+(state sends late by up to 131 ms at p99), while `--sockets 32 --decoders 32` stayed ok at 1.5 cores (p99 under
+8 ms). 4,096 bots in that mode stayed ok at 1.64 cores. Use the default for figures that depend on what bots
+receive, and the light mode to load a server with more bots than the generator could otherwise carry.
 
 `--record FILE` writes every snapshot datagram the first `--record-bots` bots (default 32) receive to FILE, for the
 packet compression benchmark to replay (`docs/research/packet-compression`). It takes about 70 MB a minute at 1,000
@@ -85,7 +107,7 @@ target/release/sawgrass-bots run --server 192.0.2.10:4433 --name server.lan --ce
 Several bot machines can load one server at once; give each a different `--seed`. Only the bot that asks first
 needs the stats, but every machine prints the server lines.
 
-Each bot has its own UDP socket, like a real client. For thousands of bots raise the open-file limit first
+Each bot has its own UDP socket, like a real client, unless `--sockets` is given. For thousands of bots raise the open-file limit first
 (`ulimit -n 10000`).
 
 On one machine, pin the two to separate cores so they do not take CPU from each other (Linux):

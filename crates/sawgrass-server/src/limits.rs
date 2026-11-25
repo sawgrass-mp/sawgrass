@@ -25,7 +25,9 @@ pub struct Limits {
     /// closed.
     pub strikes: u32,
     /// Handshakes in progress beyond which new ones are refused. Only addresses QUIC has validated count: every
-    /// unvalidated attempt gets a Retry first, so spoofed packets take no place.
+    /// unvalidated attempt gets a Retry first, so spoofed packets take no place. A slot is held until the Sawgrass
+    /// hello is done, about two round trips; 1024 lets a full server's players come back within seconds of a
+    /// restart at 300 ms of round trip (task NET-15).
     pub max_handshakes: usize,
     /// Connections, handshakes included, from one validated IPv4 address or IPv6 /64.
     pub max_per_address: usize,
@@ -40,7 +42,7 @@ impl Default for Limits {
             event_burst: 40.0,
             window: Duration::from_secs(1),
             strikes: 3,
-            max_handshakes: 256,
+            max_handshakes: 1024,
             max_per_address: 16,
         }
     }
