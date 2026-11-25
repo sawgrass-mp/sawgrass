@@ -134,12 +134,23 @@ A ped's health and armour live on the server. A client cannot heal and cannot ch
   history already for delta snapshots.
 - The server computes the damage from the weapon's figures and the zone, applies armour, and sets health in the
   ped block. At zero health it sets `motion` to dead and tells the scripts, which decide what happens next.
-- A client may report damage to its own ped (a fall, a crash) and to what it owns; the server accepts such reports
-  only as decreases, under a per-second cap.
+- A client may report damage to its own ped (a fall, a crash); the server accepts it only as a decrease, under a
+  per-second cap.
+- **Damage to what a client simulates**, by the maintainer's choice on 2026-11-25: the server accepts the
+  simulating owner's damage reports (the vehicle block's `damage`, an NPC's health) only for NPCs and for vehicles
+  that belong to nobody, again only as decreases under a cap. A vehicle that belongs to a player as property (a
+  value-bearing thing that only the server decides, architecture.md, Authority) takes damage only from events the
+  server checked, such as an accepted hit report or a script; the owner's `damage` field for such a vehicle is
+  ignored and the server's value is sent instead. Crash damage to player vehicles therefore waits for a check the
+  server can make, which needs collision data from the game. "Owner" in section 4 is the client that simulates an
+  entity; it is unrelated to who owns a vehicle as property.
 - Shots are relayed to viewers near the shooter, as effects, and counted against the fire rate even when they hit
   nothing.
-- *Limitation:* the server has no map geometry, so it cannot tell whether a wall was in the way. A line-of-sight
-  check waits for collision data from the game, as the navmesh check does.
+- **Accepted temporary limitation**, by the maintainer's choice on 2026-11-25: the server has no map geometry, so
+  it cannot tell whether a wall was in the way, and hit reports are accepted without a line-of-sight check. Shooting
+  works from the start, and a hit through a wall is possible until then. The limitation ends when the server has
+  collision data from the game: a line-of-sight check is then added to hit reports (and the navmesh check to
+  movement) in their own task.
 
 ### 6. Wire format
 
@@ -198,6 +209,7 @@ lands with tests and is checked on the bots, which drive cars, change seats and 
   one that fails changes the client module's table, not the wire format.
 - Physics between entities that different clients own (two cars colliding) is resolved by each owner separately.
   That is the accepted cost of client physics; the checks keep it from becoming a cheat.
-- Line-of-sight and navmesh checks wait for the game's collision data.
+- Line-of-sight and navmesh checks wait for the game's collision data; until then hits through walls are possible
+  and player vehicles take no crash damage.
 - Intent-level animation means remote peds look approximately, not exactly, like on their own client. If a
   case turns out to need exact clips, it is an action layer with that clip's `AssetId`, not a change to this design.
