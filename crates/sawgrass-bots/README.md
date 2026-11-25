@@ -130,6 +130,23 @@ taskset -c 0,1 target/release/sawgrass-server ... --net-threads 1
 taskset -c 2,3 target/release/sawgrass-bots run ...
 ```
 
+## Playing a recorded session
+
+A server started with `--record FILE` writes what every client sends, as it arrives (task SRV-22). The bots play
+such a file against any server of the same protocol version, one connection per recorded connection, joining,
+sending and leaving at the recorded times:
+
+```sh
+target/release/sawgrass-server --listen 0.0.0.0:4433 --cert cert/cert.der --key cert/key.der --record session.rec
+# ... a session with real clients ...
+target/release/sawgrass-bots replay --file session.rec --server 127.0.0.1:4433 --cert cert/cert.der
+```
+
+- `--speed X` plays it X times as fast (default 1).
+- Each state's acknowledged tick is replaced by the newest snapshot the replaying connection received, so the
+  server's delta snapshots stay valid. Entity ids inside events (a payment's payee) are the recording server's.
+- A recording holds what players sent: positions, chat and script events. Keep it private and never commit one.
+
 ## What this does not measure yet
 
 - Snapshots are whole: every visible entity every tick. Delta encoding, chosen in
