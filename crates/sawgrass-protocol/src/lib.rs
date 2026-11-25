@@ -24,8 +24,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// makes the tick in a client state's header the newest snapshot tick the client decoded. Version 4 adds each
 /// entity's kind, model and block fields to delta snapshots ([`entity`], ADR 0006). Version 5 lets a client state
 /// carry the player's ped block ([`ped`]). Version 6 adds the vehicle block ([`vehicle`]) and the states of the
-/// entities a client simulates after its own ([`game::OwnedState`]).
-pub const PROTOCOL_VERSION: u32 = 6;
+/// entities a client simulates after its own ([`game::OwnedState`]). Version 7 adds
+/// [`game::ServerEvent::Corrected`], the server's answer to a refused state.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///

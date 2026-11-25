@@ -130,7 +130,8 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
-                Err(_) => {}
+                // An honest walker stays within the limits; a correction would show up in the server's counts.
+                Ok(ServerEvent::Corrected(_)) | Err(_) => {}
             }
         }
     });
