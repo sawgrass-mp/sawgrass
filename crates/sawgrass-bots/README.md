@@ -56,6 +56,19 @@ Other options: `--send-hz` (default 20), `--area` (side of the square in metres,
 packet compression benchmark to replay (`docs/research/packet-compression`). It takes about 70 MB a minute at 1,000
 bots over 1,500 m.
 
+`--misbehave flood=N,teleport=N,bad-event=N,reconnect=N` adds misbehaving bots next to the `--count` honest ones, to
+test the server's defences under load (BOT-4). A `flood` bot sends 1,000 states a second, and a `teleport` bot jumps
+1 km a tick at velocity 0. A `bad-event` bot sends an event the server does not know, and a `reconnect` bot connects
+and closes five times a second. Flood and bad-event bots reconnect when the server closes them. Their counters stay
+out of the honest figures and get one line each at the end of the report:
+
+```text
+misbehaving flood: 20 bots, 400 connects, 0 failed, 380 closed by the server, 1180000 sent
+```
+
+The server refuses connections beyond 16 from one address by default, so run it with `--max-per-address` above the
+total number of bots when they all come from one machine.
+
 ## Bots and server on separate machines
 
 The bots reach the server over the network like players, so give them the server's address and the name in its
