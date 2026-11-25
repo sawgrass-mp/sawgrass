@@ -1,4 +1,4 @@
-//! The file format of a session recording (task SRV-21): what each client sent a server, exactly as it arrived,
+//! The file format of a session recording (task SRV-22): what each client sent a server, exactly as it arrived,
 //! so the load-test bots can play it again.
 //!
 //! A recording starts with [`MAGIC`] and the little-endian `u32` protocol version of the server that wrote it.

@@ -1,4 +1,4 @@
-//! Records what each client sends, for `sawgrass-bots replay` (task SRV-21). The format is
+//! Records what each client sends, for `sawgrass-bots replay` (task SRV-22). The format is
 //! [`sawgrass_protocol::recording`].
 //!
 //! Connection tasks hand each record to a writer thread through a bounded queue. A full queue drops the record
