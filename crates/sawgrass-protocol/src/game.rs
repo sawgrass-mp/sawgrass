@@ -304,7 +304,8 @@ const OWNERSHIP: u8 = 4;
 const CORRECTED: u8 = 5;
 const REQUEST_STATS: u8 = 128;
 const PAY: u8 = 129;
-// 130 and 131 are taken by SRV-15 (#201).
+const ENTER_SEAT: u8 = 130;
+const LEAVE_SEAT: u8 = 131;
 const SHOT: u8 = 132;
 
 /// How the server answered a [`ClientEvent::Pay`]. The values are part of the wire format.
@@ -507,6 +508,18 @@ impl ServerEvent {
 pub enum ClientEvent {
     /// Ask for [`ServerEvent::Stats`]. A server started without load-test reporting ignores it.
     RequestStats,
+    /// Ask to sit in `seat` (0 the driver's) of `vehicle` (ADR 0006, section 4). The server decides; a granted
+    /// request shows as the player's ped block with motion "in vehicle", the vehicle and the seat. A refused one
+    /// changes nothing.
+    EnterSeat {
+        /// The vehicle's entity id.
+        vehicle: u32,
+        /// The seat index, 0 the driver's.
+        seat: u8,
+    },
+    /// Ask to leave the seat the player sits in, or say that the vehicle's physics threw the player out. The
+    /// server always grants it.
+    LeaveSeat,
     /// The client's player fired once, and what it hit (ADR 0006, section 5). Shots have their own rate limit,
     /// separate from the other events'.
     Shot(Box<Shot>),
@@ -528,6 +541,12 @@ impl ClientEvent {
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::RequestStats => out.push(REQUEST_STATS),
+            Self::EnterSeat { vehicle, seat } => {
+                out.push(ENTER_SEAT);
+                out.extend_from_slice(&vehicle.to_le_bytes());
+                out.push(*seat);
+            }
+            Self::LeaveSeat => out.push(LEAVE_SEAT),
             Self::Shot(shot) => {
                 out.push(SHOT);
                 shot.write(out);
@@ -546,6 +565,12 @@ impl ClientEvent {
         let mut r = Reader { input };
         let event = match r.array::<1>()? {
             [REQUEST_STATS] => Self::RequestStats,
+            [ENTER_SEAT] => {
+                let vehicle = u32::from_le_bytes(r.array()?);
+                let [seat] = r.array::<1>()?;
+                Self::EnterSeat { vehicle, seat }
+            }
+            [LEAVE_SEAT] => Self::LeaveSeat,
             [SHOT] => Self::Shot(Box::new(Shot::read(&mut r)?)),
             [PAY] => Self::Pay {
                 key: u64::from_le_bytes(r.array()?),
