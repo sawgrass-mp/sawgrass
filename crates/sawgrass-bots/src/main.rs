@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sawgrass_bots::misbehave::{self, Kind, Misbehaving};
 use sawgrass_bots::record::Recorder;
 use sawgrass_bots::report::{self, Context};
 use sawgrass_bots::stats::Counters;
@@ -26,7 +27,8 @@ const USAGE: &str = "usage:
   sawgrass-bots gen-cert --out DIR [--name NAME]
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
                     [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
-                    [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]";
+                    [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]
+                    [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]";
 
 struct RunArgs {
     server: SocketAddr,
@@ -41,6 +43,7 @@ struct RunArgs {
     report_every: Duration,
     record: Option<PathBuf>,
     record_bots: u64,
+    misbehave: [u64; 4],
 }
 
 fn parse<T: std::str::FromStr>(name: &str, value: Option<String>) -> Result<T, String>
@@ -68,6 +71,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
         report_every: Duration::from_secs(10),
         record: None,
         record_bots: 32,
+        misbehave: [0; 4],
     };
     while let Some(flag) = args.next() {
         let value = args.next();
@@ -86,6 +90,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--report-every" => run.report_every = Duration::from_secs(parse::<u64>(&flag, value)?.max(1)),
             "--record" => run.record = Some(PathBuf::from(value.ok_or("--record needs a value")?)),
             "--record-bots" => run.record_bots = parse(&flag, value)?,
+            "--misbehave" => run.misbehave = misbehave::parse(&value.ok_or("--misbehave needs a value")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -159,6 +164,20 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         args.duration.as_secs()
     );
 
+    // Misbehaving bots start with the honest ones and run to the same stop; their counters are their own.
+    let misbehaving = Arc::new(Misbehaving::default());
+    for kind in Kind::ALL {
+        for index in 0..args.misbehave[kind as usize] {
+            tokio::spawn(misbehave::run(
+                config.clone(),
+                kind,
+                args.count + index,
+                misbehaving.clone(),
+                stop,
+            ));
+        }
+    }
+
     let spawner = {
         let counters = counters.clone();
         let config = config.clone();
@@ -204,6 +223,7 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
     if let Ok(Some(error)) = counters.first_error.lock().map(|e| e.clone()) {
         println!("first connection error: {error}");
     }
+    print!("{}", misbehaving.render(&args.misbehave));
     let _ = tokio::time::timeout(Duration::from_secs(5), spawner).await;
     if let (Some(recorder), Some(path)) = (&record, &args.record) {
         recorder.flush().map_err(|e| format!("{}: {e}", path.display()))?;

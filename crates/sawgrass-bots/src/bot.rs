@@ -221,7 +221,7 @@ fn client_state(walker: &Walker) -> Option<ClientState> {
     })
 }
 
-fn header(kind: PacketKind, sequence: u16, tick: u32) -> Vec<u8> {
+pub(crate) fn header(kind: PacketKind, sequence: u16, tick: u32) -> Vec<u8> {
     let mut out = vec![0; PacketHeader::SIZE];
     let header = PacketHeader { kind, sequence, tick };
     // The buffer is exactly the header size, so encoding cannot fail.

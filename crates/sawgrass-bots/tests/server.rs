@@ -119,3 +119,78 @@ async fn bots_move_on_the_server_and_see_each_other() {
     assert!(ticks_seen > 60, "snapshots for {ticks_seen} ticks");
     assert!(entities > 60, "each bot saw the other: {entities} states");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn misbehaving_bots_are_stopped_and_an_honest_one_plays_on() {
+    use sawgrass_bots::misbehave::{self, Kind, Misbehaving};
+    use sawgrass_server::limits::Limits;
+
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    // Floods are judged over 100 ms windows, so one is closed within the test.
+    let config = ListenConfig {
+        limits: Limits {
+            window: Duration::from_millis(100),
+            ..Limits::default()
+        },
+        ..ListenConfig::default()
+    };
+    let mut players = net::listen(gateway, config);
+    let traffic = players.traffic();
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+
+    let config = Arc::new(BotConfig {
+        server: addr,
+        server_name: "localhost".to_owned(),
+        roots,
+        send_hz: 20,
+        area: Area {
+            size: 100.0,
+            hotspots: 0,
+            ..Area::default()
+        },
+        record: None,
+    });
+    let stop = Instant::now() + Duration::from_secs(3);
+    let honest = Arc::new(Counters::default());
+    tokio::spawn(run(config.clone(), 0, honest.clone(), false, stop, None));
+    let bad = Arc::new(Misbehaving::default());
+    for (i, kind) in Kind::ALL.into_iter().enumerate() {
+        tokio::spawn(misbehave::run(
+            config.clone(),
+            kind,
+            1 + i as u64,
+            bad.clone(),
+            stop,
+        ));
+    }
+    let ticks = std::thread::spawn(move || {
+        while std::time::Instant::now() < stop.into_std() + Duration::from_millis(600) {
+            tick_loop.run_tick();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    tokio::task::spawn_blocking(move || ticks.join().expect("tick thread"))
+        .await
+        .expect("join");
+
+    let load = |n: &std::sync::atomic::AtomicU64| n.load(Ordering::Relaxed);
+    // Closed by the server, and counted on both sides.
+    assert!(load(&bad.of(Kind::Flood).closed) >= 1, "flood not closed");
+    assert!(load(&traffic.closed_floods) >= 1);
+    assert!(load(&bad.of(Kind::BadEvent).closed) >= 1, "bad event not closed");
+    assert!(load(&traffic.closed_bad_events) >= 1);
+    // Refused, not closed: a teleport is a movement problem, not a protocol one.
+    assert!(load(&traffic.refused_teleport) >= 10);
+    assert_eq!(load(&bad.of(Kind::Teleport).closed), 0);
+    assert!(load(&bad.of(Kind::Reconnect).connects) >= 5);
+    // The honest bot played through all of it.
+    assert_eq!(load(&honest.connected), 1);
+    assert_eq!(load(&honest.dropped), 0);
+    assert!(
+        load(&honest.ticks_seen) > 30,
+        "honest bot saw {} ticks",
+        load(&honest.ticks_seen)
+    );
+}
