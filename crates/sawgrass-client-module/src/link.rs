@@ -6,16 +6,20 @@
 //! connection itself is not here: the code that owns the socket pushes into [`NetLink::inbox`] and sends what it
 //! takes from [`NetLink::outbox`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use sawgrass_netcode::interp::{Event, Sample};
 use sawgrass_netcode::{Client, Pose as NetPose};
-use sawgrass_protocol::entity::EntityKind as NetKind;
+use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
 
 use crate::entity_pool::NetId;
 use crate::game::{EntityKind, Pose};
 use crate::module::{CoreEvent, NetCore, World};
+
+/// Datagrams kept at most in a [`Datagrams`] queue. While frames stop (a loading screen, a pause) the connection
+/// keeps pushing, and only the newest snapshots matter, so the oldest are dropped above this.
+pub const MAX_QUEUED: usize = 256;
 
 /// Datagrams handed between the connection and the link. Cloning gives another handle to the same queue.
 #[derive(Debug, Clone, Default)]
@@ -24,11 +28,13 @@ pub struct Datagrams {
 }
 
 impl Datagrams {
+    /// Queues `datagram`, dropping the oldest one when [`MAX_QUEUED`] are waiting.
     pub fn push(&self, datagram: Vec<u8>) {
-        self.queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(datagram);
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        if queue.len() >= MAX_QUEUED {
+            queue.remove(0);
+        }
+        queue.push(datagram);
     }
 
     pub fn take(&self) -> Vec<Vec<u8>> {
@@ -93,8 +99,8 @@ pub struct NetLink {
     /// Local time in seconds, the sum of the frames' `dt`.
     now: f64,
     samples: Vec<Sample>,
-    /// Remote entities spawned in the game.
-    shown: BTreeSet<NetId>,
+    /// Remote entities spawned in the game, with the info they were last shown with.
+    shown: BTreeMap<NetId, Info>,
     last_local: Option<[f32; 3]>,
     /// Entities this client simulates, by the server's ownership epoch, with the last position measured.
     owned: BTreeMap<NetId, Owned>,
@@ -110,7 +116,7 @@ impl NetLink {
             outbox: Datagrams::default(),
             now: 0.0,
             samples: Vec::new(),
-            shown: BTreeSet::new(),
+            shown: BTreeMap::new(),
             last_local: None,
             owned: BTreeMap::new(),
             world_errors: 0,
@@ -132,9 +138,13 @@ impl NetLink {
     /// From the server's ownership event (SRV-14, #170, in review). An owned entity is left to the game's own
     /// physics instead of being moved to the interpolated pose, and its state is reported by [`NetLink::owned`].
     pub fn set_ownership(&mut self, entity: NetId, epoch: u32, yours: bool) {
+        let held = self.owned.get(&entity).map(|o| o.epoch);
         if yours {
-            self.owned.insert(entity, Owned { epoch, pose: None });
-        } else if self.owned.get(&entity).is_some_and(|o| o.epoch <= epoch) {
+            // A give older than the one held is stale; the same rule as for a take-back, in the other direction.
+            if held.is_none_or(|h| h < epoch) {
+                self.owned.insert(entity, Owned { epoch, pose: None });
+            }
+        } else if held.is_some_and(|h| h <= epoch) {
             self.owned.remove(&entity);
         }
     }
@@ -161,7 +171,7 @@ impl NetLink {
         }
         self.client.remote(self.now, &mut self.samples);
         for id in self.client.removed().to_vec() {
-            if self.shown.remove(&id) {
+            if self.shown.remove(&id).is_some() {
                 let result = world.despawn(id);
                 self.count(result);
             }
@@ -170,10 +180,16 @@ impl NetLink {
         let samples = std::mem::take(&mut self.samples);
         for sample in &samples {
             let pose = game_pose(&sample.pose);
-            if sample.event == Some(Event::InfoChanged) && self.shown.remove(&sample.id) {
-                // A new model: the game cannot swap it in place, so the entity is spawned again below.
+            let shown = self.shown.get(&sample.id);
+            let new_model = shown.is_some_and(|i| i.kind != sample.info.kind || i.model != sample.info.model);
+            if sample.event == Some(Event::InfoChanged) && new_model {
+                // The game cannot swap a model in place, so the entity is spawned again below. A change of block
+                // fields alone (health, damage, colours) keeps it; applying them waits for the blocks task.
+                self.shown.remove(&sample.id);
                 let result = world.despawn(sample.id);
                 self.count(result);
+            } else if let Some(info) = self.shown.get_mut(&sample.id) {
+                *info = sample.info;
             }
             if let Some(owned) = self.owned.get_mut(&sample.id) {
                 // The game simulates it: measure it, and spawn it only if it is not there yet.
@@ -183,7 +199,7 @@ impl NetLink {
                     continue;
                 }
             }
-            if self.shown.contains(&sample.id) {
+            if self.shown.contains_key(&sample.id) {
                 let result = world.set_pose(sample.id, pose);
                 self.count(result);
             } else {
@@ -192,7 +208,7 @@ impl NetLink {
                 let info = sample.info;
                 let result = world.spawn(sample.id, game_kind(info.kind), info.model, pose);
                 if self.count(result).is_some() {
-                    self.shown.insert(sample.id);
+                    self.shown.insert(sample.id, info);
                 }
             }
         }
@@ -213,19 +229,11 @@ impl NetLink {
             let result = world.set_local_player_pose(local);
             self.count(result);
         }
-        let velocity = match self.last_local {
-            Some(last) if dt > 0.0 => {
-                let p = local.position;
-                [
-                    (p[0] - last[0]) / dt,
-                    (p[1] - last[1]) / dt,
-                    (p[2] - last[2]) / dt,
-                ]
-            }
-            _ => [0.0; 3],
-        };
+        // Measured after the correction offset, so a correction shows as velocity for its frames; corrections are
+        // smoothed over several frames, which keeps that small.
+        let measured = velocity(self.last_local, local.position, dt);
         self.last_local = Some(local.position);
-        if let Some(datagram) = self.client.outgoing(self.now, &net_pose(&local, velocity)) {
+        if let Some(datagram) = self.client.outgoing(self.now, &net_pose(&local, measured)) {
             self.outbox.push(datagram);
         }
     }

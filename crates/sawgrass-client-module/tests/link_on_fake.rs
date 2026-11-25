@@ -4,7 +4,7 @@
 use sawgrass_client_module::assets::{AssetId, AssetTable};
 use sawgrass_client_module::fake::FakeRuntime;
 use sawgrass_client_module::game::{EntityKind, FakeGame, GameApi, GameAsset, Pose};
-use sawgrass_client_module::link::NetLink;
+use sawgrass_client_module::link::{MAX_QUEUED, NetLink};
 use sawgrass_client_module::module::{Module, required_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::FunctionTable;
@@ -32,7 +32,7 @@ fn module() -> Module<FakeRuntime> {
         table += &format!("{name} = 5A {i:02X} A5 3C\n");
     }
     let functions = FunctionTable::parse(&table).expect("functions");
-    let assets = AssetTable::parse(&format!("build = {BUILD_KEY}\n5 = 0xCA\n")).expect("assets");
+    let assets = AssetTable::parse(&format!("build = {BUILD_KEY}\n5 = 0xCA\n6 = 0xCB\n")).expect("assets");
     let Ok(module) = Module::start(FakeRuntime::new(build, 0x4000, image), &functions, assets) else {
         panic!("module starts");
     };
@@ -48,9 +48,9 @@ fn state(id: u32, x: f32) -> EntityState {
     }
 }
 
-/// Full snapshot datagrams for one tick. Entity 1 is a vehicle with model 5, the rest are players.
-fn snapshot(encoder: &mut DeltaEncoder, tick: u32, states: &[EntityState]) -> Vec<Vec<u8>> {
-    let infos: Vec<Info> = states
+/// The infos the tests' server sends: entity 1 is a vehicle with model 5, the rest are players.
+fn infos(states: &[EntityState]) -> Vec<Info> {
+    states
         .iter()
         .map(|s| {
             if s.id == 1 {
@@ -59,10 +59,23 @@ fn snapshot(encoder: &mut DeltaEncoder, tick: u32, states: &[EntityState]) -> Ve
                 Info::PLAYER
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Full snapshot datagrams for one tick.
+fn snapshot(encoder: &mut DeltaEncoder, tick: u32, states: &[EntityState]) -> Vec<Vec<u8>> {
+    snapshot_with(encoder, tick, states, &infos(states))
+}
+
+fn snapshot_with(
+    encoder: &mut DeltaEncoder,
+    tick: u32,
+    states: &[EntityState],
+    infos: &[Info],
+) -> Vec<Vec<u8>> {
     let mut payload = Vec::new();
     encoder
-        .encode_with_info(tick, states, &infos, None, &[], &mut payload)
+        .encode_with_info(tick, states, infos, None, &[], &mut payload)
         .expect("encode");
     fragments(&payload)
         .expect("fragments")
@@ -196,4 +209,71 @@ fn an_owned_entity_is_left_to_the_game_and_measured() {
     run(90..120, &mut module, &mut game, &mut link, &mut encoder);
     assert!(link.owned().is_empty());
     assert_ne!(game.entities[&handle].2, parked);
+}
+
+#[test]
+fn block_changes_keep_the_entity_and_a_new_model_respawns_it() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    let inbox = link.inbox();
+    let mut encoder = DeltaEncoder::default();
+    let car = |model: u32, health: u32| {
+        Info::with_fields(NetKind::Vehicle, AssetId(model), &[health]).expect("info")
+    };
+    let mut run =
+        |frames: std::ops::Range<u32>, info: Info, module: &mut Module<FakeRuntime>, game: &mut FakeGame| {
+            for frame in frames {
+                if frame % 3 == 0 {
+                    let tick = frame / 3;
+                    let states = [state(1, tick as f32 * 0.5), state(LOCAL, 0.0)];
+                    for d in snapshot_with(&mut encoder, tick, &states, &[info, Info::PLAYER]) {
+                        inbox.push(d);
+                    }
+                }
+                module.frame(1.0 / FRAME_HZ, game, &mut link).expect("frame");
+            }
+        };
+    run(0..60, car(5, 100), &mut module, &mut game);
+    let first = module.entities().handle(1).expect("shown");
+
+    // Damage changes a block field: the same car stays in the game.
+    run(60..120, car(5, 40), &mut module, &mut game);
+    assert_eq!(
+        module.entities().handle(1),
+        Some(first),
+        "a block change keeps the game entity"
+    );
+
+    // A new model cannot be swapped in place: the car is spawned again with it.
+    run(120..180, car(6, 40), &mut module, &mut game);
+    let second = module.entities().handle(1).expect("shown again");
+    assert_ne!(second, first);
+    assert_eq!(game.entities[&second].1, GameAsset(0xCB));
+    assert!(!game.entities.contains_key(&first));
+}
+
+#[test]
+fn a_stale_give_does_not_lower_the_epoch() {
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    link.set_ownership(1, 7, true);
+    link.set_ownership(1, 5, true);
+    assert_eq!(link.owned()[&1].epoch, 7);
+    link.set_ownership(1, 6, false);
+    assert!(
+        link.owned().contains_key(&1),
+        "a take-back older than the held epoch is ignored"
+    );
+}
+
+#[test]
+fn the_inbox_keeps_only_the_newest_datagrams() {
+    let link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    let inbox = link.inbox();
+    for i in 0..MAX_QUEUED as u32 + 10 {
+        inbox.push(i.to_le_bytes().to_vec());
+    }
+    let kept = inbox.take();
+    assert_eq!(kept.len(), MAX_QUEUED);
+    assert_eq!(kept[0], 10u32.to_le_bytes().to_vec(), "the oldest were dropped");
 }
