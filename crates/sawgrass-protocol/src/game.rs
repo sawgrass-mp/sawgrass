@@ -12,6 +12,7 @@
 //! [`SNAPSHOT_MAX_ENTITIES`] entities is split over several datagrams with the same tick, so each one fits in
 //! [`MAX_DATAGRAM`] bytes on any path quinn accepts.
 
+use crate::combat::Shot;
 use crate::delta::{put_varint, take_varint};
 use crate::entity::MAX_FIELDS;
 use crate::ped::PedBlock;
@@ -305,7 +306,7 @@ const REQUEST_STATS: u8 = 128;
 const PAY: u8 = 129;
 const ENTER_SEAT: u8 = 130;
 const LEAVE_SEAT: u8 = 131;
-// 132 is taken by NET-20 (#206).
+const SHOT: u8 = 132;
 
 /// How the server answered a [`ClientEvent::Pay`]. The values are part of the wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -502,7 +503,7 @@ impl ServerEvent {
 ///
 /// New events are added in later protocol versions, so readers outside this crate need a catch-all arm and
 /// ignore what they do not use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ClientEvent {
     /// Ask for [`ServerEvent::Stats`]. A server started without load-test reporting ignores it.
@@ -519,6 +520,9 @@ pub enum ClientEvent {
     /// Ask to leave the seat the player sits in, or say that the vehicle's physics threw the player out. The
     /// server always grants it.
     LeaveSeat,
+    /// The client's player fired once, and what it hit (ADR 0006, section 5). Shots have their own rate limit,
+    /// separate from the other events'.
+    Shot(Box<Shot>),
     /// Pay `amount` from the player's wallet to the player with entity id `to`; answered by [`ServerEvent::Paid`]
     /// with the same `key`. Sending the same key again is answered without paying twice. Only servers started
     /// for money load tests take it (task DB-8); others answer [`PayResult::Refused`].
@@ -543,6 +547,10 @@ impl ClientEvent {
                 out.push(*seat);
             }
             Self::LeaveSeat => out.push(LEAVE_SEAT),
+            Self::Shot(shot) => {
+                out.push(SHOT);
+                shot.write(out);
+            }
             Self::Pay { key, to, amount } => {
                 out.push(PAY);
                 out.extend_from_slice(&key.to_le_bytes());
@@ -563,6 +571,7 @@ impl ClientEvent {
                 Self::EnterSeat { vehicle, seat }
             }
             [LEAVE_SEAT] => Self::LeaveSeat,
+            [SHOT] => Self::Shot(Box::new(Shot::read(&mut r)?)),
             [PAY] => Self::Pay {
                 key: u64::from_le_bytes(r.array()?),
                 to: u32::from_le_bytes(r.array()?),

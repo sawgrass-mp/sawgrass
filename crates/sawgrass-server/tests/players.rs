@@ -1073,6 +1073,50 @@ fn a_hand_off_at_speed_is_not_refused() {
     assert_eq!(traffic.refused_owned_movement.load(Ordering::Relaxed), 0);
 }
 
+/// NET-20, ADR 0006 section 5: shots have their own budget, so a burst of shots does not use up the other events'
+/// and is dropped beyond its own, without closing the connection.
+#[test]
+fn shots_are_limited_apart_from_other_events() {
+    use sawgrass_protocol::combat::Shot;
+    use sawgrass_protocol::entity::AssetId;
+    use sawgrass_protocol::game::ClientEvent;
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (mut client, traffic, _players) = limited(&runtime, Limits::default());
+    let packet = |event: ClientEvent| {
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::Event,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        event.encode(&mut packet);
+        packet
+    };
+    let from = Position::from_metres([1.0, 2.0, 3.0]).expect("position");
+    let shot = packet(ClientEvent::Shot(Box::new(Shot::new(1, AssetId(9), from))));
+    let other = packet(ClientEvent::RequestStats);
+    // 30 shots against a burst of 20, and 30 other events against a burst of 40.
+    for _ in 0..30 {
+        runtime.block_on(client.send_event(&shot)).expect("send");
+        runtime.block_on(client.send_event(&other)).expect("send");
+    }
+    let limits = Limits::default();
+    assert!(wait_for(&traffic.shots_received, limits.shot_burst as u64, || ()));
+    assert!(wait_for(&traffic.dropped_events, 1, || ()));
+    std::thread::sleep(Duration::from_millis(100));
+    let (shots, dropped) = (
+        traffic.shots_received.load(Ordering::Relaxed),
+        traffic.dropped_events.load(Ordering::Relaxed),
+    );
+    // Only shots were dropped: the other events stayed within their own burst.
+    assert_eq!(shots + dropped, 30, "{shots} shots, {dropped} dropped");
+    assert!(shots < 30);
+    assert_eq!(traffic.closed_floods.load(Ordering::Relaxed), 0);
+}
+
 /// SRV-15, ADR 0006 section 4: the server seats a player who asks, is close and finds the seat free; the driver
 /// owns the vehicle and the player moves with it; leaving is always granted; a far or locked request is refused.
 #[test]
