@@ -85,6 +85,20 @@ pub struct PlayerState(pub ClientState);
 /// `Stats` every few seconds, so a client that reads its stream never comes near it.
 const EVENT_QUEUE: usize = 16 + 2 * OWNERSHIP_CAP as usize;
 
+/// Most lost ownership events kept to be sent again; beyond it they are only counted. Well above what one tick's
+/// changes of owner can lose.
+const MAX_OWNER_RETRIES: usize = 4096;
+
+/// Whether a lost ownership event for `player` still says what is true: "yours" while it owns the spawned entity
+/// with `epoch` (`owner` as [`Ownership::owner`] gives it), "not yours" while it does not own it.
+fn still_holds(owner: Option<(Option<u32>, u8)>, spawned: bool, player: u32, epoch: u8, yours: bool) -> bool {
+    if yours {
+        spawned && owner == Some((Some(player), epoch))
+    } else {
+        owner.is_none_or(|(o, _)| o != Some(player))
+    }
+}
+
 /// Most entities one player owns: [`OwnershipRules::cap`]'s default. A player may gain and lose that many in one
 /// evaluation cycle, so the event queue leaves room for both.
 const OWNERSHIP_CAP: u16 = 24;
@@ -357,6 +371,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
             ..OwnershipRules::default()
         },
         owner_changes: Vec::new(),
+        owner_retries: Vec::new(),
         tick: 0,
         infos: Vec::new(),
         info_ticks: Vec::new(),
@@ -574,6 +589,9 @@ pub struct Players {
     ownership_rules: OwnershipRules,
     /// This tick's changes of owner, to tell the players about.
     owner_changes: Vec<Change>,
+    /// Ownership events that found the player's event queue full, as (player slot, entity id, epoch, yours): sent
+    /// again each tick while they still hold, so a lost event does not leave an entity without its simulator.
+    owner_retries: Vec<(u32, u32, u8, bool)>,
     /// The tick being run, or the last one run.
     tick: u32,
     /// The info each slot sends, built from `peds`, and the tick it last changed at.
@@ -735,6 +753,7 @@ impl Players {
         self.apply_inbound(world, info);
         self.apply_states(world, info.tick as u32);
         self.grid.rebuild();
+        self.retry_owner_events();
         self.assign_owners();
         self.send_snapshots(info.tick as u32);
         // Every visible set has been recomputed without the players who left: their slots may be reused.
@@ -795,17 +814,39 @@ impl Players {
     }
 
     /// Sends the player in slot `player`, if any, the ownership event for `entity`.
-    fn tell_owner(&self, player: Option<u32>, entity: u32, epoch: u8, yours: bool) {
-        let Some(Some(p)) = player.and_then(|s| self.players.get(s as usize)) else {
-            return;
+    /// A lost one is counted and kept to be sent again (see [`Players::retry_owner_events`]).
+    fn tell_owner(&mut self, player: Option<u32>, entity: u32, epoch: u8, yours: bool) {
+        let Some(player) = player else { return };
+        if !self.try_tell_owner(player, entity, epoch, yours) {
+            self.traffic.lost_owner_events.fetch_add(1, Ordering::Relaxed);
+            if self.owner_retries.len() < MAX_OWNER_RETRIES {
+                self.owner_retries.push((player, entity, epoch, yours));
+            }
+        }
+    }
+
+    /// Whether the event reached the player's queue; `true` for a slot with no player, as there is no one to tell.
+    fn try_tell_owner(&self, player: u32, entity: u32, epoch: u8, yours: bool) -> bool {
+        let Some(Some(p)) = self.players.get(player as usize) else {
+            return true;
         };
         let event = ServerEvent::Ownership { entity, epoch, yours };
-        if p.events
+        p.events
             .try_send(event_packet(&event, u64::from(self.tick)))
-            .is_err()
-        {
-            self.traffic.lost_owner_events.fetch_add(1, Ordering::Relaxed);
-        }
+            .is_ok()
+    }
+
+    /// Sends again the ownership events that were lost and still hold: "yours" while the player owns the entity
+    /// with that epoch, "not yours" while it does not own it. One the ownership has moved past is dropped.
+    fn retry_owner_events(&mut self) {
+        let mut retries = std::mem::take(&mut self.owner_retries);
+        retries.retain(|&(player, entity, epoch, yours)| {
+            let owner = self.ownership.owner(entity >> 16);
+            let spawned = self.spawned(entity).is_some();
+            still_holds(owner, spawned, player, epoch, yours)
+                && !self.try_tell_owner(player, entity, epoch, yours)
+        });
+        self.owner_retries = retries;
     }
 
     fn apply_inbound(&mut self, world: &mut World, info: &TickInfo) {
@@ -868,6 +909,7 @@ impl Players {
                     }
                     self.slots.free(slot);
                     self.ownership.player_left(slot.index, &mut self.owner_changes);
+                    self.owner_retries.retain(|r| r.0 != slot.index);
                 }
             }
         }
@@ -1139,6 +1181,20 @@ pub fn bind_gateway(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lost "yours" is sent again only while the player still owns the entity with that epoch; a lost "not
+    /// yours" only while it does not own it (again).
+    #[test]
+    fn a_lost_ownership_event_is_retried_only_while_it_holds() {
+        assert!(still_holds(Some((Some(3), 5)), true, 3, 5, true));
+        assert!(!still_holds(Some((Some(3), 6)), true, 3, 5, true));
+        assert!(!still_holds(Some((Some(4), 5)), true, 3, 5, true));
+        assert!(!still_holds(Some((Some(3), 5)), false, 3, 5, true));
+        assert!(still_holds(Some((Some(4), 6)), true, 3, 5, false));
+        assert!(still_holds(Some((None, 6)), true, 3, 5, false));
+        assert!(still_holds(None, false, 3, 5, false));
+        assert!(!still_holds(Some((Some(3), 7)), true, 3, 5, false));
+    }
 
     #[test]
     fn ipv6_counts_per_64_and_ipv4_per_address() {
