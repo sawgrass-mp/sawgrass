@@ -22,6 +22,16 @@ use crate::link::{Datagrams, NetLink, ServerEvents};
 /// How often queued datagrams are sent. Well under a frame, so a state is not held back.
 const SEND_PERIOD: Duration = Duration::from_millis(2);
 
+const CLOSED: &str = "closed by the module";
+
+/// Resolves once `stop` is set, checking it every [`SEND_PERIOD`].
+async fn stopped(stop: &AtomicBool) {
+    let mut interval = tokio::time::interval(SEND_PERIOD);
+    while !stop.load(Ordering::Relaxed) {
+        interval.tick().await;
+    }
+}
+
 /// Where to connect.
 #[derive(Debug, Clone)]
 pub struct ConnectConfig {
@@ -97,9 +107,15 @@ async fn run(
     status: &Mutex<Status>,
     stop: &AtomicBool,
 ) -> String {
-    let session = match connect(config.server, &config.server_name, config.roots, PROTOCOL_VERSION).await {
-        Ok(session) => session,
-        Err(e) => return format!("could not connect: {e}"),
+    // The handshake can wait up to the gateway's idle timeout for a server that does not answer, so it races the
+    // stop flag: dropping the connection while it connects must not hold the game's thread.
+    let connecting = connect(config.server, &config.server_name, config.roots, PROTOCOL_VERSION);
+    let session = tokio::select! {
+        result = connecting => match result {
+            Ok(session) => session,
+            Err(e) => return format!("could not connect: {e}"),
+        },
+        () = stopped(stop) => return CLOSED.to_owned(),
     };
     set(status, Status::Connected);
     // The event sender is kept so the stream stays open; the module sends no events yet.
@@ -136,7 +152,7 @@ async fn run(
             ended = &mut events_in => break ended.unwrap_or_else(|e| e.to_string()),
             _ = interval.tick() => {
                 if stop.load(Ordering::Relaxed) {
-                    break "closed by the module".to_owned();
+                    break CLOSED.to_owned();
                 }
                 for datagram in outbox.take() {
                     if let Err(e) = datagrams.send(Bytes::from(datagram)) {
@@ -151,4 +167,33 @@ async fn run(
     datagrams_in.abort();
     events_in.abort();
     reason
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sawgrass_netcode::ClientConfig;
+    use std::time::Instant;
+
+    #[test]
+    fn dropping_while_connecting_returns_at_once() {
+        // A UDP port nobody answers on: the handshake would wait for the idle timeout.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
+        let config = ConnectConfig {
+            server: silent.local_addr().expect("addr"),
+            server_name: "localhost".into(),
+            roots: RootCertStore::empty(),
+        };
+        let link = NetLink::joining(ClientConfig::default());
+        let connection = Connection::start(config, &link).expect("thread");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(connection.status(), Status::Connecting);
+        let started = Instant::now();
+        drop(connection);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "drop took {:?}",
+            started.elapsed()
+        );
+    }
 }

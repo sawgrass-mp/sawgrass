@@ -358,3 +358,66 @@ fn a_joining_link_waits_for_the_join_and_takes_corrections() {
         "owned entity moved back by the server"
     );
 }
+
+#[test]
+fn a_second_join_starts_the_session_over() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::joining(ClientConfig::default());
+    let (inbox, events) = (link.inbox(), link.events());
+    let mut encoder = DeltaEncoder::default();
+    events.push(ServerEvent::Joined {
+        entity: LOCAL,
+        tick_hz: TICK_HZ,
+    });
+    for frame in 0..60u32 {
+        if frame % 3 == 0 {
+            let tick = frame / 3;
+            for d in snapshot(
+                &mut encoder,
+                tick,
+                &[state(1, tick as f32 * 0.5), state(LOCAL, 0.0)],
+            ) {
+                inbox.push(d);
+            }
+        }
+        module.frame(1.0 / FRAME_HZ, &mut game, &mut link).expect("frame");
+    }
+    let old = module.entities().handle(1).expect("shown in the first session");
+    link.set_ownership(1, 4, true);
+
+    // A reconnect: the new session's snapshots no longer hold entity 1.
+    events.push(ServerEvent::Joined {
+        entity: LOCAL,
+        tick_hz: TICK_HZ,
+    });
+    let mut encoder = DeltaEncoder::default();
+    for frame in 0..60u32 {
+        if frame % 3 == 0 {
+            for d in snapshot(&mut encoder, frame / 3, &[state(LOCAL, 0.0)]) {
+                inbox.push(d);
+            }
+        }
+        module.frame(1.0 / FRAME_HZ, &mut game, &mut link).expect("frame");
+    }
+    assert!(
+        module.entities().handle(1).is_none(),
+        "the old session's entity is gone"
+    );
+    assert!(!game.entities.contains_key(&old));
+    assert!(
+        link.owned().is_empty(),
+        "the new session owns nothing for this client yet"
+    );
+    assert!(game.entities.contains_key(&me), "the local player stays");
+    assert_eq!(link.world_errors, 0);
+}

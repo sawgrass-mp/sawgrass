@@ -205,16 +205,26 @@ impl NetLink {
     fn handle_events(&mut self, world: &mut World<'_>) {
         for event in self.events.take() {
             match event {
-                ServerEvent::Joined { entity, tick_hz } => {
-                    // A second join (a reconnect) starts the network core over; the entities shown stay bound and
-                    // are matched again by id.
-                    self.client = Some(Client::new(entity, tick_hz, self.config));
-                }
+                ServerEvent::Joined { entity, tick_hz } => self.joined(entity, tick_hz, world),
                 ServerEvent::Corrected(state) => self.corrected(&state, world),
                 ServerEvent::Ownership { entity, epoch, yours } => self.set_ownership(entity, epoch, yours),
                 ServerEvent::Stats(_) => {}
             }
         }
+    }
+
+    /// A join starts a session over. After a reconnect the new session owns nothing for this client and its
+    /// snapshots may not hold what the old one showed, so everything of the old session goes; what the new one still
+    /// sends is spawned again on its next snapshot.
+    fn joined(&mut self, entity: u32, tick_hz: u16, world: &mut World<'_>) {
+        for id in std::mem::take(&mut self.shown).into_keys() {
+            let result = world.despawn(id);
+            self.count(result);
+        }
+        self.owned.clear();
+        self.samples.clear();
+        self.last_local = None;
+        self.client = Some(Client::new(entity, tick_hz, self.config));
     }
 
     fn corrected(&mut self, state: &EntityState, world: &mut World<'_>) {
