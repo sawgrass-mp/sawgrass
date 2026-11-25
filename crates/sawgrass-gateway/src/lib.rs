@@ -299,56 +299,79 @@ impl Incoming {
 
 /// Connects to the gateway at `addr`, trusting only `roots`, and performs the handshake announcing `version`.
 ///
-/// Clients and bots pass [`PROTOCOL_VERSION`]; other values exist for tests of the refusal path.
+/// Clients and bots pass [`PROTOCOL_VERSION`]; other values exist for tests of the refusal path. Each call opens
+/// its own UDP socket, as a game client does; [`Connector`] shares one between connections.
 pub async fn connect(
     addr: SocketAddr,
     server_name: &str,
     roots: RootCertStore,
     version: u32,
 ) -> Result<Session, Error> {
-    let mut tls = rustls::ClientConfig::builder_with_provider(tls_provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(Error::Tls)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![ALPN.to_vec()];
-    let crypto = QuicClientConfig::try_from(tls).map_err(|e| Error::Io(std::io::Error::other(e)))?;
-    let local: SocketAddr = if addr.is_ipv6() {
-        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
-    } else {
-        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-    };
-    let mut endpoint = Endpoint::client(local).map_err(Error::Io)?;
-    let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport(false));
-    endpoint.set_default_client_config(config);
+    Connector::new(addr.is_ipv6(), roots)?
+        .connect(addr, server_name, version)
+        .await
+}
 
-    let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        let connection = endpoint
-            .connect(addr, server_name)
-            .map_err(Error::Connect)?
-            .await?;
-        let (mut send, mut recv) = connection.open_bi().await?;
-        let mut hello = [0u8; 8];
-        hello[..4].copy_from_slice(&MAGIC);
-        hello[4..].copy_from_slice(&version.to_le_bytes());
-        send.write_all(&hello).await?;
-        let mut welcome = [0u8; 4];
-        recv.read_exact(&mut welcome).await?;
-        let gateway = u32::from_le_bytes(welcome);
-        if !is_compatible(gateway) {
-            connection.close(VERSION_REFUSED, &PROTOCOL_VERSION.to_le_bytes());
-            return Err(Error::VersionRefused { gateway });
-        }
-        Ok(Session {
-            connection,
-            send,
-            recv,
-            peer_version: gateway,
+/// A client UDP socket that several connections share. A load generator uses a few of them for thousands of
+/// bots, so it does not pay one socket and one receive loop per bot; the gateway still sees one QUIC connection
+/// per bot, each with its own keys, streams and datagrams.
+#[derive(Debug, Clone)]
+pub struct Connector {
+    endpoint: Endpoint,
+}
+
+impl Connector {
+    /// Opens a socket on an ephemeral port for IPv6 servers if `ipv6`, IPv4 ones otherwise, trusting only `roots`.
+    pub fn new(ipv6: bool, roots: RootCertStore) -> Result<Self, Error> {
+        let mut tls = rustls::ClientConfig::builder_with_provider(tls_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(Error::Tls)?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tls.alpn_protocols = vec![ALPN.to_vec()];
+        let crypto = QuicClientConfig::try_from(tls).map_err(|e| Error::Io(std::io::Error::other(e)))?;
+        let local: SocketAddr = if ipv6 {
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+        } else {
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+        };
+        let mut endpoint = Endpoint::client(local).map_err(Error::Io)?;
+        let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+        config.transport_config(transport(false));
+        endpoint.set_default_client_config(config);
+        Ok(Self { endpoint })
+    }
+
+    /// Connects to the gateway at `addr` through this socket and performs the handshake announcing `version`.
+    pub async fn connect(&self, addr: SocketAddr, server_name: &str, version: u32) -> Result<Session, Error> {
+        let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            let connection = self
+                .endpoint
+                .connect(addr, server_name)
+                .map_err(Error::Connect)?
+                .await?;
+            let (mut send, mut recv) = connection.open_bi().await?;
+            let mut hello = [0u8; 8];
+            hello[..4].copy_from_slice(&MAGIC);
+            hello[4..].copy_from_slice(&version.to_le_bytes());
+            send.write_all(&hello).await?;
+            let mut welcome = [0u8; 4];
+            recv.read_exact(&mut welcome).await?;
+            let gateway = u32::from_le_bytes(welcome);
+            if !is_compatible(gateway) {
+                connection.close(VERSION_REFUSED, &PROTOCOL_VERSION.to_le_bytes());
+                return Err(Error::VersionRefused { gateway });
+            }
+            Ok(Session {
+                connection,
+                send,
+                recv,
+                peer_version: gateway,
+            })
         })
-    })
-    .await;
-    result.unwrap_or(Err(Error::Timeout))
+        .await;
+        result.unwrap_or(Err(Error::Timeout))
+    }
 }
 
 /// An established connection on either side.
