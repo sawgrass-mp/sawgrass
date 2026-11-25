@@ -1,0 +1,25 @@
+[package]
+name = "sawgrass-netcode"
+description = "Runtime-independent network core of the Sawgrass client: snapshot reception, interpolation, local player correction."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sawgrass-protocol = { path = "../sawgrass-protocol" }
+
+[dev-dependencies]
+# The integration test runs the real server and bots over loopback, as the bots' own tests do; rcgen makes their
+# certificate at run time (see the gateway's Cargo.toml for the `time` pin it brings).
+bytes = "1"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+sawgrass-bots = { path = "../sawgrass-bots" }
+sawgrass-gateway = { path = "../sawgrass-gateway" }
+sawgrass-server = { path = "../sawgrass-server" }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+[lints]
+workspace = true
