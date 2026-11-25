@@ -15,13 +15,29 @@
 //! The ledger answers only after the batch that holds an operation is on disk. Connection tasks await those answers
 //! through the writer's callbacks, holding no thread while a batch commits; the tick thread only keeps the map
 //! from entity ids to wallets that payments look up.
+//!
+//! A retried key gets the first answer even after the payee has left (task DB-9): each payer's last
+//! [`RECENT_KEYS`] payments remember the payee's wallet, so the retry reaches the ledger as the same operation and
+//! the ledger answers it from its key window. Only a new key to a player who is not connected is `UnknownPayee`.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 
 use sawgrass_protocol::game::PayResult;
 use sawgrass_store::{Error, Handle, Kind, Operation, Outcome, WalletId};
 use tokio::sync::oneshot;
+
+/// Payments per payer whose payee is remembered for retries. A client retries a payment it got no answer for,
+/// so only its latest keys need this; older retries of a payee who has left are answered `UnknownPayee`.
+pub const RECENT_KEYS: usize = 64;
+
+/// A payment a payer made recently: its key, the entity it paid and that entity's wallet.
+#[derive(Debug, Clone, Copy)]
+struct Paid {
+    key: u64,
+    to: u32,
+    payee: WalletId,
+}
 
 /// Players' wallets, and how payments between them reach the ledger.
 #[derive(Debug)]
@@ -32,6 +48,8 @@ pub struct Money {
     /// Distinguishes this run's keys from earlier runs': connection ids restart at 0.
     run: u64,
     payees: RwLock<HashMap<u32, WalletId>>,
+    /// Each connected payer's latest payments, newest last, at most [`RECENT_KEYS`].
+    recent: Mutex<HashMap<WalletId, VecDeque<Paid>>>,
 }
 
 impl Money {
@@ -56,6 +74,7 @@ impl Money {
             start_cash,
             run,
             payees: RwLock::new(HashMap::new()),
+            recent: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -77,7 +96,12 @@ impl Money {
     /// Pays `amount` from `from` to the player with entity id `to`, once per client `key`, and returns the result
     /// with the payer's balance.
     pub(crate) async fn pay(&self, from: WalletId, key: u64, to: u32, amount: u32) -> (PayResult, i64) {
-        let payee = self.payees.read().ok().and_then(|p| p.get(&to).copied());
+        let payee = self
+            .payees
+            .read()
+            .ok()
+            .and_then(|p| p.get(&to).copied())
+            .or_else(|| self.paid_before(from, key, to));
         let Some(payee) = payee else {
             return (
                 PayResult::UnknownPayee,
@@ -97,10 +121,46 @@ impl Money {
         );
         let after = balance(&self.ledger, from);
         let result = match paid.await {
-            Ok(_) => PayResult::Done,
+            Ok(_) => {
+                // Only a payment the ledger applied holds its key; a refused one leaves the key free, so a retry
+                // of it is a new payment and must find the payee connected.
+                self.remember(from, Paid { key, to, payee });
+                PayResult::Done
+            }
             Err(e) => result_of(&e),
         };
         (result, after.await.unwrap_or(0))
+    }
+
+    /// The payee's wallet if `from` already paid entity `to` with `key`.
+    fn paid_before(&self, from: WalletId, key: u64, to: u32) -> Option<WalletId> {
+        let recent = self.recent.lock().ok()?;
+        recent
+            .get(&from)?
+            .iter()
+            .rev()
+            .find(|p| p.key == key && p.to == to)
+            .map(|p| p.payee)
+    }
+
+    fn remember(&self, from: WalletId, paid: Paid) {
+        let Ok(mut recent) = self.recent.lock() else {
+            return;
+        };
+        let mine = recent.entry(from).or_default();
+        if mine.iter().any(|p| p.key == paid.key && p.to == paid.to) {
+            return;
+        }
+        if mine.len() == RECENT_KEYS {
+            mine.pop_front();
+        }
+        mine.push_back(paid);
+    }
+
+    /// Whether payments to entity `wire` are taken now: it is connected with a wallet.
+    #[must_use]
+    pub fn knows_payee(&self, wire: u32) -> bool {
+        self.payees.read().is_ok_and(|p| p.contains_key(&wire))
     }
 
     /// Records that entity `wire`, connection `connection`'s player, pays and is paid through `wallet`, and funds
@@ -124,10 +184,12 @@ impl Money {
         }
     }
 
-    /// Forgets entity `wire`: payments to it are refused until it is registered again.
+    /// Forgets entity `wire`: new payments to it are refused until it is registered again. Its own recent
+    /// payments are forgotten too, since a wallet belongs to one connection and cannot pay again.
     pub(crate) fn unregister(&self, wire: u32) {
-        if let Ok(mut payees) = self.payees.write() {
-            payees.remove(&wire);
+        let wallet = self.payees.write().ok().and_then(|mut p| p.remove(&wire));
+        if let (Some(wallet), Ok(mut recent)) = (wallet, self.recent.lock()) {
+            recent.remove(&wallet);
         }
     }
 
