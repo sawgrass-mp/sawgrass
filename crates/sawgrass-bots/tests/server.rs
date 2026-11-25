@@ -206,7 +206,7 @@ async fn refused_bots_retry_and_light_bots_on_shared_sockets_play() {
 
     let (gateway, roots) = gateway();
     let addr = gateway.local_addr().expect("addr");
-    // One handshake at a time: bots that connect together are refused until they try again (BOT-5).
+    // One handshake at a time: bots that connect together are refused until they try again (BOT-6).
     let config = ListenConfig {
         limits: Limits {
             max_handshakes: 1,
