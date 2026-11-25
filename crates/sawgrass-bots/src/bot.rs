@@ -13,12 +13,15 @@ use std::time::Duration;
 use bytes::Bytes;
 use sawgrass_gateway::{Connector, Datagrams, EventSender, RootCertStore, connect};
 use sawgrass_protocol::EntityState;
-use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta};
-use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent};
+use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta, decode_delta_with_info};
+use sawgrass_protocol::entity::Info;
+use sawgrass_protocol::game::{ClientEvent, ClientState, OwnedState, PayResult, ServerEvent};
 use sawgrass_protocol::ped::{Motion, PedBlock};
+use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::actions::{Driver, Request, Seen, WEAPON, shot_at_vehicles};
 use crate::record::Recorder;
 use crate::stats::Counters;
 use crate::walker::{Area, Rng, Walker};
@@ -55,6 +58,23 @@ pub struct BotConfig {
     pub pay_every: Option<Duration>,
     /// The entity ids of the bots that joined, so a bot pays a real player.
     pub payees: Arc<Mutex<Vec<u32>>>,
+    /// Bots numbered below this drive the vehicles the server hands them and change seats (BOT-5).
+    pub drivers: u64,
+    /// Bots numbered below this fire at vehicles in their snapshots, `shot_hz` times a second (BOT-5).
+    pub shooters: u64,
+    /// Shots per second of a shooting bot.
+    pub shot_hz: u32,
+}
+
+/// The newest snapshot a shooter may fire against: older ones are past the server's rewind of 250 ms.
+const FRESH: Duration = Duration::from_millis(150);
+
+/// What a driving or shooting bot's tasks share: the vehicles the server says it owns, with their epochs, and
+/// the latest snapshot it decoded, with when it arrived.
+#[derive(Debug, Default)]
+struct Shared {
+    owned: Mutex<Vec<(u32, u8)>>,
+    seen: Mutex<(Option<Instant>, Seen)>,
 }
 
 /// What one bot learned from the server, for tests.
@@ -121,10 +141,13 @@ pub async fn run(
         let _ = event_sender.send(&request).await;
     }
 
+    let acts = index < config.drivers || index < config.shooters;
+    let shared = Arc::new(Shared::default());
     let events_counters = counters.clone();
     let payments = Arc::new(Mutex::new(HashMap::<u64, Instant>::new()));
     let own = Arc::new(AtomicU32::new(u32::MAX));
     let (answered, own_id, payees) = (payments.clone(), own.clone(), config.payees.clone());
+    let events_shared = shared.clone();
     tokio::spawn(async move {
         let mut joined = joined;
         while let Ok((_, packet)) = event_receiver.recv().await {
@@ -155,16 +178,26 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
-                // Bots simulate no vehicle until BOT-5, and an honest walker stays within the limits; a correction
-                // would show up in the server's counts. Other events are not for bots.
+                Ok(ServerEvent::Ownership { entity, epoch, yours }) => {
+                    if let Ok(mut owned) = events_shared.owned.lock() {
+                        owned.retain(|(id, _)| *id != entity);
+                        if yours {
+                            owned.push((entity, epoch));
+                        }
+                    }
+                }
+                // An honest bot stays within the limits; a correction would show up in the server's counts.
+                // Other events are not for bots.
                 Ok(_) | Err(_) => {}
             }
         }
     });
 
+    // Payments, seat requests and shots share the one event stream.
+    let events = Arc::new(tokio::sync::Mutex::new(event_sender));
     let payer = config.pay_every.map(|every| {
         tokio::spawn(pay(
-            event_sender,
+            events.clone(),
             every,
             index,
             own,
@@ -181,9 +214,19 @@ pub async fn run(
         ack.clone(),
         counters.clone(),
         recorder.map(|r| (r, index)),
-        index < config.decoders,
+        index < config.decoders || acts,
+        acts.then(|| shared.clone()),
     ));
-    let ended_early = send_states(&config, index, &datagrams, &ack, &counters, stop).await;
+    let ended_early = send_states(
+        &config,
+        index,
+        (&datagrams, &events),
+        &ack,
+        &counters,
+        &shared,
+        stop,
+    )
+    .await;
     datagrams.close();
     reader.abort();
     if let Some(payer) = payer {
@@ -194,17 +237,25 @@ pub async fn run(
     }
 }
 
-/// Sends the walker's state every client tick until `stop`. Returns whether the connection ended first.
+/// Sends the walker's state every client tick until `stop`, with a driver's vehicle state and seat requests and a
+/// shooter's shots. Returns whether the connection ended first.
 async fn send_states(
     config: &BotConfig,
     index: u64,
-    datagrams: &Datagrams,
+    (datagrams, events): (&Datagrams, &tokio::sync::Mutex<EventSender>),
     ack: &AtomicU32,
     counters: &Counters,
+    shared: &Shared,
     stop: Instant,
 ) -> bool {
     let period = Duration::from_secs(1) / config.send_hz.max(1);
     let mut walker = Walker::new(config.area, index);
+    let mut driver = (index < config.drivers).then(|| Driver::new(index));
+    let shooter = index < config.shooters;
+    let shot_every = Duration::from_secs(1) / config.shot_hz.max(1);
+    let mut next_shot = Instant::now() + shot_every;
+    let mut seen = Seen::default();
+    let mut owned = Vec::new();
     let mut interval = tokio::time::interval(period);
     // A late generator must show as lateness, not catch up in bursts that hide it.
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -219,16 +270,74 @@ async fn send_states(
         counters
             .send_lateness
             .record(now.saturating_duration_since(scheduled));
-        walker.step((now - last).as_secs_f32());
+        let dt = (now - last).as_secs_f32();
         last = now;
+        let mut fresh = false;
+        if driver.is_some() || shooter {
+            if let Ok(latest) = shared.seen.lock() {
+                fresh = latest
+                    .0
+                    .is_some_and(|at| now.saturating_duration_since(at) <= FRESH);
+                seen.clone_from(&latest.1);
+            }
+            if let Ok(o) = shared.owned.lock() {
+                owned.clone_from(&*o);
+            }
+        }
+        let mut vehicle = None;
+        if let Some(driver) = driver.as_mut() {
+            let ids: Vec<u32> = owned.iter().map(|(id, _)| *id).collect();
+            let event = match driver.step(dt, &mut walker, &ids, &seen) {
+                Request::None => None,
+                Request::Enter { vehicle, seat } => Some(ClientEvent::EnterSeat { vehicle, seat }),
+                Request::Leave => Some(ClientEvent::LeaveSeat),
+            };
+            if let Some(event) = event {
+                if send_event(events, &event).await.is_err() {
+                    return true;
+                }
+                Counters::add(&counters.seat_requests, 1);
+            }
+            vehicle = driver
+                .driving()
+                .and_then(|v| owned.iter().find(|(id, _)| *id == v).copied());
+        }
+        if !driver.as_ref().is_some_and(Driver::holds) {
+            walker.step(dt);
+        }
+        if shooter && now >= next_shot {
+            next_shot = now + shot_every;
+            if let Some(shot) = fresh
+                .then(|| shot_at_vehicles(&seen, walker.position()))
+                .flatten()
+            {
+                if send_event(events, &ClientEvent::Shot(Box::new(shot)))
+                    .await
+                    .is_err()
+                {
+                    return true;
+                }
+                Counters::add(&counters.shots_sent, 1);
+            }
+        }
         let Some(state) = client_state(&walker) else {
             continue;
         };
+        let mut ped = ped_block(&walker);
+        if shooter {
+            ped.weapon = WEAPON;
+        }
+        // A driver's vehicle goes where its walker goes; the server places the driver in it.
+        let owned_states: Vec<OwnedState> = vehicle
+            .and_then(|(id, epoch)| OwnedState::new(id, epoch, state, &DRIVEN.to_fields()).ok())
+            .into_iter()
+            .collect();
         let mut packet = header(PacketKind::ClientState, sequence, ack.load(Ordering::Relaxed));
         sequence = sequence.wrapping_add(1);
-        if state.encode_with_ped(&ped_block(&walker), &mut packet).is_err() {
+        if state.encode_with_owned(&ped, &owned_states, &mut packet).is_err() {
             continue;
         }
+        Counters::add(&counters.owned_states_sent, owned_states.len() as u64);
         let len = packet.len() as u64;
         if datagrams.send(Bytes::from(packet)).is_err() {
             return true;
@@ -241,7 +350,7 @@ async fn send_states(
 /// Pays a random other bot 1 to 100 units every `every` on average, the pause drawn between half and one and a
 /// half of it, until the connection ends. Answers arrive on the events task, which matches them by key.
 async fn pay(
-    mut sender: EventSender,
+    sender: Arc<tokio::sync::Mutex<EventSender>>,
     every: Duration,
     index: u64,
     own: Arc<AtomicU32>,
@@ -270,13 +379,25 @@ async fn pay(
             if let Ok(mut p) = payments.lock() {
                 p.insert(key, Instant::now());
             }
-            if sender.send(&packet).await.is_err() {
+            if sender.lock().await.send(&packet).await.is_err() {
                 return;
             }
             Counters::add(&counters.payments_sent, 1);
         }
         tokio::time::sleep(every.mul_f32(rng.range(0.5, 1.5))).await;
     }
+}
+
+/// A driven vehicle's block: intact with its engine running.
+const DRIVEN: VehicleBlock = VehicleBlock {
+    flags: VehicleBlock::ENGINE,
+    ..VehicleBlock::INTACT
+};
+
+async fn send_event(events: &tokio::sync::Mutex<EventSender>, event: &ClientEvent) -> Result<(), ()> {
+    let mut packet = header(PacketKind::Event, 0, 0);
+    event.encode(&mut packet);
+    events.lock().await.send(&packet).await.map_err(|_| ())
 }
 
 /// Decoded snapshots a bot keeps as baselines, as many as the server keeps history for.
@@ -288,10 +409,13 @@ async fn read_snapshots(
     counters: Arc<Counters>,
     record: Option<(Arc<Recorder>, u64)>,
     decode: bool,
+    shared: Option<Arc<Shared>>,
 ) {
     let mut reassembler = Reassembler::new();
-    let mut kept: Vec<(Option<u32>, Vec<EntityState>)> = vec![(None, Vec::new()); KEPT_TICKS];
+    let mut kept: Vec<(Option<u32>, Vec<EntityState>, Vec<Info>)> =
+        vec![(None, Vec::new(), Vec::new()); KEPT_TICKS];
     let mut decoded = Vec::new();
+    let mut infos = Vec::new();
     while let Ok((header, packet)) = datagrams.recv().await {
         if header.kind != PacketKind::DeltaSnapshot {
             continue;
@@ -324,14 +448,33 @@ async fn read_snapshots(
             ack.fetch_max(tick, Ordering::Relaxed);
             continue;
         }
-        if decode_delta(payload, tick, base, &mut decoded).is_err() {
+        let result = match &shared {
+            // A driver or shooter needs each entity's kind, so it keeps the infos too.
+            Some(_) => {
+                let base_infos = base
+                    .as_ref()
+                    .map_or(&[][..], |b| &kept[b.tick as usize % KEPT_TICKS].2[..]);
+                decode_delta_with_info(payload, tick, base, base_infos, &mut decoded, &mut infos)
+            }
+            None => decode_delta(payload, tick, base, &mut decoded),
+        };
+        if result.is_err() {
             continue;
+        }
+        if let Some(shared) = &shared
+            && let Ok(mut seen) = shared.seen.lock()
+        {
+            seen.0 = Some(Instant::now());
+            seen.1.tick = tick;
+            seen.1.entities.clone_from(&decoded);
+            seen.1.infos.clone_from(&infos);
         }
         Counters::add(&counters.received_entities, decoded.len() as u64);
         Counters::add(&counters.decoded_ticks, 1);
         let slot = &mut kept[tick as usize % KEPT_TICKS];
         slot.0 = Some(tick);
         std::mem::swap(&mut slot.1, &mut decoded);
+        std::mem::swap(&mut slot.2, &mut infos);
         ack.fetch_max(tick, Ordering::Relaxed);
     }
 }

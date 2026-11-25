@@ -87,6 +87,16 @@ money: 1998 payments/s sent, 1994/s done, 0 short of funds, 0 refused otherwise;
 "done" is the payments the server confirmed. "short of funds" means the payer had too little; "refused otherwise"
 covers any other answer. The answer time runs from the send to the confirmation, the ledger's group commit included.
 
+### Bots that drive and shoot
+
+`--drivers N` makes the first N bots drive (BOT-5), against a server started with `--vehicles N`. A driver walks to
+a vehicle the server says it owns, takes the driver's seat, drives it along its walker's legs for 20 to 60 s and
+leaves; half the time it then sits 5 to 15 s in the passenger seat of the same parked vehicle. `--shooters N` makes
+the first N bots fire `--shot-hz` times a second (default 2) at the nearest vehicle in their latest snapshot, where
+that snapshot saw it. They hit no player: the server has no respawn yet. Drivers and shooters decode their snapshots
+whatever `--decoders` says. The report adds what they sent; the server's log line has what it granted and refused
+(`seats granted`, `shots ... refused`, `hits ... refused`).
+
 `--record FILE` writes every snapshot datagram the first `--record-bots` bots (default 32) receive to FILE, for the
 packet compression benchmark to replay (`docs/research/packet-compression`). It takes about 70 MB a minute at 1,000
 bots over 1,500 m.

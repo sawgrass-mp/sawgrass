@@ -58,6 +58,9 @@ async fn bots_move_on_the_server_and_see_each_other() {
         sockets: Vec::new(),
         pay_every: None,
         payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(4);
@@ -159,6 +162,9 @@ async fn misbehaving_bots_are_stopped_and_an_honest_one_plays_on() {
         sockets: Vec::new(),
         pay_every: None,
         payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
     });
     let stop = Instant::now() + Duration::from_secs(3);
     let honest = Arc::new(Counters::default());
@@ -242,6 +248,9 @@ async fn refused_bots_retry_and_light_bots_on_shared_sockets_play() {
         sockets,
         pay_every: None,
         payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(5);
@@ -315,6 +324,9 @@ async fn bots_pay_each_other_through_the_ledger() {
         sockets: Vec::new(),
         pay_every: Some(Duration::from_millis(100)),
         payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(3);
