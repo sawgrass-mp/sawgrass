@@ -498,10 +498,19 @@ mod game_payloads {
                 tick_hz: 20,
             },
             ServerEvent::Stats(stats),
+            ServerEvent::Corrected(EntityState {
+                id: 0x0001_0007,
+                position: Position::from_metres([-12.5, 3000.25, 31.0]).expect("position"),
+                velocity: Velocity::from_metres_per_second([1.5, 0.0, -2.0]).expect("velocity"),
+                rotation: Rotation::from_quaternion([0.0, 0.0, 0.6, 0.8]).expect("rotation"),
+            }),
         ] {
             let mut out = Vec::new();
             event.encode(&mut out);
             assert_eq!(ServerEvent::decode(&out), Ok(event));
+            let mut longer = out.clone();
+            longer.push(0);
+            assert_eq!(ServerEvent::decode(&longer), Err(DecodeError::TrailingBytes));
             assert_eq!(
                 ServerEvent::decode(&out[..out.len() - 1]),
                 Err(DecodeError::Truncated)

@@ -35,6 +35,9 @@ struct Link {
 /// Entity 1 runs a 15 m circle at 5.5 m/s; entity 2 drives straight at 18 m/s and turns at right angles every
 /// 3 s; entity 3 walks at 1.4 m/s and is teleported 300 m every 4 s.
 fn truth(id: u32, t: f64) -> ([f32; 3], [f32; 3]) {
+    if let Some(shift) = turn_shift(id) {
+        return truth(2, t + shift);
+    }
     match id {
         1 => {
             let (r, w) = (15.0, 5.5 / 15.0);
@@ -98,8 +101,11 @@ impl Figures {
     }
 }
 
-/// Runs `secs` of play over `link` and measures entity `id` while it is on a smooth stretch of its path.
-fn run(link: Link, secs: f64, seed: u64, id: u32) -> Figures {
+/// One frame of entity `id` as the client showed it: render time in seconds, position, and how it was obtained.
+type Shown = (f64, [f32; 3], Kind);
+
+/// Runs `secs` of play over `link` and returns every frame in which the client showed entity `id`.
+fn play(link: Link, secs: f64, seed: u64, id: u32) -> Vec<Shown> {
     let mut rng = Rng(seed);
     let mut client = Client::new(99, TICK_HZ, ClientConfig::default());
     let mut encoder = DeltaEncoder::default();
@@ -107,9 +113,8 @@ fn run(link: Link, secs: f64, seed: u64, id: u32) -> Figures {
     let mut flight: Vec<(f64, Vec<u8>)> = Vec::new();
     // The server's sent snapshots, as baselines for the delta against the client's acknowledgement.
     let mut sent: Vec<(u32, Vec<EntityState>)> = Vec::new();
-    let mut figures = Figures::default();
+    let mut shown = Vec::new();
     let mut out: Vec<Sample> = Vec::new();
-    let mut previous: Option<[f32; 3]> = None;
     let mut next_tick = 0u32;
     let frames = (secs * FRAME_HZ) as u32;
     for frame in 0..frames {
@@ -119,7 +124,7 @@ fn run(link: Link, secs: f64, seed: u64, id: u32) -> Figures {
             let tick = next_tick;
             next_tick += 1;
             let t = f64::from(tick) / f64::from(TICK_HZ);
-            let states: Vec<EntityState> = (1..=3).map(|id| state(id, t)).collect();
+            let states: Vec<EntityState> = (1..=5).map(|id| state(id, t)).collect();
             let ack = client.ack();
             let base = sent
                 .iter()
@@ -165,23 +170,31 @@ fn run(link: Link, secs: f64, seed: u64, id: u32) -> Figures {
         let Some(render) = client.render_tick() else {
             continue;
         };
-        let Some(s) = out.iter().find(|s| s.id == id) else {
-            continue;
-        };
-        let t = render / f64::from(TICK_HZ);
-        // Skip the second after start-up and the samples around a corner or a teleport, where the true path
-        // itself is not smooth.
+        if let Some(s) = out.iter().find(|s| s.id == id) {
+            shown.push((render / f64::from(TICK_HZ), s.pose.position, s.kind));
+        }
+    }
+    shown
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// Measures entity `id` while it is on a smooth stretch of its path: after the first second, and away from its
+/// corners and teleports, which the tests below measure on their own.
+fn run(link: Link, secs: f64, seed: u64, id: u32) -> Figures {
+    let mut figures = Figures::default();
+    let mut previous: Option<[f32; 3]> = None;
+    for (t, e, kind) in play(link, secs, seed, id) {
         if t < 1.0 || near_a_break(id, t) {
             previous = None;
             continue;
         }
         let (p, _) = truth(id, t);
-        let e = s.pose.position;
-        figures
-            .errors
-            .push(((p[0] - e[0]).powi(2) + (p[1] - e[1]).powi(2) + (p[2] - e[2]).powi(2)).sqrt());
+        figures.errors.push(distance(p, e));
         figures.frames += 1;
-        match s.kind {
+        match kind {
             Kind::Extrapolated => figures.extrapolated += 1,
             Kind::Held => figures.held += 1,
             _ => {}
@@ -195,7 +208,21 @@ fn run(link: Link, secs: f64, seed: u64, id: u32) -> Figures {
     figures
 }
 
+/// Entities 4 and 5 drive entity 2's staircase ahead of it by a quarter and a half of a tick, so their turns fall
+/// between snapshots instead of on one.
+fn turn_shift(id: u32) -> Option<f64> {
+    let tick = 1.0 / f64::from(TICK_HZ);
+    match id {
+        4 => Some(tick / 4.0),
+        5 => Some(tick / 2.0),
+        _ => None,
+    }
+}
+
 fn near_a_break(id: u32, t: f64) -> bool {
+    if let Some(shift) = turn_shift(id) {
+        return near_a_break(2, t + shift);
+    }
     let period = match id {
         2 => 3.0,
         3 => 4.0,
@@ -271,4 +298,77 @@ fn a_teleported_walker_jumps_without_a_streak() {
     assert!(p50 < 0.03, "p50 {p50}");
     // Between teleports it never moves more than a walker does in a few frames.
     assert!(f.largest_step < 0.5, "{}", f.largest_step);
+}
+
+/// The error of car `id` within 0.3 s of its right-angle turns: frames, p50, p95, max.
+fn corner_errors(id: u32, seed: u64) -> (usize, f32, f32, f32) {
+    let shown = play(BAD, 60.0, seed, id);
+    let mut errors: Vec<f32> = shown
+        .iter()
+        .filter(|&&(t, _, _)| t > 1.0 && near_a_break(id, t))
+        .map(|&(t, e, _)| distance(truth(id, t).0, e))
+        .collect();
+    errors.sort_by(f32::total_cmp);
+    let at = |p: f64| errors[((errors.len() - 1) as f64 * p) as usize];
+    (errors.len(), at(0.5), at(0.95), at(1.0))
+}
+
+#[test]
+fn corners_of_a_fast_car_are_cut_by_less_than_a_tick_of_travel() {
+    // The turn on a snapshot, a quarter of a tick after one and half a tick after one.
+    for (id, name) in [
+        (2, "on a tick"),
+        (4, "a quarter tick off"),
+        (5, "half a tick off"),
+    ] {
+        let (frames, p50, p95, max) = corner_errors(id, 5);
+        println!(
+            "car corners {name}, bad link: {frames} frames within 0.3 s of a right-angle turn, error p50 {:.1} cm, \
+             p95 {:.1} cm, max {:.1} cm",
+            p50 * 100.0,
+            p95 * 100.0,
+            max * 100.0
+        );
+        assert!(frames > 500, "{frames} frames");
+        // At 18 m/s a tick covers 0.9 m, and 1.8 m when a snapshot near the corner is lost. A turn on a snapshot
+        // is the worst case: that snapshot's velocity already points along the new leg, so the curve from the
+        // sample before bulges inside the corner. A turn between snapshots is cut by the curve from the sample
+        // before it to the sample after, less. Either way the cut stays under half of what is covered across a
+        // lost snapshot.
+        assert!(max < 0.75, "{name}: max {max}");
+        assert!(p95 < 0.3, "{name}: p95 {p95}");
+    }
+}
+
+#[test]
+fn a_teleport_is_one_jump_with_nothing_in_between() {
+    let shown = play(BAD, 60.0, 6, 3);
+    let tick = 1.0 / f64::from(TICK_HZ);
+    let (mut streak, mut early) = (0, 0);
+    let mut jumps = 0;
+    for pair in shown.windows(2) {
+        let ((_, a, _), (t1, b, _)) = (pair[0], pair[1]);
+        if distance(a, b) > 100.0 {
+            jumps += 1;
+        }
+        // Every frame shows the walker where it was at the render time, or where it was one tick later: the
+        // interpolator jumps at the start of the snapshot interval that holds the teleport. Anything else would
+        // be a frame between the two places.
+        let now = distance(truth(3, t1).0, b);
+        let next = distance(truth(3, t1 + tick).0, b);
+        if now > 1.0 && next > 1.0 {
+            streak += 1;
+        } else if now > 1.0 {
+            early += 1;
+        }
+    }
+    println!(
+        "walker teleports, bad link: {jumps} jumps over 60 s, {streak} frames between the two places, {early} frames \
+         shown at the new place up to a tick early"
+    );
+    // A jump every 4 s, after the first second.
+    assert!((13..=15).contains(&jumps), "{jumps} jumps");
+    assert_eq!(streak, 0);
+    // At most one tick (three 60 Hz frames) early per jump.
+    assert!(early <= 3 * jumps, "{early} early frames for {jumps} jumps");
 }

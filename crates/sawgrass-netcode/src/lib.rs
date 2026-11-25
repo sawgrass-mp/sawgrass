@@ -16,8 +16,8 @@
 //!
 //! Clients decide their own movement (`docs/architecture.md`, "Authority"): the game's own simulation is the
 //! prediction, and the server only accepts or refuses what the client reports. A refused move leaves the player
-//! where it was last accepted; [`local::LocalPlayer::correct`] brings the local player back there once the server
-//! says so. The server does not send that yet (see [`Client::correct`]).
+//! where it was last accepted and sends that state back (`ServerEvent::Corrected`); [`Client::corrected`] brings
+//! the local player back there.
 
 pub mod clock;
 pub mod interp;

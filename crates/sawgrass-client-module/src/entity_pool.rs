@@ -69,22 +69,27 @@ mod tests {
     #[test]
     fn binds_one_to_one_and_unbinds_from_either_side() {
         let mut pool = EntityPool::default();
-        pool.bind(7, GameHandle(70), EntityKind::Ped).expect("bound");
-        pool.bind(8, GameHandle(80), EntityKind::Vehicle).expect("bound");
+        pool.bind(7, GameHandle::new(70, 1), EntityKind::Ped)
+            .expect("bound");
+        pool.bind(8, GameHandle::new(80, 1), EntityKind::Vehicle)
+            .expect("bound");
         assert_eq!(
-            pool.bind(7, GameHandle(71), EntityKind::Ped),
+            pool.bind(7, GameHandle::new(71, 1), EntityKind::Ped),
             Err(BindError::NetIdTaken(7))
         );
         assert_eq!(
-            pool.bind(9, GameHandle(80), EntityKind::Ped),
-            Err(BindError::HandleTaken(GameHandle(80)))
+            pool.bind(9, GameHandle::new(80, 1), EntityKind::Ped),
+            Err(BindError::HandleTaken(GameHandle::new(80, 1)))
         );
-        assert_eq!(pool.handle(7), Some(GameHandle(70)));
-        assert_eq!(pool.net_id(GameHandle(80)), Some(8));
-        assert_eq!(pool.unbind_handle(GameHandle(70)), Some(7));
+        assert_eq!(pool.handle(7), Some(GameHandle::new(70, 1)));
+        assert_eq!(pool.net_id(GameHandle::new(80, 1)), Some(8));
+        assert_eq!(pool.unbind_handle(GameHandle::new(70, 1)), Some(7));
         assert_eq!(pool.handle(7), None);
-        assert_eq!(pool.unbind_net(8), Some((GameHandle(80), EntityKind::Vehicle)));
-        assert_eq!(pool.net_id(GameHandle(80)), None);
+        assert_eq!(
+            pool.unbind_net(8),
+            Some((GameHandle::new(80, 1), EntityKind::Vehicle))
+        );
+        assert_eq!(pool.net_id(GameHandle::new(80, 1)), None);
         assert!(pool.is_empty());
     }
 }
