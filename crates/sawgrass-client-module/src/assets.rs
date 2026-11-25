@@ -1,6 +1,6 @@
 //! Asset tables: which game asset each protocol [`AssetId`] stands for, for one game build.
 //!
-//! The protocol names models, animations and other assets by an opaque `u32` (ADR 0006, in review), so the same id
+//! The protocol names models, animations and other assets by an opaque `u32` (ADR 0006), so the same id
 //! means the same thing on every client whatever the build. What it means in the game can change with a patch, so
 //! this table is kept per build like the function table, outside this repository:
 //!
@@ -16,11 +16,7 @@ use crate::table::TableError;
 
 use crate::game::GameAsset;
 
-/// The protocol's id for an asset.
-///
-/// TODO(ADR 0006): use the protocol's `AssetId` once that pull request lands; the meaning is the same.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct AssetId(pub u32);
+pub use sawgrass_protocol::entity::AssetId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetTable {
@@ -60,6 +56,9 @@ impl AssetTable {
                 .parse()
                 .map(AssetId)
                 .map_err(|_| syntax(format!("bad asset id `{key}`")))?;
+            if id == AssetId::NONE {
+                return Err(syntax("asset id 0 means \"none\" in the protocol".into()));
+            }
             let asset = number(value)
                 .map(GameAsset)
                 .ok_or_else(|| syntax(format!("bad game value `{value}`")))?;
@@ -115,7 +114,12 @@ mod tests {
     #[test]
     fn refuses_malformed_tables() {
         assert_eq!(AssetTable::parse("17 = 1"), Err(TableError::MissingBuild));
-        for text in ["build = x\ncar = 1", "build = x\n17 = 0xZZ", "build = x\n17"] {
+        for text in [
+            "build = x\ncar = 1",
+            "build = x\n0 = 1",
+            "build = x\n17 = 0xZZ",
+            "build = x\n17",
+        ] {
             assert!(
                 matches!(AssetTable::parse(text), Err(TableError::Syntax { line: 2, .. })),
                 "{text:?}"

@@ -8,7 +8,7 @@ use std::fmt;
 use crate::assets::{AssetId, AssetTable};
 use crate::entity_pool::{BindError, EntityPool, NetId};
 use crate::game::{CameraPose, EntityKind, GameApi, GameError, InputState, Pose, SinglePlayerSystem};
-use crate::hooks::{GameEvent, HookPoint};
+use crate::hooks::{EventSink, GameEvent, HookPoint};
 use crate::runtime::{HookHandle, HookRequest, Runtime, RuntimeError};
 use crate::table::{FunctionTable, ResolveError, ResolvedFunctions};
 
@@ -137,9 +137,10 @@ pub struct Module<R: Runtime> {
     hooks: Vec<HookHandle>,
     assets: AssetTable,
     pool: EntityPool,
-    events: Vec<GameEvent>,
+    events: EventSink,
     single_player_off: bool,
-    /// Peds and vehicles the game made by itself and the module removed.
+    /// Peds and vehicles the game made by itself and the module removed. Entities that were already gone when the
+    /// frame got to them (one of ours spawned and despawned within a frame, say) are not counted.
     pub ambient_removed: u64,
 }
 
@@ -158,7 +159,9 @@ impl<R: Runtime> Module<R> {
         let mut hooks = Vec::new();
         for point in HookPoint::ALL {
             let function = point.function().to_owned();
-            let address = resolved.address(&function).unwrap_or_default();
+            let address = resolved
+                .address(&function)
+                .expect("resolve located every required function");
             match runtime.install_hook(HookRequest { function, address }) {
                 Ok(handle) => hooks.push(handle),
                 Err(error) => {
@@ -176,7 +179,7 @@ impl<R: Runtime> Module<R> {
             hooks,
             assets,
             pool: EntityPool::default(),
-            events: Vec::new(),
+            events: EventSink::default(),
             single_player_off: false,
             ambient_removed: 0,
         })
@@ -212,9 +215,9 @@ impl<R: Runtime> Module<R> {
         &self.pool
     }
 
-    /// Called by the runtime adapter from a hook. Events wait for the next frame, so a hook does no work itself.
-    pub fn push_event(&mut self, event: GameEvent) {
-        self.events.push(event);
+    /// The queue the adapter's hooks push into (see [`crate::hooks`]). Take it once at start-up.
+    pub fn event_sink(&self) -> EventSink {
+        self.events.clone()
     }
 
     /// Called by the adapter from the frame hook.
@@ -230,14 +233,15 @@ impl<R: Runtime> Module<R> {
             }
             self.single_player_off = true;
         }
-        for event in std::mem::take(&mut self.events) {
+        for event in self.events.take() {
             match event {
                 GameEvent::EntityCreated { handle, kind, .. } => {
                     let ours = self.pool.net_id(handle).is_some() || game.local_player() == Some(handle);
                     // Objects include the map's own props, so only peds and vehicles count as ambient life.
                     if !ours && kind != EntityKind::Object {
                         match game.remove(handle) {
-                            Ok(()) | Err(GameError::NoSuchEntity(_)) => self.ambient_removed += 1,
+                            Ok(()) => self.ambient_removed += 1,
+                            Err(GameError::NoSuchEntity(_)) => {}
                             Err(error) => return Err(error),
                         }
                     }
@@ -260,11 +264,12 @@ impl<R: Runtime> Module<R> {
         Ok(())
     }
 
-    /// Removes every hook and gives the runtime back.
-    pub fn stop(mut self) -> Result<R, RuntimeError> {
-        for handle in std::mem::take(&mut self.hooks) {
-            self.runtime.remove_hook(handle)?;
-        }
-        Ok(self.runtime)
+    /// Removes every hook and gives the runtime back, with the hooks it could not remove, if any.
+    pub fn stop(mut self) -> (R, Vec<RuntimeError>) {
+        let errors = std::mem::take(&mut self.hooks)
+            .into_iter()
+            .filter_map(|handle| self.runtime.remove_hook(handle).err())
+            .collect();
+        (self.runtime, errors)
     }
 }
