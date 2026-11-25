@@ -50,7 +50,7 @@ pub const MOVING_SPEED: f32 = 0.5;
 /// more than the square of any distance on the 16 km map.
 const CLASS_GAP: f64 = 1e13;
 
-/// Ticks of history kept for baselines: 0.8 s at 20 Hz, several round trips.
+/// Ticks of history kept for baselines: 0.8 s at 20 Hz and 0.53 s at 30 Hz, several round trips either way.
 pub const HISTORY_TICKS: usize = 16;
 
 /// No entity in the slot. Wire ids never take this value: the generation's low 16 bits would be 0xffff in slot
