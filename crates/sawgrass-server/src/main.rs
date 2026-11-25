@@ -7,6 +7,7 @@
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
 //!                 [--max-players N] [--max-per-address N] [--max-handshakes N] [--tick-threads N]
 //!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]
+//!                 [--vehicles N] [--vehicle-area M]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -26,6 +27,9 @@
 //! while the snapshot pool works, so gateway and tick threads together are one per core. Giving only one of the
 //! options gives the other the rest of the cores.
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
+//! - `--vehicles N`: spawn N parked vehicles at start, spread over a square centred on the origin, for load tests
+//!   (default 0). Their model is `AssetId(1)`, a placeholder.
+//! - `--vehicle-area M`: the edge of that square, in metres (default 1500, the bots' crowded area).
 //! - `--resources DIR`: run every resource in `DIR` (a folder with a `resource.toml`) in the tick. A resource that
 //!   fails to load is reported and left out.
 //! - `--script-budget-ms N`: the time all resources together may take in one tick (default 8).
@@ -37,7 +41,10 @@ use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use sawgrass_protocol::game::ServerStats;
+use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+use sawgrass_protocol::game::{ClientState, ServerStats};
+use sawgrass_protocol::vehicle::VehicleBlock;
+use sawgrass_protocol::{Position, Rotation, Velocity};
 use sawgrass_server::limits::Limits;
 use sawgrass_server::net::{self, NetId};
 use sawgrass_server::scripts::{self, Scripts};
@@ -62,6 +69,8 @@ struct Args {
     max_handshakes: usize,
     tick_threads: Option<usize>,
     stats_to_clients: bool,
+    vehicles: u32,
+    vehicle_area: f32,
     resources: Option<PathBuf>,
     script_budget: Duration,
 }
@@ -79,6 +88,8 @@ fn parse_args() -> Result<Args, String> {
         max_handshakes: net::ListenConfig::default().limits.max_handshakes,
         tick_threads: None,
         stats_to_clients: false,
+        vehicles: 0,
+        vehicle_area: 1500.0,
         resources: None,
         script_budget: scripts::DEFAULT_BUDGET,
     };
@@ -127,6 +138,16 @@ fn parse_args() -> Result<Args, String> {
                 args.tick_threads = Some(n.max(1));
             }
             "--stats-to-clients" => args.stats_to_clients = true,
+            "--vehicles" => {
+                args.vehicles = value("--vehicles")?
+                    .parse()
+                    .map_err(|e| format!("--vehicles: {e}"))?;
+            }
+            "--vehicle-area" => {
+                args.vehicle_area = value("--vehicle-area")?
+                    .parse()
+                    .map_err(|e| format!("--vehicle-area: {e}"))?;
+            }
             "--resources" => args.resources = Some(value("--resources")?.into()),
             "--script-budget-ms" => {
                 let ms: u64 = value("--script-budget-ms")?
@@ -141,6 +162,38 @@ fn parse_args() -> Result<Args, String> {
         return Err("--listen needs --cert and --key".to_owned());
     }
     Ok(args)
+}
+
+/// Spawns `count` parked vehicles at even spacing over a square of edge `area` centred on the origin, and returns
+/// how many the server took.
+fn spawn_vehicles(players: &mut net::Players, count: u32, area: f32) -> u32 {
+    let side = f64::from(count).sqrt().ceil().max(1.0) as u32;
+    let step = area / side as f32;
+    let mut spawned = 0;
+    for i in 0..count {
+        let (x, y) = (
+            -area / 2.0 + step * ((i % side) as f32 + 0.5),
+            -area / 2.0 + step * ((i / side) as f32 + 0.5),
+        );
+        let (Ok(position), Ok(rotation)) = (
+            Position::from_metres([x, y, 30.0]),
+            Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]),
+        ) else {
+            continue;
+        };
+        let state = ClientState {
+            position,
+            velocity: Velocity { cm_per_s: [0; 3] },
+            rotation,
+        };
+        let info = Info::with_fields(EntityKind::Vehicle, AssetId(1), &VehicleBlock::INTACT.to_fields());
+        if let Ok(info) = info
+            && players.spawn(info, state).is_some()
+        {
+            spawned += 1;
+        }
+    }
+    spawned
 }
 
 /// Turns CPU time spent over `elapsed` into thousandths of a core.
@@ -228,6 +281,10 @@ fn main() -> ExitCode {
         network = Some((players.traffic(), players.stats_slot()));
         shutdown = Some(players.shutdown());
         let mut players = players;
+        let spawned = spawn_vehicles(&mut players, args.vehicles, args.vehicle_area);
+        if args.vehicles > 0 {
+            println!("spawned {spawned} of {} vehicles", args.vehicles);
+        }
         roster = Some(players.roster());
         tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
         runtime = Some(rt);
