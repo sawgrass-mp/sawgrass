@@ -27,6 +27,14 @@ pub enum CoreEvent {
     EntityLost(NetId),
     /// The local player fired once.
     Shot(ShotReport),
+    /// The local player tried to get into `seat` (0 the driver's) of the server's vehicle `vehicle`. The game was
+    /// kept from seating it: that waits for the server.
+    EnterSeat {
+        vehicle: NetId,
+        seat: u8,
+    },
+    /// The local player left its seat in the game.
+    LeftSeat,
 }
 
 /// One of the local player's shots, in server ids and protocol asset ids.
@@ -117,6 +125,25 @@ impl World<'_> {
 
     pub fn local_player_pose(&self) -> Option<Pose> {
         self.game.pose(self.game.local_player()?)
+    }
+
+    /// Seats the local player in `seat` of the server's vehicle `vehicle`, as the server granted.
+    pub fn seat_local_player(&mut self, vehicle: NetId, seat: u8) -> Result<(), WorldError> {
+        let ped = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
+        let vehicle = self
+            .pool
+            .handle(vehicle)
+            .ok_or(WorldError::UnknownEntity(vehicle))?;
+        self.game.enter_seat(ped, vehicle, seat).map_err(WorldError::Game)
+    }
+
+    /// Takes the local player out of its seat, if the game still has it seated.
+    pub fn unseat_local_player(&mut self) -> Result<(), WorldError> {
+        let ped = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
+        if self.game.seat(ped).is_none() {
+            return Ok(());
+        }
+        self.game.leave_seat(ped).map_err(WorldError::Game)
     }
 
     /// The weapon in the local player's hand, [`AssetId::NONE`] when unarmed or when the asset table does not
@@ -345,6 +372,17 @@ impl<R: Runtime> Module<R> {
                 }
                 // Other peds' shots are the server's to show, from their own clients' reports.
                 GameEvent::Shot(_) => {}
+                GameEvent::SeatRequested { ped, vehicle, seat } if game.local_player() == Some(ped) => {
+                    // A vehicle the server does not know of is not the server's to seat anyone in.
+                    if let Some(vehicle) = self.pool.net_id(vehicle) {
+                        core.on_event(&CoreEvent::EnterSeat { vehicle, seat });
+                    }
+                }
+                GameEvent::SeatLeft { ped } if game.local_player() == Some(ped) => {
+                    core.on_event(&CoreEvent::LeftSeat);
+                }
+                // Other peds sit where the server says, so their seats are not reported.
+                GameEvent::SeatRequested { .. } | GameEvent::SeatLeft { .. } => {}
             }
         }
         let mut world = World {

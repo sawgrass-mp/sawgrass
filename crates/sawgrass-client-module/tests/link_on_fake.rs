@@ -15,7 +15,7 @@ use sawgrass_netcode::{Client, ClientConfig};
 use sawgrass_protocol::combat::Zone;
 use sawgrass_protocol::delta::{DeltaEncoder, fragments};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
-use sawgrass_protocol::game::{ClientEvent, ClientState, OwnedState, ServerEvent};
+use sawgrass_protocol::game::{ClientEvent, ClientState, OwnedState, SeatAnswer, ServerEvent};
 use sawgrass_protocol::world::{Door, Environment};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position, Rotation, Velocity};
 
@@ -690,4 +690,83 @@ fn the_clock_weather_and_doors_follow_the_server() {
         }
     );
     assert_eq!(link.world_errors, 1);
+}
+
+#[test]
+fn the_server_decides_the_local_players_seat() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    let (inbox, events, sent) = (link.inbox(), link.events(), link.client_events());
+    let mut encoder = DeltaEncoder::default();
+    let mut tick = 0;
+    let mut frames = |n: u32, module: &mut Module<FakeRuntime>, game: &mut FakeGame, link: &mut NetLink| {
+        for _ in 0..n {
+            for d in snapshot(&mut encoder, tick, &[state(1, 2.0), state(LOCAL, 0.0)]) {
+                inbox.push(d);
+            }
+            tick += 1;
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        }
+    };
+    frames(10, &mut module, &mut game, &mut link);
+    let car = module.entities().handle(1).expect("shown");
+    let hooks = module.event_sink();
+    let answer = |answer: SeatAnswer| ServerEvent::Seat {
+        vehicle: 1,
+        seat: 0,
+        answer,
+    };
+
+    // The player goes for the driver's seat: the server is asked, and the game waits for it.
+    hooks.push(GameEvent::SeatRequested {
+        ped: me,
+        vehicle: car,
+        seat: 0,
+    });
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(sent.take(), vec![ClientEvent::EnterSeat { vehicle: 1, seat: 0 }]);
+    assert_eq!(game.seats.get(&me), None);
+
+    // Someone got there first.
+    events.push(answer(SeatAnswer::Taken));
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(link.seat_answer(), Some((1, 0, SeatAnswer::Taken)));
+    assert_eq!((link.seat(), game.seats.get(&me)), (None, None));
+
+    // Granted: the module seats the player.
+    events.push(answer(SeatAnswer::Granted));
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(link.seat(), Some((1, 0)));
+    assert_eq!(game.seats.get(&me), Some(&(car, 0)));
+
+    // The player gets out in the game: the server is told, and confirms.
+    game.leave_seat(me).expect("out");
+    hooks.push(GameEvent::SeatLeft { ped: me });
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(sent.take(), vec![ClientEvent::LeaveSeat]);
+    events.push(answer(SeatAnswer::Left));
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(link.seat(), None);
+
+    // Seated again, then the server takes the player out itself: the module unseats it, and the game's report of
+    // that is not sent back as a request.
+    events.push(answer(SeatAnswer::Granted));
+    frames(1, &mut module, &mut game, &mut link);
+    events.push(answer(SeatAnswer::Left));
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(game.seats.get(&me), None);
+    hooks.push(GameEvent::SeatLeft { ped: me });
+    frames(1, &mut module, &mut game, &mut link);
+    assert!(sent.take().is_empty());
+    assert_eq!(link.world_errors, 0);
 }
