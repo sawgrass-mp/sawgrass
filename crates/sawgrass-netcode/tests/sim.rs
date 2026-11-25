@@ -35,6 +35,9 @@ struct Link {
 /// Entity 1 runs a 15 m circle at 5.5 m/s; entity 2 drives straight at 18 m/s and turns at right angles every
 /// 3 s; entity 3 walks at 1.4 m/s and is teleported 300 m every 4 s.
 fn truth(id: u32, t: f64) -> ([f32; 3], [f32; 3]) {
+    if let Some(shift) = turn_shift(id) {
+        return truth(2, t + shift);
+    }
     match id {
         1 => {
             let (r, w) = (15.0, 5.5 / 15.0);
@@ -121,7 +124,7 @@ fn play(link: Link, secs: f64, seed: u64, id: u32) -> Vec<Shown> {
             let tick = next_tick;
             next_tick += 1;
             let t = f64::from(tick) / f64::from(TICK_HZ);
-            let states: Vec<EntityState> = (1..=3).map(|id| state(id, t)).collect();
+            let states: Vec<EntityState> = (1..=5).map(|id| state(id, t)).collect();
             let ack = client.ack();
             let base = sent
                 .iter()
@@ -205,7 +208,21 @@ fn run(link: Link, secs: f64, seed: u64, id: u32) -> Figures {
     figures
 }
 
+/// Entities 4 and 5 drive entity 2's staircase ahead of it by a quarter and a half of a tick, so their turns fall
+/// between snapshots instead of on one.
+fn turn_shift(id: u32) -> Option<f64> {
+    let tick = 1.0 / f64::from(TICK_HZ);
+    match id {
+        4 => Some(tick / 4.0),
+        5 => Some(tick / 2.0),
+        _ => None,
+    }
+}
+
 fn near_a_break(id: u32, t: f64) -> bool {
+    if let Some(shift) = turn_shift(id) {
+        return near_a_break(2, t + shift);
+    }
     let period = match id {
         2 => 3.0,
         3 => 4.0,
@@ -283,31 +300,44 @@ fn a_teleported_walker_jumps_without_a_streak() {
     assert!(f.largest_step < 0.5, "{}", f.largest_step);
 }
 
-#[test]
-fn corners_of_a_fast_car_are_cut_by_less_than_a_tick_of_travel() {
-    let shown = play(BAD, 60.0, 5, 2);
+/// The error of car `id` within 0.3 s of its right-angle turns: frames, p50, p95, max.
+fn corner_errors(id: u32, seed: u64) -> (usize, f32, f32, f32) {
+    let shown = play(BAD, 60.0, seed, id);
     let mut errors: Vec<f32> = shown
         .iter()
-        .filter(|&&(t, _, _)| t > 1.0 && near_a_break(2, t))
-        .map(|&(t, e, _)| distance(truth(2, t).0, e))
+        .filter(|&&(t, _, _)| t > 1.0 && near_a_break(id, t))
+        .map(|&(t, e, _)| distance(truth(id, t).0, e))
         .collect();
     errors.sort_by(f32::total_cmp);
     let at = |p: f64| errors[((errors.len() - 1) as f64 * p) as usize];
-    let (p50, p95, max) = (at(0.5), at(0.95), at(1.0));
-    println!(
-        "car corners, bad link: {} frames within 0.3 s of a right-angle turn, error p50 {:.1} cm, p95 {:.1} cm, \
-         max {:.1} cm",
-        errors.len(),
-        p50 * 100.0,
-        p95 * 100.0,
-        max * 100.0
-    );
-    assert!(errors.len() > 500, "{} frames", errors.len());
-    // The turns fall on a snapshot, whose velocity already points along the new leg, so the curve from the sample
-    // before bulges inside the corner. At 18 m/s a tick covers 0.9 m, and 1.8 m when the snapshot before the
-    // corner is lost: the cut stays under half of that.
-    assert!(max < 0.75, "max {max}");
-    assert!(p95 < 0.3, "p95 {p95}");
+    (errors.len(), at(0.5), at(0.95), at(1.0))
+}
+
+#[test]
+fn corners_of_a_fast_car_are_cut_by_less_than_a_tick_of_travel() {
+    // The turn on a snapshot, a quarter of a tick after one and half a tick after one.
+    for (id, name) in [
+        (2, "on a tick"),
+        (4, "a quarter tick off"),
+        (5, "half a tick off"),
+    ] {
+        let (frames, p50, p95, max) = corner_errors(id, 5);
+        println!(
+            "car corners {name}, bad link: {frames} frames within 0.3 s of a right-angle turn, error p50 {:.1} cm, \
+             p95 {:.1} cm, max {:.1} cm",
+            p50 * 100.0,
+            p95 * 100.0,
+            max * 100.0
+        );
+        assert!(frames > 500, "{frames} frames");
+        // At 18 m/s a tick covers 0.9 m, and 1.8 m when a snapshot near the corner is lost. A turn on a snapshot
+        // is the worst case: that snapshot's velocity already points along the new leg, so the curve from the
+        // sample before bulges inside the corner. A turn between snapshots is cut by the curve from the sample
+        // before it to the sample after, less. Either way the cut stays under half of what is covered across a
+        // lost snapshot.
+        assert!(max < 0.75, "{name}: max {max}");
+        assert!(p95 < 0.3, "{name}: p95 {p95}");
+    }
 }
 
 #[test]

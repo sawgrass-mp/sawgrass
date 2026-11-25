@@ -130,8 +130,9 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
+                // An honest walker stays within the limits; a correction would show up in the server's counts.
                 // Bots do not pay each other yet (BOT-7).
-                Ok(ServerEvent::Paid { .. }) | Err(_) => {}
+                Ok(ServerEvent::Corrected(_) | ServerEvent::Paid { .. }) | Err(_) => {}
             }
         }
     });

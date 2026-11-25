@@ -1,7 +1,7 @@
 //! The four parts together, behind the calls a game module (or a bot) makes.
 
 use sawgrass_protocol::game::ClientState;
-use sawgrass_protocol::{PacketHeader, PacketKind};
+use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 
 use crate::Pose;
 use crate::clock::{ClockConfig, ServerClock};
@@ -104,11 +104,15 @@ impl Client {
     }
 
     /// Takes where the server holds the local player while the game has it at `current`.
-    ///
-    /// The server does not report this yet: it refuses a bad move silently and keeps the player where it was last
-    /// accepted. Until it sends that position this is called by nobody but tests; the follow-up task adds the event.
     pub fn correct(&mut self, current: &Pose, server: &Pose) -> Correction {
         self.local.correct(current, server)
+    }
+
+    /// Takes the state of a [`ServerEvent::Corrected`](sawgrass_protocol::game::ServerEvent::Corrected), the
+    /// server's answer to a refused state, while the game has the local player at `current`. `None` if the event is
+    /// for another entity: one this client simulates (a vehicle, an NPC), which the game module moves back itself.
+    pub fn corrected(&mut self, state: &EntityState, current: &Pose) -> Option<Correction> {
+        (state.id == self.entity).then(|| self.local.correct(current, &Pose::from_state(state)))
     }
 
     /// The offset to move the local player by this frame, `dt` seconds after the last, while a correction is being
