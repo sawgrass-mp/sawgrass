@@ -1,10 +1,10 @@
 //! One resource: its Luau instance, its event handlers and the limits every call into it runs under.
 
-use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Component, Path};
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use mlua::chunk::Compiler;
@@ -113,43 +113,66 @@ pub struct Stats {
     pub slowest: Duration,
 }
 
-/// The deadline the interrupt callback enforces.
-#[derive(Debug, Default)]
+/// The deadline the interrupt callback enforces. Only the thread calling into the resource touches it; it is
+/// atomic (relaxed) only so that a resource can move between threads.
+#[derive(Debug)]
 struct Clock {
-    deadline: Cell<Option<Instant>>,
-    count: Cell<u32>,
-    fired: Cell<bool>,
+    base: Instant,
+    /// Nanoseconds after `base`; `u64::MAX` when disarmed.
+    deadline: AtomicU64,
+    count: AtomicU32,
+    fired: AtomicBool,
 }
 
 impl Clock {
+    fn new() -> Self {
+        Self {
+            base: Instant::now(),
+            deadline: AtomicU64::new(u64::MAX),
+            count: AtomicU32::new(0),
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    fn now(&self) -> u64 {
+        u64::try_from(self.base.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
     fn arm(&self, budget: Duration) {
-        self.deadline.set(Some(Instant::now() + budget));
-        self.count.set(0);
-        self.fired.set(false);
+        let budget = u64::try_from(budget.as_nanos()).unwrap_or(u64::MAX);
+        self.deadline.store(self.now().saturating_add(budget), Relaxed);
+        self.count.store(0, Relaxed);
+        self.fired.store(false, Relaxed);
     }
 
     /// Disarms the clock and says whether it stopped the script.
     fn disarm(&self) -> bool {
-        self.deadline.set(None);
-        self.fired.replace(false)
+        self.deadline.store(u64::MAX, Relaxed);
+        self.fired.swap(false, Relaxed)
+    }
+
+    fn fired(&self) -> bool {
+        self.fired.load(Relaxed)
     }
 
     fn check(&self) -> mlua::Result<VmState> {
-        if !self.fired.get() {
-            let n = self.count.get() + 1;
+        if !self.fired() {
+            let n = self.count.load(Relaxed) + 1;
             if n < CLOCK_EVERY {
-                self.count.set(n);
+                self.count.store(n, Relaxed);
                 return Ok(VmState::Continue);
             }
-            self.count.set(0);
-            match self.deadline.get() {
-                Some(d) if Instant::now() >= d => self.fired.set(true),
-                _ => return Ok(VmState::Continue),
+            self.count.store(0, Relaxed);
+            if self.now() < self.deadline.load(Relaxed) {
+                return Ok(VmState::Continue);
             }
+            self.fired.store(true, Relaxed);
         }
         Err(mlua::Error::runtime(DEADLINE_MESSAGE))
     }
 }
+
+type Log = Arc<Mutex<VecDeque<String>>>;
 
 /// A loaded resource.
 #[derive(Debug)]
@@ -158,9 +181,9 @@ pub struct Resource {
     lua: Lua,
     handlers: Table,
     /// Handlers registered per event, in [`EVENTS`] order, so an event nobody listens to costs nothing.
-    counts: Rc<[Cell<u32>; EVENTS.len()]>,
-    clock: Rc<Clock>,
-    log: Rc<RefCell<VecDeque<String>>>,
+    counts: Arc<[AtomicU32; EVENTS.len()]>,
+    clock: Arc<Clock>,
+    log: Log,
     limits: Limits,
     stats: Stats,
 }
@@ -177,8 +200,8 @@ impl Resource {
         for unsafe_global in ["require", "loadstring", "getfenv", "setfenv"] {
             g.raw_set(unsafe_global, Value::Nil).map_err(fail)?;
         }
-        let log = Rc::new(RefCell::new(VecDeque::new()));
-        let sink = Rc::clone(&log);
+        let log = Log::default();
+        let sink = Arc::clone(&log);
         let keep = limits.log_lines;
         let print = lua
             .create_function(move |lua, args: Variadic<Value>| {
@@ -192,7 +215,7 @@ impl Resource {
                             .map_or_else(|| format!("{v:?}"), |s| s.to_string_lossy()),
                     );
                 }
-                let mut log = sink.borrow_mut();
+                let mut log = sink.lock().unwrap_or_else(PoisonError::into_inner);
                 if log.len() >= keep {
                     log.pop_front();
                 }
@@ -211,15 +234,15 @@ impl Resource {
         }
         let api = lua.create_table().map_err(fail)?;
         let h = handlers.clone();
-        let counts: Rc<[Cell<u32>; EVENTS.len()]> = Rc::default();
-        let c = Rc::clone(&counts);
+        let counts: Arc<[AtomicU32; EVENTS.len()]> = Arc::default();
+        let c = Arc::clone(&counts);
         let on = lua
             .create_function(move |_, (event, handler): (String, Function)| {
                 let Some(i) = EVENTS.iter().position(|e| *e == event) else {
                     return Err(mlua::Error::runtime(format!("unknown event {event:?}")));
                 };
                 h.raw_get::<Table>(event)?.raw_push(handler)?;
-                c[i].set(c[i].get() + 1);
+                c[i].fetch_add(1, Relaxed);
                 Ok(())
             })
             .map_err(fail)?;
@@ -228,8 +251,8 @@ impl Resource {
         lua.sandbox(true).map_err(fail)?;
 
         lua.set_memory_limit(limits.memory).map_err(fail)?;
-        let clock = Rc::new(Clock::default());
-        let c = Rc::clone(&clock);
+        let clock = Arc::new(Clock::new());
+        let c = Arc::clone(&clock);
         lua.set_interrupt(move |_| c.check());
 
         let resource = Self {
@@ -277,14 +300,18 @@ impl Resource {
 
     /// Takes the lines the resource printed since the last call.
     pub fn drain_log(&mut self) -> Vec<String> {
-        self.log.borrow_mut().drain(..).collect()
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+            .collect()
     }
 
     /// Delivers an event to every handler the resource registered for it, in registration order, under one
     /// deadline. A handler's script error does not stop the later handlers; a deadline or memory error does. The
     /// first error is returned.
     pub fn dispatch(&mut self, event: Event) -> Result<(), CallError> {
-        if self.counts[event.index()].get() == 0 {
+        if self.counts[event.index()].load(Relaxed) == 0 {
             return Ok(());
         }
         let start = Instant::now();
@@ -314,7 +341,7 @@ impl Resource {
         for i in 1..=list.raw_len() {
             let f: Function = list.raw_get(i)?;
             if let Err(e) = f.call::<()>(args.clone()) {
-                if self.clock.fired.get() || is_memory(&e) {
+                if self.clock.fired() || is_memory(&e) {
                     return Err(e);
                 }
                 if first.is_ok() {

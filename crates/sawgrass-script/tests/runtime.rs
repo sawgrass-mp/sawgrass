@@ -220,3 +220,12 @@ fn the_repository_resources_load() {
     assert!(host.dispatch(Event::Tick { tick: 600, dt: 0.05 }).is_empty());
     assert!(host.dispatch(Event::PlayerLeave(1)).is_empty());
 }
+
+#[test]
+fn resources_can_move_to_the_tick_thread() {
+    fn is_send<T: Send>() {}
+    is_send::<Host>();
+    let mut r = on_tick("");
+    let handle = std::thread::spawn(move || r.dispatch(TICK));
+    assert_eq!(handle.join().ok(), Some(Ok(())));
+}

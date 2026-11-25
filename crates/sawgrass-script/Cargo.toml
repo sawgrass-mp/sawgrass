@@ -10,7 +10,8 @@ publish.workspace = true
 
 [dependencies]
 # Luau with native code generation, as ADR 0005 decides. mlua always builds Luau from its vendored sources.
-mlua = { version = "0.12", features = ["luau-jit"] }
+# `send` makes a resource `Send`, as the server's tick systems must be.
+mlua = { version = "0.12", features = ["luau-jit", "send"] }
 # Resource manifests (`resource.toml`), read as a plain table: serde without its derive macros.
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 
