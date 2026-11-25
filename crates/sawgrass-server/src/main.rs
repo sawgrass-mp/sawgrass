@@ -29,8 +29,10 @@
 //! while the snapshot pool works, so gateway and tick threads together are one per core. Giving only one of the
 //! options gives the other the rest of the cores.
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
-//! - `--ledger DIR`: keep players' money in the RocksDB ledger in DIR, created if missing (DB-8). Every player
-//!   gets a wallet funded with `--start-cash` minor units (default 100000) from the server's treasury.
+//! - `--ledger DIR`: move money through the RocksDB ledger in DIR, created if missing (DB-8), for load tests. Every
+//!   connection gets a new wallet funded with `--start-cash` minor units (default 100000) from the server's
+//!   treasury once it has joined; a wallet lasts one connection, so a player who reconnects starts afresh. Wallets
+//!   per character arrive with persistent characters (roadmap step 8).
 //! - `--money-events`: let clients pay each other with a payment event, for money load tests. Do not use it on a
 //!   public server: resources will move money through the scripting API.
 //! - `--vehicles N`: spawn N parked vehicles at start, spread over a square centred on the origin, for load tests
@@ -385,7 +387,14 @@ fn main() -> ExitCode {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
             match Money::open(writer.handle(), args.start_cash, run) {
-                Ok(money) => Some(money),
+                Ok(money) => {
+                    println!(
+                        "ledger: a wallet of {} per connection, for load tests; wallets do not follow a player \
+                         who reconnects",
+                        args.start_cash
+                    );
+                    Some(money)
+                }
                 Err(e) => {
                     eprintln!("sawgrass-server: ledger: {e}");
                     return ExitCode::FAILURE;

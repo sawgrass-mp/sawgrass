@@ -1352,7 +1352,7 @@ impl Players {
                         continue;
                     };
                     if let (Some(money), Some(wallet)) = (&self.money, wallet) {
-                        money.register(slot.wire_id(), wallet);
+                        money.register(slot.wire_id(), id, wallet);
                     }
                     let tick_hz =
                         (std::time::Duration::from_secs(1).as_nanos() / info.dt.as_nanos().max(1)) as u16;
