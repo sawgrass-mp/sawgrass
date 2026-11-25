@@ -298,13 +298,46 @@ impl ServerStats {
 /// Event codes. The values are part of the wire format.
 const JOINED: u8 = 1;
 const STATS: u8 = 2;
-// 3 is taken by DB-8 (#162).
+const PAID: u8 = 3;
 const OWNERSHIP: u8 = 4;
 const CORRECTED: u8 = 5;
 const REQUEST_STATS: u8 = 128;
-// 129 is taken by DB-8 (#162).
+const PAY: u8 = 129;
 const ENTER_SEAT: u8 = 130;
 const LEAVE_SEAT: u8 = 131;
+// 132 is taken by NET-20 (#206).
+
+/// How the server answered a [`ClientEvent::Pay`]. The values are part of the wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PayResult {
+    /// The money moved, and is durable.
+    Done = 0,
+    /// The payer's balance is below the amount.
+    InsufficientFunds = 1,
+    /// The payee is not a player with a wallet.
+    UnknownPayee = 2,
+    /// A zero amount, a payment to oneself, or a key reused with other parameters.
+    Invalid = 3,
+    /// The server could not store it; nothing moved.
+    Failed = 4,
+    /// The server takes no payments from clients.
+    Refused = 5,
+}
+
+impl PayResult {
+    fn from_code(code: u8) -> Result<Self, DecodeError> {
+        Ok(match code {
+            0 => Self::Done,
+            1 => Self::InsufficientFunds,
+            2 => Self::UnknownPayee,
+            3 => Self::Invalid,
+            4 => Self::Failed,
+            5 => Self::Refused,
+            _ => return Err(DecodeError::OutOfRange),
+        })
+    }
+}
 
 /// An event from the server.
 ///
@@ -323,6 +356,15 @@ pub enum ServerEvent {
     /// Server figures, sent periodically to clients that sent [`ClientEvent::RequestStats`] when the server
     /// allows it.
     Stats(ServerStats),
+    /// The answer to the [`ClientEvent::Pay`] with this `key`, and the payer's balance after it.
+    Paid {
+        /// The client's key for the payment.
+        key: u64,
+        /// What happened.
+        result: PayResult,
+        /// The payer's balance after the payment, or as it stands if nothing moved.
+        balance: i64,
+    },
     /// The client now simulates `entity` (`yours`), or no longer does (ADR 0006, section 4). Its
     /// [`OwnedState`]s for the entity must carry `epoch`; the server drops any other.
     Ownership {
@@ -364,6 +406,12 @@ impl ServerEvent {
                 }
                 out.extend_from_slice(&s.sent_bytes_per_sec.to_le_bytes());
                 out.extend_from_slice(&s.received_bytes_per_sec.to_le_bytes());
+            }
+            Self::Paid { key, result, balance } => {
+                out.push(PAID);
+                out.extend_from_slice(&key.to_le_bytes());
+                out.push(*result as u8);
+                out.extend_from_slice(&balance.to_le_bytes());
             }
             Self::Ownership { entity, epoch, yours } => {
                 out.push(OWNERSHIP);
@@ -421,6 +469,11 @@ impl ServerEvent {
                     received_bytes_per_sec: u64::from_le_bytes(r.array()?),
                 }))
             }
+            PAID => Ok(Self::Paid {
+                key: u64::from_le_bytes(r.array()?),
+                result: PayResult::from_code(r.array::<1>()?[0])?,
+                balance: i64::from_le_bytes(r.array()?),
+            }),
             OWNERSHIP => {
                 let entity = u32::from_le_bytes(r.array()?);
                 let [epoch, yours] = r.array::<2>()?;
@@ -466,6 +519,17 @@ pub enum ClientEvent {
     /// Ask to leave the seat the player sits in, or say that the vehicle's physics threw the player out. The
     /// server always grants it.
     LeaveSeat,
+    /// Pay `amount` from the player's wallet to the player with entity id `to`; answered by [`ServerEvent::Paid`]
+    /// with the same `key`. Sending the same key again is answered without paying twice. Only servers started
+    /// for money load tests take it (task DB-8); others answer [`PayResult::Refused`].
+    Pay {
+        /// The client's key for this payment, unique per payment.
+        key: u64,
+        /// The payee's entity id.
+        to: u32,
+        /// The amount, in the smallest unit of money.
+        amount: u32,
+    },
 }
 
 impl ClientEvent {
@@ -479,6 +543,12 @@ impl ClientEvent {
                 out.push(*seat);
             }
             Self::LeaveSeat => out.push(LEAVE_SEAT),
+            Self::Pay { key, to, amount } => {
+                out.push(PAY);
+                out.extend_from_slice(&key.to_le_bytes());
+                out.extend_from_slice(&to.to_le_bytes());
+                out.extend_from_slice(&amount.to_le_bytes());
+            }
         }
     }
 
@@ -493,6 +563,11 @@ impl ClientEvent {
                 Self::EnterSeat { vehicle, seat }
             }
             [LEAVE_SEAT] => Self::LeaveSeat,
+            [PAY] => Self::Pay {
+                key: u64::from_le_bytes(r.array()?),
+                to: u32::from_le_bytes(r.array()?),
+                amount: u32::from_le_bytes(r.array()?),
+            },
             [other] => return Err(DecodeError::UnknownEvent(other)),
         };
         r.finish()?;
