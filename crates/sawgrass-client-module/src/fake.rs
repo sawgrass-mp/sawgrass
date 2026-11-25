@@ -11,6 +11,8 @@ pub struct FakeRuntime {
     pub hooks: Vec<(HookHandle, HookRequest)>,
     /// Function names whose hooks the fake refuses, to test failure paths.
     pub refuse: Vec<String>,
+    /// Function names whose hooks the fake refuses to remove.
+    pub refuse_removal: Vec<String>,
     next_handle: u64,
 }
 
@@ -21,6 +23,7 @@ impl FakeRuntime {
             base,
             image,
             hooks: Vec::new(),
+            refuse_removal: Vec::new(),
             refuse: Vec::new(),
             next_handle: 1,
         }
@@ -62,6 +65,13 @@ impl Runtime for FakeRuntime {
             .iter()
             .position(|(h, _)| *h == handle)
             .ok_or(RuntimeError::UnknownHook(handle))?;
+        let function = &self.hooks[index].1.function;
+        if self.refuse_removal.contains(function) {
+            return Err(RuntimeError::HookRefused {
+                function: function.clone(),
+                reason: "kept by the fake".into(),
+            });
+        }
         self.hooks.remove(index);
         Ok(())
     }

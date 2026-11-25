@@ -2,8 +2,10 @@
 
 use sawgrass_client_module::assets::{AssetId, AssetTable};
 use sawgrass_client_module::fake::FakeRuntime;
-use sawgrass_client_module::game::{EntityKind, FakeGame, GameAsset, InputState, Pose, SinglePlayerSystem};
-use sawgrass_client_module::hooks::{GameEvent, HookPoint};
+use sawgrass_client_module::game::{
+    EntityKind, FakeGame, GameApi, GameAsset, GameError, GameHandle, InputState, Pose, SinglePlayerSystem,
+};
+use sawgrass_client_module::hooks::{EventSink, GameEvent, HookPoint};
 use sawgrass_client_module::module::{
     CoreEvent, Module, NetCore, StartError, World, WorldError, required_functions,
 };
@@ -89,8 +91,9 @@ fn starts_hooks_everything_and_runs_frames() {
     let me = game.create_natively(EntityKind::Ped, GameAsset(1), pose(1.0));
     game.local_player = Some(me);
     let mut core = RecordingCore::default();
+    let hooks = module.event_sink();
 
-    module.push_event(GameEvent::EntityCreated {
+    hooks.push(GameEvent::EntityCreated {
         handle: me,
         kind: EntityKind::Ped,
         asset: GameAsset(1),
@@ -105,17 +108,17 @@ fn starts_hooks_everything_and_runs_frames() {
     // The game makes a pedestrian and a prop by itself, reads input, and streams the car out.
     let walker = game.create_natively(EntityKind::Ped, GameAsset(2), pose(3.0));
     let prop = game.create_natively(EntityKind::Object, GameAsset(3), pose(4.0));
-    module.push_event(GameEvent::EntityCreated {
+    hooks.push(GameEvent::EntityCreated {
         handle: walker,
         kind: EntityKind::Ped,
         asset: GameAsset(2),
     });
-    module.push_event(GameEvent::EntityCreated {
+    hooks.push(GameEvent::EntityCreated {
         handle: prop,
         kind: EntityKind::Object,
         asset: GameAsset(3),
     });
-    module.push_event(GameEvent::EntityCreated {
+    hooks.push(GameEvent::EntityCreated {
         handle: car,
         kind: EntityKind::Vehicle,
         asset: CAR,
@@ -124,7 +127,7 @@ fn starts_hooks_everything_and_runs_frames() {
         movement: [0.0, 1.0],
         ..InputState::default()
     };
-    module.push_event(GameEvent::Input(input));
+    hooks.push(GameEvent::Input(input));
     module.frame(0.016, &mut game, &mut core).expect("frame");
     assert!(!game.entities.contains_key(&walker), "ambient pedestrian removed");
     assert!(game.entities.contains_key(&prop), "map props stay");
@@ -132,7 +135,7 @@ fn starts_hooks_everything_and_runs_frames() {
     assert_eq!(module.ambient_removed, 1);
 
     game.entities.remove(&car);
-    module.push_event(GameEvent::EntityRemoved {
+    hooks.push(GameEvent::EntityRemoved {
         handle: car,
         kind: EntityKind::Vehicle,
     });
@@ -143,7 +146,8 @@ fn starts_hooks_everything_and_runs_frames() {
     );
     assert!(module.entities().is_empty());
 
-    let runtime = module.stop().expect("stopped");
+    let (runtime, errors) = module.stop();
+    assert!(errors.is_empty());
     assert!(runtime.hooks.is_empty());
 }
 
@@ -173,4 +177,101 @@ fn a_refused_hook_leaves_nothing_installed() {
 fn refuses_an_asset_table_for_another_build() {
     let result = Module::start(runtime(), &functions(), assets("victory/1.0.1/00ff"));
     assert!(matches!(result, Err((StartError::AssetsForOtherBuild { .. }, _))));
+}
+
+/// A game whose creation and removal functions run the hooks, as the real game will, while `frame` is running.
+struct ReentrantGame {
+    inner: FakeGame,
+    hooks: EventSink,
+}
+
+impl GameApi for ReentrantGame {
+    fn spawn(&mut self, kind: EntityKind, asset: GameAsset, pose: Pose) -> Result<GameHandle, GameError> {
+        let handle = self.inner.spawn(kind, asset, pose)?;
+        self.hooks.push(GameEvent::EntityCreated { handle, kind, asset });
+        Ok(handle)
+    }
+    fn remove(&mut self, handle: GameHandle) -> Result<(), GameError> {
+        let kind = self
+            .inner
+            .entities
+            .get(&handle)
+            .map(|e| e.0)
+            .ok_or(GameError::NoSuchEntity(handle))?;
+        self.inner.remove(handle)?;
+        self.hooks.push(GameEvent::EntityRemoved { handle, kind });
+        Ok(())
+    }
+    fn pose(&self, handle: GameHandle) -> Option<Pose> {
+        self.inner.pose(handle)
+    }
+    fn set_pose(&mut self, handle: GameHandle, pose: Pose) -> Result<(), GameError> {
+        self.inner.set_pose(handle, pose)
+    }
+    fn local_player(&self) -> Option<GameHandle> {
+        self.inner.local_player()
+    }
+    fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
+        self.inner.set_streaming_focus(points);
+    }
+    fn disable(&mut self, system: SinglePlayerSystem) -> Result<(), GameError> {
+        self.inner.disable(system)
+    }
+}
+
+/// Spawns entity 1 and, on the first frame only, entity 2, which it despawns in the same frame.
+struct SpawnAndDespawn {
+    frames: u32,
+}
+
+impl NetCore for SpawnAndDespawn {
+    fn on_event(&mut self, _event: &CoreEvent) {}
+    fn on_frame(&mut self, _dt: f32, world: &mut World<'_>) {
+        if self.frames == 0 {
+            world
+                .spawn(1, EntityKind::Vehicle, AssetId(5), pose(1.0))
+                .expect("spawned");
+            world
+                .spawn(2, EntityKind::Vehicle, AssetId(5), pose(2.0))
+                .expect("spawned");
+            world.despawn(2).expect("despawned");
+        }
+        self.frames += 1;
+    }
+}
+
+#[test]
+fn hooks_that_fire_inside_a_frame_are_handled_on_the_next() {
+    let mut module = Module::start(runtime(), &functions(), assets(BUILD_KEY)).expect("started");
+    let mut game = ReentrantGame {
+        inner: FakeGame::default(),
+        hooks: module.event_sink(),
+    };
+    let mut core = SpawnAndDespawn { frames: 0 };
+    module.frame(0.016, &mut game, &mut core).expect("frame");
+    module.frame(0.016, &mut game, &mut core).expect("frame");
+    let ours = module.entities().handle(1).expect("bound");
+    assert!(
+        game.inner.entities.contains_key(&ours),
+        "our own spawn is not taken for ambient traffic"
+    );
+    assert_eq!(module.ambient_removed, 0, "an entity already gone is not counted");
+}
+
+#[test]
+fn stop_gives_the_runtime_back_with_every_failure() {
+    let mut rt = runtime();
+    rt.refuse_removal = vec![
+        HookPoint::Frame.function().into(),
+        HookPoint::InputPoll.function().into(),
+    ];
+    let module = Module::start(rt, &functions(), assets(BUILD_KEY)).expect("started");
+    let (rt, errors) = module.stop();
+    assert_eq!(errors.len(), 2);
+    let left: Vec<_> = rt.hooks.iter().map(|(_, r)| r.function.as_str()).collect();
+    assert_eq!(
+        left,
+        vec!["frame", "input_poll"],
+        "every other hook was still removed"
+    );
 }
