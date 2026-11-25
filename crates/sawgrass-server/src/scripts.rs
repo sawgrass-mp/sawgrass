@@ -60,6 +60,8 @@ impl Scripts {
                 match change {
                     Roster::Joined(id) => self.joined.push(id),
                     Roster::Left(id) => self.left.push(id),
+                    // Resources get deaths through the scripting API with a later task.
+                    Roster::Died(_) => {}
                 }
             }
         }

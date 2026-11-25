@@ -5,65 +5,73 @@
 <style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}.h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:14px;fill:#8fb3a6}.l{font-size:12px;font-weight:600;fill:#c9e6db}.c{font-size:12px;font-weight:700;fill:#a6ff4d}.n{font-size:11px;fill:#7d9a90}.w{font-size:11px;fill:#5fe3f0}.m{font-size:11px;font-weight:700;fill:#060a08;letter-spacing:1px}.b{font-size:12px;fill:#8fb3a6}.d{font-size:11px;font-weight:600}</style>
 <rect width="880" height="270" rx="16" fill="#060a08"/>
 <rect x="1" y="1" width="878" height="268" rx="15" fill="none" stroke="#1d3b2f"/>
-<text x="28" y="44" class="h">We are here: Make the tick fit</text>
-<text x="28" y="68" class="s">Step 3 of 10 · roadmap stage 1, server without the game; plan phase 1 · 1 of 5 done</text>
-<rect x="28.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<rect x="28.0" y="132" width="77.0" height="18" rx="5" fill="url(#g)"/>
-<text x="66.5" y="170" class="l" text-anchor="middle">1. Foundation</text>
-<text x="66.5" y="186" class="n" text-anchor="middle">done</text>
-<text x="66.5" y="202" class="d" fill="#7cf000" text-anchor="middle">easy</text>
-<rect x="111.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<rect x="111.0" y="132" width="77.0" height="18" rx="5" fill="url(#g)"/>
-<text x="149.5" y="170" class="l" text-anchor="middle">2. Prototype</text>
-<text x="149.5" y="186" class="n" text-anchor="middle">25 of 25 done</text>
-<text x="149.5" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
-<rect x="194.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<rect x="194.0" y="132" width="15.4" height="18" rx="5" fill="url(#g)"/>
-<rect x="192.0" y="130" width="81.0" height="22" rx="7" fill="none" stroke="#a6ff4d" stroke-width="1.5"/>
-<rect x="184.5" y="92" width="96" height="22" rx="11" fill="#a6ff4d"/>
-<text x="232.5" y="107" class="m" text-anchor="middle">WE ARE HERE</text>
-<path d="M226.5 114 L238.5 114 L232.5 122 Z" fill="#a6ff4d"/>
-<text x="232.5" y="170" class="c" text-anchor="middle">3. Tick fits</text>
-<text x="232.5" y="186" class="n" text-anchor="middle">1 of 5 done</text>
-<text x="232.5" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
-<rect x="277.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<text x="315.5" y="170" class="l" text-anchor="middle">4. 30 Hz</text>
-<text x="315.5" y="186" class="n" text-anchor="middle">0 of 4 done</text>
-<text x="315.5" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
-<rect x="360.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<text x="398.5" y="170" class="l" text-anchor="middle">5. Reliability</text>
-<text x="398.5" y="186" class="n" text-anchor="middle">0 of 4 done</text>
-<text x="398.5" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
-<rect x="443.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<text x="481.5" y="170" class="l" text-anchor="middle">6. Roleplay</text>
-<text x="481.5" y="186" class="n" text-anchor="middle">0 of 5 done</text>
-<text x="481.5" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
-<rect x="526.5" y="132.5" width="76.0" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
-<text x="564.5" y="170" class="l" text-anchor="middle">7. In game</text>
-<text x="564.5" y="186" class="w" text-anchor="middle">waiting</text>
-<text x="564.5" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
-<rect x="609.5" y="132.5" width="76.0" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
-<text x="647.5" y="170" class="l" text-anchor="middle">8. Sync</text>
-<text x="647.5" y="186" class="w" text-anchor="middle">waiting</text>
-<text x="647.5" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
-<rect x="692.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<text x="730.5" y="170" class="l" text-anchor="middle">9. Launcher</text>
-<text x="730.5" y="186" class="n" text-anchor="middle">not started</text>
-<text x="730.5" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
-<rect x="775.0" y="132" width="77.0" height="18" rx="5" fill="#13201b"/>
-<text x="813.5" y="170" class="l" text-anchor="middle">10. Scale</text>
-<text x="813.5" y="186" class="n" text-anchor="middle">not started</text>
-<text x="813.5" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
-<path d="M30.0 216 L30.0 222 L103.0 222 L103.0 216" fill="none" stroke="#2a4a3d"/>
-<text x="66.5" y="240" class="b" text-anchor="middle">Stage 0</text>
-<path d="M113.0 216 L113.0 222 L435.0 222 L435.0 216" fill="none" stroke="#2a4a3d"/>
-<text x="274.0" y="240" class="b" text-anchor="middle">Stage 1 · server without the game</text>
-<path d="M445.0 216 L445.0 222 L518.0 222 L518.0 216" fill="none" stroke="#2a4a3d"/>
-<text x="481.5" y="240" class="b" text-anchor="middle">Stage 2</text>
-<path d="M528.0 216 L528.0 222 L684.0 222 L684.0 216" fill="none" stroke="#2a4a3d"/>
-<text x="606.0" y="240" class="b" text-anchor="middle">Stage 3</text>
-<path d="M694.0 216 L694.0 222 L767.0 222 L767.0 216" fill="none" stroke="#2a4a3d"/>
-<text x="730.5" y="240" class="b" text-anchor="middle">Stage 4</text>
-<path d="M777.0 216 L777.0 222 L850.0 222 L850.0 216" fill="none" stroke="#2a4a3d"/>
-<text x="813.5" y="240" class="b" text-anchor="middle">Stage 5</text>
+<text x="28" y="44" class="h">We are here: Fewer bytes, then 30 Hz</text>
+<text x="28" y="68" class="s">Step 4 of 11 · roadmap stage 1, server without the game; plan phase 2 · 2 of 4 done</text>
+<rect x="28.0" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="28.0" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
+<text x="62.7" y="170" class="l" text-anchor="middle">1. Setup</text>
+<text x="62.7" y="186" class="n" text-anchor="middle">done</text>
+<text x="62.7" y="202" class="d" fill="#7cf000" text-anchor="middle">easy</text>
+<rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
+<text x="138.2" y="170" class="l" text-anchor="middle">2. Prototype</text>
+<text x="138.2" y="186" class="n" text-anchor="middle">42 of 42 done</text>
+<text x="138.2" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
+<rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
+<text x="213.6" y="170" class="l" text-anchor="middle">3. Tick fits</text>
+<text x="213.6" y="186" class="n" text-anchor="middle">5 of 5 done</text>
+<text x="213.6" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
+<rect x="254.4" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="254.4" y="132" width="34.7" height="18" rx="5" fill="url(#g)"/>
+<rect x="252.4" y="130" width="73.5" height="22" rx="7" fill="none" stroke="#a6ff4d" stroke-width="1.5"/>
+<rect x="241.1" y="92" width="96" height="22" rx="11" fill="#a6ff4d"/>
+<text x="289.1" y="107" class="m" text-anchor="middle">WE ARE HERE</text>
+<path d="M283.1 114 L295.1 114 L289.1 122 Z" fill="#a6ff4d"/>
+<text x="289.1" y="170" class="c" text-anchor="middle">4. 30 Hz</text>
+<text x="289.1" y="186" class="n" text-anchor="middle">2 of 4 done</text>
+<text x="289.1" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
+<rect x="329.8" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="329.8" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
+<text x="364.5" y="170" class="l" text-anchor="middle">5. Reliability</text>
+<text x="364.5" y="186" class="n" text-anchor="middle">4 of 4 done</text>
+<text x="364.5" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
+<rect x="405.3" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="405.3" y="132" width="34.7" height="18" rx="5" fill="url(#g)"/>
+<text x="440.0" y="170" class="l" text-anchor="middle">6. Infra</text>
+<text x="440.0" y="186" class="n" text-anchor="middle">3 of 6 done</text>
+<text x="440.0" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
+<rect x="481.2" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
+<text x="515.5" y="170" class="l" text-anchor="middle">7. In game</text>
+<text x="515.5" y="186" class="w" text-anchor="middle">waiting</text>
+<text x="515.5" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
+<rect x="556.7" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
+<text x="590.9" y="170" class="l" text-anchor="middle">8. Roleplay</text>
+<text x="590.9" y="186" class="w" text-anchor="middle">waiting</text>
+<text x="590.9" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
+<rect x="631.6" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="631.6" y="132" width="56.3" height="18" rx="5" fill="url(#g)"/>
+<text x="666.4" y="170" class="l" text-anchor="middle">9. Sync</text>
+<text x="666.4" y="186" class="n" text-anchor="middle">9 of 11 done</text>
+<text x="666.4" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
+<rect x="707.1" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<text x="741.8" y="170" class="l" text-anchor="middle">10. Launcher</text>
+<text x="741.8" y="186" class="n" text-anchor="middle">not started</text>
+<text x="741.8" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
+<rect x="782.5" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<text x="817.3" y="170" class="l" text-anchor="middle">11. Scale</text>
+<text x="817.3" y="186" class="n" text-anchor="middle">not started</text>
+<text x="817.3" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
+<path d="M30.0 216 L30.0 222 L95.5 222 L95.5 216" fill="none" stroke="#2a4a3d"/>
+<text x="62.7" y="240" class="b" text-anchor="middle">Stage 0</text>
+<path d="M105.5 216 L105.5 222 L397.3 222 L397.3 216" fill="none" stroke="#2a4a3d"/>
+<text x="251.4" y="240" class="b" text-anchor="middle">Stage 1 · server without the game</text>
+<path d="M407.3 216 L407.3 222 L472.7 222 L472.7 216" fill="none" stroke="#2a4a3d"/>
+<text x="440.0" y="240" class="b" text-anchor="middle">Stage 2</text>
+<path d="M482.7 216 L482.7 222 L699.1 222 L699.1 216" fill="none" stroke="#2a4a3d"/>
+<text x="590.9" y="240" class="b" text-anchor="middle">Stage 3 · client in the game</text>
+<path d="M709.1 216 L709.1 222 L774.5 222 L774.5 216" fill="none" stroke="#2a4a3d"/>
+<text x="741.8" y="240" class="b" text-anchor="middle">Stage 4</text>
+<path d="M784.5 216 L784.5 222 L850.0 222 L850.0 216" fill="none" stroke="#2a4a3d"/>
+<text x="817.3" y="240" class="b" text-anchor="middle">Stage 5</text>
 </svg>

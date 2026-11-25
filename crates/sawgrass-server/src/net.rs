@@ -46,22 +46,31 @@ use bytes::Bytes;
 use hecs::{Entity, World};
 use rayon::prelude::*;
 use sawgrass_gateway::{Datagrams, Gateway, Session};
+use sawgrass_protocol::combat::{Shot, Zone};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::OwnedState;
-use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, ServerStats};
+use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
+use sawgrass_protocol::recording::RecordKind;
 use sawgrass_protocol::vehicle::VehicleBlock;
-use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
+use sawgrass_protocol::world::Door;
+use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position};
+use sawgrass_store::WalletId;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
+use crate::combat::{FROM_TOLERANCE, HIT_TOLERANCE, REWIND, WeaponRules, hit_ped, hit_vehicle};
 use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
-use crate::movement::{Movement, MovementRules, Violation};
+use crate::money::Money;
+use crate::movement::{Movement, MovementRules, Violation, Violations};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
+use crate::recording::Recorder;
+use crate::seats::{ENTER_RADIUS, Refusal, Seats};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
+use crate::world::WorldState;
 
 /// The network id of a player's entity, the `id` in snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,6 +84,9 @@ pub enum Roster {
     Joined(u32),
     /// The player left; the id may be given to someone else from the next tick.
     Left(u32),
+    /// The ped with this entity id, a player's or an NPC's, was killed by an accepted hit (SRV-16). Its motion is
+    /// "dead"; the scripts decide what happens next.
+    Died(u32),
 }
 
 /// The last state a player's client sent.
@@ -88,6 +100,21 @@ const EVENT_QUEUE: usize = 16 + 2 * OWNERSHIP_CAP as usize;
 /// Most lost ownership events kept to be sent again; beyond it they are only counted. Well above what one tick's
 /// changes of owner can lose.
 const MAX_OWNER_RETRIES: usize = 4096;
+
+/// Most world state events one player is sent in a tick while it is being sent the whole state: room is left in
+/// its event queue for the others.
+const WORLD_EVENTS_PER_TICK: usize = 16;
+/// Metres between two positions.
+fn distance(a: Position, b: Position) -> f32 {
+    let ([ax, ay, az], [bx, by, bz]) = (a.to_metres(), b.to_metres());
+    ((ax - bx).powi(2) + (ay - by).powi(2) + (az - bz).powi(2)).sqrt()
+}
+
+/// Whether an owned entity at `entity` is within `radius` of its owner at `owner`: on the ground plane, as
+/// `Ownership` measures the keep radius, so an entity it keeps is never one whose every state is refused.
+fn within_keep(owner: [f32; 3], entity: [f32; 2], radius: f32) -> bool {
+    (entity[0] - owner[0]).powi(2) + (entity[1] - owner[1]).powi(2) <= radius * radius
+}
 
 /// Whether a lost ownership event for `player` still says what is true: "yours" while it owns the spawned entity
 /// with `epoch` (`owner` as [`Ownership::owner`] gives it), "not yours" while it does not own it.
@@ -141,12 +168,24 @@ struct Inbox {
 enum Inbound {
     Join {
         id: u32,
+        address: SocketAddr,
         sender: Datagrams,
         events: tokio_mpsc::Sender<Vec<u8>>,
         inbox: Arc<Inbox>,
+        wallet: Option<WalletId>,
     },
     Leave {
         id: u32,
+    },
+    /// The player fired.
+    Shot {
+        id: u32,
+        shot: Box<Shot>,
+    },
+    /// The player asked to enter `Some((vehicle id, seat))` or to leave its seat (`None`).
+    Seat {
+        id: u32,
+        request: Option<(u32, u8)>,
     },
 }
 
@@ -163,6 +202,9 @@ pub struct ListenConfig {
     pub limits: Limits,
     /// What a client's movement is checked against.
     pub movement: MovementRules,
+    /// Let clients pay each other with [`ClientEvent::Pay`] when the server has a ledger (load tests, DB-8);
+    /// otherwise a payment is answered [`PayResult::Refused`].
+    pub money_events: bool,
 }
 
 impl Default for ListenConfig {
@@ -174,6 +216,7 @@ impl Default for ListenConfig {
             tick_threads: 1,
             limits: Limits::default(),
             movement: MovementRules::default(),
+            money_events: false,
         }
     }
 }
@@ -198,8 +241,11 @@ pub struct Traffic {
     pub lost_owner_events: AtomicU64,
     /// Owned-entity states dropped because the sender does not own the entity, or not with that epoch.
     pub refused_owned_stale: AtomicU64,
-    /// Owned-entity states refused by the movement checks.
+    /// Owned-entity states refused by the movement checks (with [`MovementRules::report_only`]: that broke them and
+    /// were applied anyway).
     pub refused_owned_movement: AtomicU64,
+    /// Spawns whose state broke the movement checks and were made anyway, because the rules only report.
+    pub reported_spawns: AtomicU64,
     /// Owned-entity states refused because the entity is beyond the keep radius of its owner.
     pub refused_owned_far: AtomicU64,
     /// Connections closed for a sustained flood of datagrams or events.
@@ -222,6 +268,23 @@ pub struct Traffic {
     pub refused_teleport: AtomicU64,
     /// [`ServerEvent::Corrected`] events queued to clients after a refused state.
     pub corrections: AtomicU64,
+    /// World state changes that found a player's event queue full; that player is sent the whole state again.
+    pub lost_world_events: AtomicU64,
+    /// Requests to enter a seat that the server granted (SRV-15).
+    pub seats_granted: AtomicU64,
+    /// Requests to enter a seat that the server refused, for any [`Refusal`].
+    pub seats_refused: AtomicU64,
+    /// Shots admitted from clients ([`ClientEvent::Shot`]).
+    pub shots_received: AtomicU64,
+    /// Shots refused whole: a dead shooter, a weapon it does not hold, more hits than the weapon has pellets,
+    /// faster than the fire rate, fired from too far from where the server holds the shooter, or a tick older than
+    /// the rewind limit (SRV-16).
+    pub shots_refused: AtomicU64,
+    /// Hits accepted and applied.
+    pub hits_accepted: AtomicU64,
+    /// Hits refused: a target not in the shooter's snapshot of that tick, out of range, or too far from where it
+    /// was.
+    pub hits_refused: AtomicU64,
 }
 
 /// The address a connection counts against: an IPv4 address, or the /64 network of an IPv6 one, since one IPv6 host
@@ -276,6 +339,27 @@ impl Drop for AddressGuard {
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
 pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
+    listen_full(gateway, config, None, None)
+}
+
+/// As [`listen`], and gives every player a wallet in `money`'s ledger.
+pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<Arc<Money>>) -> Players {
+    listen_full(gateway, config, money, None)
+}
+
+/// [`listen`], and with `recorder` every connection's joins, datagrams, events and leaves are recorded as they
+/// arrive, before any limit applies ([`crate::recording`]).
+pub fn listen_recorded(gateway: Gateway, config: ListenConfig, recorder: Option<Arc<Recorder>>) -> Players {
+    listen_full(gateway, config, None, recorder)
+}
+
+/// [`listen`] with both a ledger for wallets ([`listen_with_money`]) and a recorder ([`listen_recorded`]).
+pub fn listen_full(
+    gateway: Gateway,
+    config: ListenConfig,
+    money: Option<Arc<Money>>,
+    recorder: Option<Arc<Recorder>>,
+) -> Players {
     let (inbound_tx, inbound_rx) = mpsc::channel();
     let traffic = Arc::new(Traffic::default());
     let next_id = AtomicU32::new(1);
@@ -287,7 +371,9 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let (outbox, recycle) = spawn_sender(traffic.clone());
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let close = shutdown.clone();
+    let accept_money = money.clone();
     tokio::spawn(async move {
+        let money = accept_money;
         loop {
             let incoming = tokio::select! {
                 incoming = gateway.accept() => incoming,
@@ -328,11 +414,13 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
             let active = active.clone();
             let handshakes = handshakes.clone();
             let id = next_id.fetch_add(1, Ordering::Relaxed);
+            let money = money.clone();
+            let recorder = recorder.clone();
             tokio::spawn(async move {
                 let session = incoming.handshake().await;
                 handshakes.fetch_sub(1, Ordering::Relaxed);
                 if let Ok(session) = session {
-                    serve(session, id, inbound, traffic, config.stats_to_clients, limits).await;
+                    serve(session, id, inbound, traffic, config, money, recorder).await;
                 }
                 drop(guard);
                 active.fetch_sub(1, Ordering::Relaxed);
@@ -340,6 +428,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         }
     });
     Players {
+        money,
         inbound: inbound_rx,
         traffic,
         players: Vec::new(),
@@ -372,13 +461,18 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         },
         owner_changes: Vec::new(),
         owner_retries: Vec::new(),
+        world: WorldState::default(),
+        world_changes: Vec::new(),
+        seats: Seats::new(),
         tick: 0,
+        tick_dt: std::time::Duration::from_millis(50),
         infos: Vec::new(),
         info_ticks: Vec::new(),
         history: History::new(),
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
+        player_list: Arc::default(),
         shutdown: Shutdown(shutdown),
         roster: None,
     }
@@ -418,20 +512,41 @@ async fn serve(
     id: u32,
     inbound: mpsc::Sender<Inbound>,
     traffic: Arc<Traffic>,
-    stats_to_clients: bool,
-    limits: Limits,
+    config: ListenConfig,
+    money: Option<Arc<Money>>,
+    recorder: Option<Arc<Recorder>>,
 ) {
+    let address = session.remote_address();
+    let (stats_to_clients, limits) = (config.stats_to_clients, config.limits);
     let (datagrams, mut event_sender, mut event_receiver) = session.split();
+    // A player whose wallet cannot be opened is not let in: the ledger has stopped, and money would be lost.
+    let wallet = match &money {
+        Some(money) => match money.open_wallet(id).await {
+            Ok(wallet) => Some(wallet),
+            Err(_) => {
+                datagrams.close();
+                return;
+            }
+        },
+        None => None,
+    };
+    let payments = money.filter(|_| config.money_events).zip(wallet);
     let (events_tx, mut events_rx) = tokio_mpsc::channel::<Vec<u8>>(EVENT_QUEUE);
+    let answers = events_tx.clone();
     let inbox = Arc::new(Inbox::default());
     let join = Inbound::Join {
         id,
+        address,
         sender: datagrams.clone(),
         events: events_tx,
         inbox: inbox.clone(),
+        wallet,
     };
     if inbound.send(join).is_err() {
         return;
+    }
+    if let Some(r) = &recorder {
+        r.record(id, RecordKind::Join, &[]);
     }
     tokio::spawn(async move {
         while let Some(packet) = events_rx.recv().await {
@@ -443,10 +558,29 @@ async fn serve(
     let events_inbox = inbox.clone();
     let events_traffic = traffic.clone();
     let events_connection = datagrams.clone();
+    let events_inbound = inbound.clone();
+    let events_recorder = recorder.clone();
     tokio::spawn(async move {
         let mut bucket = Bucket::for_events(&limits, Instant::now());
+        let mut shots = Bucket::for_shots(&limits, Instant::now());
         while let Ok((_, packet)) = event_receiver.recv().await {
-            match bucket.admit(Instant::now()) {
+            if let Some(r) = &events_recorder {
+                r.record(id, RecordKind::Event, &packet);
+            }
+            let event = ClientEvent::decode(&packet[PacketHeader::SIZE..]);
+            let Ok(event) = event else {
+                // No valid client sends one, so whatever sent it is not a client to keep.
+                events_traffic.closed_bad_events.fetch_add(1, Ordering::Relaxed);
+                events_connection.close();
+                break;
+            };
+            // Shots have their own budget, so firing a fast weapon never closes the connection.
+            let budget = if matches!(event, ClientEvent::Shot(_)) {
+                &mut shots
+            } else {
+                &mut bucket
+            };
+            match budget.admit(Instant::now()) {
                 Admit::Pass => {}
                 Admit::Drop => {
                     events_traffic.dropped_events.fetch_add(1, Ordering::Relaxed);
@@ -458,23 +592,43 @@ async fn serve(
                     break;
                 }
             }
-            match ClientEvent::decode(&packet[PacketHeader::SIZE..]) {
-                Ok(ClientEvent::RequestStats) if stats_to_clients => {
+            match event {
+                ClientEvent::RequestStats if stats_to_clients => {
                     events_inbox.wants_stats.store(true, Ordering::Relaxed);
                 }
-                Ok(_) => {}
-                Err(_) => {
-                    // No valid client sends one, so whatever sent it is not a client to keep.
-                    events_traffic.closed_bad_events.fetch_add(1, Ordering::Relaxed);
-                    events_connection.close();
-                    break;
+                ClientEvent::EnterSeat { vehicle, seat } => {
+                    let _ = events_inbound.send(Inbound::Seat {
+                        id,
+                        request: Some((vehicle, seat)),
+                    });
                 }
+                ClientEvent::LeaveSeat => {
+                    let _ = events_inbound.send(Inbound::Seat { id, request: None });
+                }
+                ClientEvent::Shot(shot) => {
+                    events_traffic.shots_received.fetch_add(1, Ordering::Relaxed);
+                    let _ = events_inbound.send(Inbound::Shot { id, shot });
+                }
+                ClientEvent::Pay { key, to, amount } => {
+                    let (result, balance) = match &payments {
+                        Some((money, wallet)) => money.pay(*wallet, key, to, amount).await,
+                        None => (PayResult::Refused, 0),
+                    };
+                    let answer = ServerEvent::Paid { key, result, balance };
+                    // A full queue means the client reads nothing; the answer is dropped like the others.
+                    let _ = answers.try_send(event_packet(&answer, 0));
+                }
+                // A server without load-test reporting ignores RequestStats; later events are not used yet.
+                _ => {}
             }
         }
     });
     let mut bucket = Bucket::for_states(&limits, Instant::now());
     let mut owned = Vec::new();
     while let Ok((header, packet)) = datagrams.recv().await {
+        if let Some(r) = &recorder {
+            r.record(id, RecordKind::Datagram, &packet);
+        }
         traffic
             .received_bytes
             .fetch_add(packet.len() as u64, Ordering::Relaxed);
@@ -505,6 +659,9 @@ async fn serve(
         }
     }
     datagrams.close();
+    if let Some(r) = &recorder {
+        r.record(id, RecordKind::Leave, &[]);
+    }
     let _ = inbound.send(Inbound::Leave { id });
 }
 
@@ -544,6 +701,10 @@ fn merge_ped(server: &PedBlock, client: &PedBlock) -> PedBlock {
 #[derive(Debug)]
 struct Player {
     slot: Slot,
+    /// Where the connection comes from, for [`PlayerView`].
+    address: SocketAddr,
+    /// When it joined.
+    joined: std::time::Instant,
     entity: Option<Entity>,
     sender: Datagrams,
     events: tokio_mpsc::Sender<Vec<u8>>,
@@ -552,11 +713,55 @@ struct Player {
     movement: Movement,
     /// When this player's entity was last sent a [`ServerEvent::Corrected`].
     corrected_at: Option<std::time::Instant>,
+    /// While this player is being sent the whole world state (on joining, or after a change found its event queue
+    /// full): 0 for the environment next, `n` for door `n - 1` next.
+    world_cursor: Option<usize>,
+    /// When this player last fired a shot the server accepted (SRV-16).
+    last_shot: Option<std::time::Instant>,
+}
+
+/// One connected player as an operator sees it ([`Players::player_list`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerView {
+    /// The player's entity id in snapshots.
+    pub id: u32,
+    /// Where the connection comes from.
+    pub address: SocketAddr,
+    /// How long ago it joined.
+    pub connected: std::time::Duration,
+    /// Where the server holds the player, in metres; `None` until its first accepted state.
+    pub position: Option<[f32; 3]>,
+    /// This player's states the movement checks refused (or, with report-only, would have).
+    pub refused: Violations,
+}
+
+/// The list of connected players, filled by the tick when asked ([`Players::player_list`]).
+#[derive(Debug, Default)]
+pub struct PlayerList {
+    wanted: AtomicBool,
+    list: Mutex<Vec<PlayerView>>,
+}
+
+impl PlayerList {
+    /// Asks the tick for a fresh list; [`PlayerList::take`] returns it after the next tick.
+    pub fn request(&self) {
+        self.wanted.store(true, Ordering::Relaxed);
+    }
+
+    /// The list the tick filled last, sorted by id, leaving it empty.
+    pub fn take(&self) -> Vec<PlayerView> {
+        self.list
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default()
+    }
 }
 
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
 #[derive(Debug)]
 pub struct Players {
+    /// Players' wallets, when the server has a ledger.
+    money: Option<Arc<Money>>,
     inbound: mpsc::Receiver<Inbound>,
     traffic: Arc<Traffic>,
     /// Connected players by slot index.
@@ -592,8 +797,15 @@ pub struct Players {
     /// Ownership events that found the player's event queue full, as (player slot, entity id, epoch, yours): sent
     /// again each tick while they still hold, so a lost event does not leave an entity without its simulator.
     owner_retries: Vec<(u32, u32, u8, bool)>,
+    /// The clock, the weather and the doors (SRV-17), and this tick's changes to send everyone.
+    world: WorldState,
+    world_changes: Vec<ServerEvent>,
+    /// Who sits in which vehicle (SRV-15).
+    seats: Seats,
     /// The tick being run, or the last one run.
     tick: u32,
+    /// The tick's length, for the rewind limit and the world clock.
+    tick_dt: std::time::Duration,
     /// The info each slot sends, built from `peds`, and the tick it last changed at.
     infos: Vec<Info>,
     info_ticks: Vec<u32>,
@@ -603,6 +815,7 @@ pub struct Players {
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
     pending_stats: Arc<Mutex<Option<ServerStats>>>,
+    player_list: Arc<PlayerList>,
     shutdown: Shutdown,
     roster: Option<mpsc::Sender<Roster>>,
 }
@@ -636,6 +849,13 @@ impl Players {
     #[must_use]
     pub fn stats_slot(&self) -> Arc<Mutex<Option<ServerStats>>> {
         self.pending_stats.clone()
+    }
+
+    /// A handle to ask for the connected players ([`PlayerList::request`]) and read them after the next tick
+    /// ([`PlayerList::take`]). Building the list costs one pass over the players, only on the ticks it is asked for.
+    #[must_use]
+    pub fn player_list(&self) -> Arc<PlayerList> {
+        self.player_list.clone()
     }
 
     /// Joins and leaves from now on, in the order the ticks apply them.
@@ -675,16 +895,22 @@ impl Players {
     /// Spawns an entity that is not a player (a vehicle, an NPC or an object; ADR 0006) with its info and
     /// kinematics, and returns its id, which snapshots carry from the next tick on. `None` if `info` is a player's,
     /// the position is outside the map, the speed is above the limit, or every slot is taken. The server's scripts and admin commands spawn
-    /// through this; who simulates the entity is decided by its ownership (SRV-14).
+    /// through this; who simulates the entity is decided by its ownership (SRV-14). With
+    /// [`MovementRules::report_only`] a state outside the movement rules is spawned anyway and counted
+    /// ([`Traffic::reported_spawns`]).
     pub fn spawn(&mut self, info: Info, state: ClientState) -> Option<u32> {
+        if info.kind == EntityKind::Player {
+            return None;
+        }
         // The spawn is the first accepted state, so an owner's first state is checked against it.
         let mut moves = Movement::new();
-        if info.kind == EntityKind::Player
-            || moves
-                .check(&self.movement, &state, std::time::Instant::now())
-                .is_err()
-        {
-            return None;
+        let now = std::time::Instant::now();
+        if moves.check(&self.movement, &state, now).is_err() {
+            if !self.movement.report_only {
+                return None;
+            }
+            self.traffic.reported_spawns.fetch_add(1, Ordering::Relaxed);
+            moves.accept(&self.movement, &state, now);
         }
         let [x, y, _] = state.position.to_metres();
         let slot = self.slots.alloc()?;
@@ -720,6 +946,9 @@ impl Players {
             return false;
         }
         self.spawned[index] = false;
+        for player in self.seats.vacate(slot.index) {
+            self.unseated(player);
+        }
         if let Some(change) = self.ownership.untrack(slot.index) {
             // Its state is gone, so the owner is told here, with the id, rather than with the tick's changes.
             self.tell_owner(change.old, id, change.epoch, false);
@@ -740,6 +969,316 @@ impl Players {
         true
     }
 
+    /// Sets the clock to `minute` of the day now, running at `rate` game minutes per real second (0 stops it), and
+    /// tells every player.
+    pub fn set_clock(&mut self, minute: f64, rate: f64) {
+        self.world.set_clock(self.tick, minute, rate);
+        self.world_changes.push(ServerEvent::Environment(
+            self.world.environment(self.tick, self.tick_dt),
+        ));
+    }
+
+    /// Sets the weather, turning from `weather` into `next` with `transition` (0 to 255) of the way done, and tells
+    /// every player.
+    pub fn set_weather(&mut self, weather: AssetId, next: AssetId, transition: u8) {
+        self.world
+            .set_weather(self.tick, self.tick_dt, weather, next, transition);
+        self.world_changes.push(ServerEvent::Environment(
+            self.world.environment(self.tick, self.tick_dt),
+        ));
+    }
+
+    /// Registers a door or changes it, and tells every player if anything changed.
+    pub fn set_door(&mut self, door: Door) {
+        if self.world.set_door(door) {
+            self.world_changes.push(ServerEvent::Door(door));
+        }
+    }
+
+    /// The world state as the server holds it.
+    #[must_use]
+    pub fn world(&self) -> &WorldState {
+        &self.world
+    }
+
+    /// Sends this tick's world changes to every player, and goes on with the players being sent the whole state, at
+    /// most [`WORLD_EVENTS_PER_TICK`] events each a tick. A change that finds a player's queue full starts that
+    /// player over with the whole state, so nobody is left with a stale door or clock.
+    fn send_world(&mut self) {
+        let tick = u64::from(self.tick);
+        let environment = ServerEvent::Environment(self.world.environment(self.tick, self.tick_dt));
+        for player in self.players.iter_mut().flatten() {
+            // Sent during a resend too, as a door the resend has passed would otherwise stay stale; not before it
+            // starts, as it sends the state as it is now.
+            let changes = if player.world_cursor == Some(0) {
+                &[][..]
+            } else {
+                &self.world_changes[..]
+            };
+            for change in changes {
+                if player.events.try_send(event_packet(change, tick)).is_err() {
+                    self.traffic.lost_world_events.fetch_add(1, Ordering::Relaxed);
+                    player.world_cursor = Some(0);
+                    break;
+                }
+            }
+            let Some(mut cursor) = player.world_cursor else {
+                continue;
+            };
+            let doors = self.world.doors();
+            for _ in 0..WORLD_EVENTS_PER_TICK {
+                let event = match cursor {
+                    0 => environment,
+                    n => match doors.get(n - 1) {
+                        Some(&door) => ServerEvent::Door(door),
+                        None => break,
+                    },
+                };
+                if player.events.try_send(event_packet(&event, tick)).is_err() {
+                    break;
+                }
+                cursor += 1;
+            }
+            player.world_cursor = (cursor <= doors.len()).then_some(cursor);
+        }
+        self.world_changes.clear();
+    }
+
+    /// Checks the shot the player in slot `player` fired and applies the hits that pass (`combat.rs`).
+    fn apply_shot(&mut self, player: u32, shot: &Shot) {
+        let now = std::time::Instant::now();
+        let p = player as usize;
+        let rules = WeaponRules::default();
+        let shooter = self.peds.get(p).copied().unwrap_or_default();
+        let own = self.states.get(p).copied().flatten();
+        let rewind = (REWIND.as_secs_f64() / self.tick_dt.as_secs_f64().max(1e-6)) as u32;
+        let fresh = shot.tick <= self.tick && self.tick - shot.tick <= rewind;
+        let Some(Some(pl)) = self.players.get_mut(p) else {
+            return;
+        };
+        let ready = pl
+            .last_shot
+            .is_none_or(|at| now.saturating_duration_since(at) >= rules.interval);
+        let (Some(own), Some(then), true) = (own, self.history.at(shot.tick).filter(|_| fresh), ready) else {
+            self.traffic.shots_refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let seen = pl.view.sent_at(shot.tick);
+        if shooter.motion == Motion::Dead
+            || shot.weapon != shooter.weapon
+            || shot.hits().len() > usize::from(rules.pellets)
+            || distance(shot.from, own.position) > FROM_TOLERANCE
+            || seen.is_none()
+        {
+            self.traffic.shots_refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        pl.last_shot = Some(now);
+        let seen = seen.unwrap_or_default();
+        let mut accepted = Vec::new();
+        for hit in shot.hits() {
+            let slot = hit.target >> 16;
+            let current = self.states.get(slot as usize).copied().flatten();
+            let past = then.get(slot as usize).copied().flatten();
+            let ok = slot != player
+                && seen.binary_search(&slot).is_ok()
+                && current
+                    .is_some_and(|c| c.id == hit.target && distance(c.position, own.position) <= rules.range)
+                && past
+                    .is_some_and(|t| t.id == hit.target && distance(t.position, hit.point) <= HIT_TOLERANCE);
+            if ok {
+                accepted.push((slot as usize, hit.zone));
+            } else {
+                self.traffic.hits_refused.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for (slot, zone) in accepted {
+            self.traffic.hits_accepted.fetch_add(1, Ordering::Relaxed);
+            self.damage(slot, rules.damage, zone);
+        }
+    }
+
+    /// Applies a hit of `damage` points on `zone` to the entity in `slot`, by its kind.
+    fn damage(&mut self, slot: usize, damage: u8, zone: Zone) {
+        let info = self.infos[slot];
+        let id = self.states[slot].map_or(0, |s| s.id);
+        let killed = match info.kind {
+            EntityKind::Player => {
+                let mut ped = self.peds[slot];
+                let killed = hit_ped(&mut ped, damage, zone);
+                self.peds[slot] = ped;
+                self.infos[slot] = ped_info(&ped);
+                if killed {
+                    // A dead player leaves its seat, and a driver its vehicle to the next owner.
+                    self.leave_seat(slot as u32);
+                }
+                killed
+            }
+            EntityKind::Npc => {
+                let Ok(mut ped) = PedBlock::from_fields(info.fields()) else {
+                    return;
+                };
+                let killed = hit_ped(&mut ped, damage, zone);
+                if let Ok(updated) = Info::with_fields(info.kind, info.model, &ped.to_fields()) {
+                    self.infos[slot] = updated;
+                }
+                killed
+            }
+            EntityKind::Vehicle => {
+                let Ok(mut vehicle) = VehicleBlock::from_fields(info.fields()) else {
+                    return;
+                };
+                hit_vehicle(&mut vehicle, damage);
+                if let Ok(updated) = Info::with_fields(info.kind, info.model, &vehicle.to_fields()) {
+                    self.infos[slot] = updated;
+                }
+                false
+            }
+            EntityKind::Object => return,
+        };
+        if self.infos[slot] != info {
+            self.info_ticks[slot] = self.tick;
+        }
+        if killed && let Some(roster) = &self.roster {
+            let _ = roster.send(Roster::Died(id));
+        }
+    }
+
+    /// The tick being run, or the last one run.
+    #[must_use]
+    pub fn tick(&self) -> u32 {
+        self.tick
+    }
+
+    /// Locks or unlocks a spawned vehicle: a locked one refuses every request to enter, and those inside stay.
+    /// Returns `false` for an id that is not a spawned vehicle.
+    pub fn set_locked(&mut self, id: u32, locked: bool) -> bool {
+        if !self
+            .spawned(id)
+            .is_some_and(|(i, _)| i.kind == EntityKind::Vehicle)
+        {
+            return false;
+        }
+        self.seats.set_locked(id >> 16, locked);
+        true
+    }
+
+    /// The vehicle id and seat the player with entity id `player` sits in.
+    #[must_use]
+    pub fn seat_of(&self, player: u32) -> Option<(u32, u8)> {
+        let (vehicle, seat) = self.seats.seat_of(player >> 16)?;
+        Some((self.states.get(vehicle as usize).copied().flatten()?.id, seat))
+    }
+
+    /// Seats the player in slot `player` in `seat` of the vehicle with id `vehicle`, if the rules allow it
+    /// (`seats.rs`), and sets its ped block; the driver's seat makes it the vehicle's driver (ownership rule 1).
+    fn enter_seat(&mut self, player: u32, vehicle: u32, seat: u8) -> Result<(), Refusal> {
+        let Some((_, car)) = self
+            .spawned(vehicle)
+            .filter(|(i, _)| i.kind == EntityKind::Vehicle)
+        else {
+            return Err(Refusal::NotAVehicle);
+        };
+        let p = player as usize;
+        let reach = self.states.get(p).copied().flatten().is_some_and(|me| {
+            let ([x, y, z], [cx, cy, cz]) = (me.position.to_metres(), car.position.to_metres());
+            (x - cx).powi(2) + (y - cy).powi(2) + (z - cz).powi(2) <= ENTER_RADIUS * ENTER_RADIUS
+        });
+        if !reach || self.peds[p].motion == Motion::Dead {
+            return Err(Refusal::CannotReach);
+        }
+        let slot = vehicle >> 16;
+        self.seats.enter(player, slot, seat)?;
+        if seat == 0 {
+            self.ownership.set_driver(slot, Some(player));
+        }
+        self.set_seat_in_ped(p, vehicle, seat + 1);
+        Ok(())
+    }
+
+    /// Takes the player in slot `player` out of its seat, if it sits in one, and starts its movement checks from
+    /// where the vehicle is, so its first state outside is checked from there.
+    fn leave_seat(&mut self, player: u32) {
+        let Some((vehicle, seat)) = self.seats.leave(player) else {
+            return;
+        };
+        if seat == 0 {
+            self.ownership.set_driver(vehicle, None);
+        }
+        self.unseated(player);
+    }
+
+    /// What follows a player's leaving its seat, however it left.
+    fn unseated(&mut self, player: u32) {
+        let p = player as usize;
+        self.set_seat_in_ped(p, 0, 0);
+        let at = self.states.get(p).copied().flatten();
+        if let (Some(Some(pl)), Some(at)) = (self.players.get_mut(p), at) {
+            pl.movement.reset();
+            let state = ClientState {
+                position: at.position,
+                velocity: at.velocity,
+                rotation: at.rotation,
+            };
+            let _ = pl
+                .movement
+                .check(&self.movement, &state, std::time::Instant::now());
+        }
+    }
+
+    /// Sets the seat fields of the ped block in slot `p` (`seat` 0 for none) and the motion that goes with them.
+    fn set_seat_in_ped(&mut self, p: usize, vehicle: u32, seat: u8) {
+        let Some(ped) = self.peds.get(p).copied() else {
+            return;
+        };
+        let motion = match (seat, ped.motion) {
+            (0, Motion::InVehicle) => Motion::Idle,
+            (0, m) => m,
+            _ => Motion::InVehicle,
+        };
+        let ped = PedBlock {
+            motion,
+            vehicle,
+            seat,
+            ..ped
+        };
+        if ped != self.peds[p] {
+            self.peds[p] = ped;
+            self.infos[p] = ped_info(&ped);
+            self.info_ticks[p] = self.tick;
+        }
+    }
+
+    /// Puts every seated player where its vehicle is, so the grid, the ownership rules, the scripts and its own
+    /// view follow the vehicle. Run after the owned states of the tick.
+    fn follow_vehicles(&mut self, world: &mut World) {
+        for (player, vehicle) in self.seats.seated().collect::<Vec<_>>() {
+            let Some(car) = self.states.get(vehicle as usize).copied().flatten() else {
+                continue;
+            };
+            let p = player as usize;
+            let Some(Some(pl)) = self.players.get(p) else {
+                continue;
+            };
+            let state = EntityState {
+                id: pl.slot.wire_id(),
+                ..car
+            };
+            if let Some(entity) = pl.entity
+                && let Ok(mut current) = world.get::<&mut PlayerState>(entity)
+            {
+                current.0 = ClientState {
+                    position: car.position,
+                    velocity: car.velocity,
+                    rotation: car.rotation,
+                };
+            }
+            let [x, y, _] = car.position.to_metres();
+            self.grid.upsert(EntityId(player), Point::new(x, y));
+            self.states[p] = Some(state);
+        }
+    }
+
     /// The info and state of an entity [`Players::spawn`] made.
     #[must_use]
     pub fn spawned(&self, id: u32) -> Option<(Info, EntityState)> {
@@ -748,8 +1287,17 @@ impl Players {
         (self.spawned.get(index) == Some(&true)).then(|| (self.infos[index], state))
     }
 
+    /// The info and state the server holds for any entity, a player's included, by its id.
+    #[must_use]
+    pub fn entity(&self, id: u32) -> Option<(Info, EntityState)> {
+        let index = (id >> 16) as usize;
+        let state = self.states.get(index).copied().flatten().filter(|s| s.id == id)?;
+        Some((self.infos[index], state))
+    }
+
     pub fn run_tick(&mut self, world: &mut World, info: &TickInfo) {
         self.tick = info.tick as u32;
+        self.tick_dt = info.dt;
         self.apply_inbound(world, info);
         self.apply_states(world, info.tick as u32);
         self.grid.rebuild();
@@ -759,6 +1307,36 @@ impl Players {
         // Every visible set has been recomputed without the players who left: their slots may be reused.
         self.slots.release();
         self.send_stats();
+        self.send_world();
+        self.fill_player_list();
+    }
+
+    fn fill_player_list(&mut self) {
+        if !self.player_list.wanted.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut list: Vec<PlayerView> = self
+            .players
+            .iter()
+            .flatten()
+            .map(|p| PlayerView {
+                id: p.slot.wire_id(),
+                address: p.address,
+                connected: now.saturating_duration_since(p.joined),
+                position: self
+                    .states
+                    .get(p.slot.index as usize)
+                    .copied()
+                    .flatten()
+                    .map(|s| s.position.to_metres()),
+                refused: p.movement.violations(),
+            })
+            .collect();
+        list.sort_by_key(|v| v.id);
+        if let Ok(mut slot) = self.player_list.list.lock() {
+            *slot = list;
+        }
     }
 
     /// The owner of a spawned entity and its epoch: `None` for an id that is not one, `Some((None, _))` while
@@ -854,14 +1432,19 @@ impl Players {
             match message {
                 Inbound::Join {
                     id,
+                    address,
                     sender,
                     events,
                     inbox,
+                    wallet,
                 } => {
                     let Some(slot) = self.slots.alloc() else {
                         sender.close();
                         continue;
                     };
+                    if let (Some(money), Some(wallet)) = (&self.money, wallet) {
+                        money.register(slot.wire_id(), id, wallet);
+                    }
                     let tick_hz =
                         (std::time::Duration::from_secs(1).as_nanos() / info.dt.as_nanos().max(1)) as u16;
                     let _ = events.try_send(event_packet(
@@ -885,6 +1468,8 @@ impl Players {
                     self.info_ticks[index] = info.tick as u32;
                     self.players[index] = Some(Player {
                         slot,
+                        address,
+                        joined: std::time::Instant::now(),
                         entity: None,
                         sender,
                         events,
@@ -892,12 +1477,38 @@ impl Players {
                         view: View::new(),
                         movement: Movement::new(),
                         corrected_at: None,
+                        world_cursor: Some(0),
+                        last_shot: None,
                     });
+                }
+                Inbound::Shot { id, shot } => {
+                    if let Some(slot) = self.by_connection.get(&id).copied() {
+                        self.apply_shot(slot.index, &shot);
+                    }
+                }
+                Inbound::Seat { id, request } => {
+                    let Some(slot) = self.by_connection.get(&id).copied() else {
+                        continue;
+                    };
+                    match request {
+                        Some((vehicle, seat)) => {
+                            let counter = match self.enter_seat(slot.index, vehicle, seat) {
+                                Ok(()) => &self.traffic.seats_granted,
+                                Err(_) => &self.traffic.seats_refused,
+                            };
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        None => self.leave_seat(slot.index),
+                    }
                 }
                 Inbound::Leave { id } => {
                     let Some(slot) = self.by_connection.remove(&id) else {
                         continue;
                     };
+                    self.leave_seat(slot.index);
+                    if let Some(money) = &self.money {
+                        money.unregister(slot.wire_id());
+                    }
                     let index = slot.index as usize;
                     if let Some(entity) = self.players[index].take().and_then(|p| p.entity) {
                         let _ = world.despawn(entity);
@@ -936,6 +1547,19 @@ impl Players {
             }) else {
                 continue;
             };
+            let index = player.slot.index as usize;
+            if self.seats.seat_of(player.slot.index).is_some() {
+                // Seated: the vehicle's state places it (`follow_vehicles`); only the presentation is taken.
+                if let Some(ped) = ped {
+                    let merged = merge_ped(&self.peds[index], &ped);
+                    if merged != self.peds[index] {
+                        self.peds[index] = merged;
+                        self.infos[index] = ped_info(&merged);
+                        self.info_ticks[index] = tick;
+                    }
+                }
+                continue;
+            }
             if let Err(violation) = player.movement.check(rules, &state, now) {
                 let counter = match violation {
                     Violation::Bounds => &self.traffic.refused_bounds,
@@ -971,7 +1595,6 @@ impl Players {
                 }
                 None => player.entity = Some(world.spawn((NetId(id), PlayerState(state)))),
             }
-            let index = player.slot.index as usize;
             if let Some(ped) = ped {
                 let merged = merge_ped(&self.peds[index], &ped);
                 if merged != self.peds[index] {
@@ -998,11 +1621,13 @@ impl Players {
             self.owned_pool.push(list);
         }
         self.owned_by = owned;
+        self.follow_vehicles(world);
     }
 
     /// Takes one owned-entity state from the player in slot `player` if it owns the entity with that epoch, the
     /// state passes the movement checks and the entity stays within the keep radius of the player (ADR 0006,
-    /// section 4). Its block is merged by [`crate::owned`]'s rules.
+    /// section 4). Its block is merged by [`crate::owned`]'s rules. With [`MovementRules::report_only`] a state that
+    /// breaks the movement checks is counted and applied; the ownership and keep-radius checks still hold.
     fn apply_owned(&mut self, player: u32, o: &OwnedState, tick: u32, now: std::time::Instant) {
         let slot = o.id >> 16;
         let index = slot as usize;
@@ -1012,17 +1637,13 @@ impl Players {
             self.traffic.refused_owned_stale.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let [x, y, z] = o.state.position.to_metres();
+        let [x, y, _] = o.state.position.to_metres();
         let near = self
             .states
             .get(player as usize)
             .copied()
             .flatten()
-            .is_some_and(|p| {
-                let [px, py, pz] = p.position.to_metres();
-                let r = self.ownership_rules.keep_radius;
-                (x - px).powi(2) + (y - py).powi(2) + (z - pz).powi(2) <= r * r
-            });
+            .is_some_and(|p| within_keep(p.position.to_metres(), [x, y], self.ownership_rules.keep_radius));
         if !near {
             self.traffic.refused_owned_far.fetch_add(1, Ordering::Relaxed);
             return;
@@ -1034,7 +1655,10 @@ impl Players {
             self.traffic
                 .refused_owned_movement
                 .fetch_add(1, Ordering::Relaxed);
-            return;
+            if !self.movement.report_only {
+                return;
+            }
+            self.entity_moves[index].accept(&self.movement, &o.state, now);
         }
         self.states[index] = Some(EntityState {
             id: o.id,
@@ -1189,6 +1813,14 @@ mod tests {
 
     /// A lost "yours" is sent again only while the player still owns the entity with that epoch; a lost "not
     /// yours" only while it does not own it (again).
+    /// The keep radius ignores height, as in `Ownership`: an entity high above its owner is still near.
+    #[test]
+    fn the_keep_radius_is_measured_on_the_ground_plane() {
+        assert!(within_keep([0.0, 0.0, 0.0], [100.0, 100.0], 150.0));
+        assert!(within_keep([0.0, 0.0, 500.0], [0.0, 10.0], 150.0));
+        assert!(!within_keep([0.0, 0.0, 0.0], [120.0, 120.0], 150.0));
+    }
+
     #[test]
     fn a_lost_ownership_event_is_retried_only_while_it_holds() {
         assert!(still_holds(Some((Some(3), 5)), true, 3, 5, true));

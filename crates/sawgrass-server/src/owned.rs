@@ -5,7 +5,7 @@
 //!
 //! - an owner's damage values (a vehicle's engine, body and burst tyres; an NPC's health and armour) are taken only
 //!   for NPCs and for vehicles that belong to nobody as property;
-//! - only as decreases, and at most [`DAMAGE_PER_SECOND`] points a second per value ([`DamageBudget`]);
+//! - only as decreases, and at most [`DAMAGE_PER_SECOND`] points a second per entity, shared by all its values ([`DamageBudget`]);
 //! - for a vehicle that belongs to a player, the owner's damage values are ignored and the server's are kept.
 //!
 //! Vehicle damage beyond that comes only from events the server checked (an accepted hit report, a script).

@@ -74,6 +74,19 @@ At 3,000 bots on 2 cores over 1,500 m, one socket per bot with every bot decodin
 8 ms). 4,096 bots in that mode stayed ok at 1.64 cores. Use the default for figures that depend on what bots
 receive, and the light mode to load a server with more bots than the generator could otherwise carry.
 
+### Bots that pay each other
+
+`--pay-every SECS` makes every bot pay another bot of the run 1 to 100 units every SECS on average (BOT-7), against a
+server started with `--ledger DIR --money-events` (DB-8). Each payment is answered once it is on disk, and the report
+adds a line:
+
+```text
+money: 1998 payments/s sent, 1994/s done, 0 short of funds, 0 refused otherwise; answer p50 <16.38 ms p99 <524.29 ms
+```
+
+"done" is the payments the server confirmed. "short of funds" means the payer had too little; "refused otherwise"
+covers any other answer. The answer time runs from the send to the confirmation, the ledger's group commit included.
+
 `--record FILE` writes every snapshot datagram the first `--record-bots` bots (default 32) receive to FILE, for the
 packet compression benchmark to replay (`docs/research/packet-compression`). It takes about 70 MB a minute at 1,000
 bots over 1,500 m.
@@ -116,6 +129,23 @@ On one machine, pin the two to separate cores so they do not take CPU from each 
 taskset -c 0,1 target/release/sawgrass-server ... --net-threads 1
 taskset -c 2,3 target/release/sawgrass-bots run ...
 ```
+
+## Playing a recorded session
+
+A server started with `--record FILE` writes what every client sends, as it arrives (task SRV-22). The bots play
+such a file against any server of the same protocol version, one connection per recorded connection, joining,
+sending and leaving at the recorded times:
+
+```sh
+target/release/sawgrass-server --listen 0.0.0.0:4433 --cert cert/cert.der --key cert/key.der --record session.rec
+# ... a session with real clients ...
+target/release/sawgrass-bots replay --file session.rec --server 127.0.0.1:4433 --cert cert/cert.der
+```
+
+- `--speed X` plays it X times as fast (default 1).
+- Each state's acknowledged tick is replaced by the newest snapshot the replaying connection received, so the
+  server's delta snapshots stay valid. Entity ids inside events (a payment's payee) are the recording server's.
+- A recording holds what players sent: positions, chat and script events. Keep it private and never commit one.
 
 ## What this does not measure yet
 

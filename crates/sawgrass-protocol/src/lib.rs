@@ -5,12 +5,15 @@
 //! worst-case error of each. [`game`] defines what follows the header for each packet kind, and [`delta`] the delta-encoded snapshots. All integers are
 //! little-endian. The connection handshake lives in the gateway crate.
 
+pub mod combat;
 pub mod delta;
 pub mod entity;
 pub mod game;
 pub mod ped;
 pub mod quant;
+pub mod recording;
 pub mod vehicle;
+pub mod world;
 
 use std::fmt;
 
@@ -26,8 +29,12 @@ pub use quant::{Position, Rotation, Velocity};
 /// carry the player's ped block ([`ped`]). Version 6 adds the vehicle block ([`vehicle`]) and the states of the
 /// entities a client simulates after its own ([`game::OwnedState`]). Version 7 adds
 /// [`game::ServerEvent::Corrected`], the server's answer to a refused state.
-/// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]).
-pub const PROTOCOL_VERSION: u32 = 8;
+/// Version 8 adds the ownership event ([`game::ServerEvent::Ownership`]). Version 9 adds payments between
+/// players ([`game::ClientEvent::Pay`], [`game::ServerEvent::Paid`]). Version 10 adds the shot report
+/// ([`game::ClientEvent::Shot`], [`combat`]). Version 11 adds the seat requests
+/// ([`game::ClientEvent::EnterSeat`], [`game::ClientEvent::LeaveSeat`]). Version 12 adds the world state events
+/// ([`world`]).
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///

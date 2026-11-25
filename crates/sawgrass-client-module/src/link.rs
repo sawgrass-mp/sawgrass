@@ -211,7 +211,9 @@ impl NetLink {
                 ServerEvent::Joined { entity, tick_hz } => self.joined(entity, tick_hz, world),
                 ServerEvent::Corrected(state) => self.corrected(&state, world),
                 ServerEvent::Ownership { entity, epoch, yours } => self.set_ownership(entity, epoch, yours),
-                ServerEvent::Stats(_) => {}
+                // Server figures are for load tests, and events of later features (payments, seats) are handled by
+                // the code that adds them.
+                _ => {}
             }
         }
     }

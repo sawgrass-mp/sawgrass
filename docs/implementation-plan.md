@@ -116,11 +116,12 @@ of the 4,096 bots on the server's machine, 4,096 bots ran with no overrun. On tw
 | SRV-10 | Overload policy: a full send queue drops that player's oldest snapshots; repeated overruns are reported with their phase; a panicking system is reported and the server stops cleanly instead of continuing in an unknown state |
 | BOT-4 | Bots that misbehave (floods, teleports, malformed packets, reconnect storms) as a load-test scenario, so phase 3 is tested on the bots |
 
-### Phase 4: roleplay base (roadmap stage 2)
+### Phase 4: roleplay foundations (roadmap stage 2)
 
 | ID | Task |
 |---|---|
 | DB-5 | The single writer and its RocksDB store with group commit, behind the store trait (ADR 0003); bots that move money as load |
+| DB-8 | The writer in the server: a funded wallet for every player, and payments between players as a load-test event (protocol 9). The store's writer gained `submit_then` and `balance_then`, which answer through a callback, so connection tasks await the disk without holding a thread. A wallet lasts one connection and is funded once the player has joined (DB-10); wallets per character come with persistent characters in step 8 |
 | DB-6 | WAL copy to a second machine before acknowledgement, and the restore procedure (ADR 0003) |
 | DB-7 | PostgreSQL archive fed from the operation records; `sawgrass-db`'s ledger becomes the archive's schema |
 | SCRIPT-3 | Luau runtime in the server: resources, events, deadlines and memory caps (ADR 0005) |
@@ -130,9 +131,12 @@ Phase 4 waits for phase 1's gate, so the tick it adds work to has room for it. S
 architecture.md (gateways in their own processes) is not planned here: the gateway used about one core at 3,000
 players in BOT-3, so it is started only if the 4,096 gate shows the gateway, not the tick, as the limit.
 
+Phase 4 builds no roleplay gameplay. Characters, money, inventory, property and jobs as resources (`RP-` tasks)
+start after the first two-client session, the gate of roadmap step 7, so that they are tested in the game.
+
 ### Phase 5: sync before the game
 
-The server and protocol side of roadmap step 8, as [ADR 0006](adr/0006-entity-sync-before-the-game.md) designs it.
+The server and protocol side of roadmap step 9, as [ADR 0006](adr/0006-entity-sync-before-the-game.md) designs it.
 None of it needs the game; every task is tested on the bots. The protocol tasks change what the client's network
 core decodes, so they land in this order.
 
