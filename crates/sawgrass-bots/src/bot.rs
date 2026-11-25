@@ -130,7 +130,8 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
-                Err(_) => {}
+                // Bots simulate no vehicle until BOT-5.
+                Ok(ServerEvent::Ownership { .. }) | Err(_) => {}
             }
         }
     });

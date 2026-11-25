@@ -601,3 +601,87 @@ fn a_spawned_vehicle_is_seen_with_its_info_until_despawned() {
     assert!(players.lock().expect("players").spawned(car).is_none());
     assert!(seen(false, &mut tick_loop).is_empty());
 }
+
+/// ADR 0006, section 4: the server gives a spawned vehicle to the nearest player and tells it, with an epoch, and
+/// tells it again when the vehicle is gone.
+#[test]
+fn the_nearest_player_is_told_it_owns_a_vehicle() {
+    use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+    use sawgrass_protocol::vehicle::VehicleBlock;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let players = Arc::new(Mutex::new(players));
+    let info =
+        Info::with_fields(EntityKind::Vehicle, AssetId(3), &VehicleBlock::INTACT.to_fields()).expect("info");
+    let parked = ClientState {
+        position: Position::from_metres([30.0, 5.0, 30.0]).expect("position"),
+        velocity: Velocity::from_metres_per_second([0.0; 3]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let car = players
+        .lock()
+        .expect("players")
+        .spawn(info, parked)
+        .expect("spawned");
+    assert_eq!(players.lock().expect("players").owner(car), Some((None, 0)));
+
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let mut a = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("a connects");
+    let me = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut a)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    a.send_datagram(state_packet(10.0)).expect("send a");
+
+    let next_ownership = |a: &mut Session, tick_loop: &mut TickLoop| {
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                runtime.block_on(async {
+                    loop {
+                        let (_, packet) = a.recv_event().await.expect("event");
+                        if let Ok(event @ ServerEvent::Ownership { .. }) =
+                            ServerEvent::decode(&packet[PacketHeader::SIZE..])
+                        {
+                            return event;
+                        }
+                    }
+                })
+            });
+            tick_until(tick_loop, |_| reader.is_finished());
+            reader.join().expect("reader")
+        })
+    };
+    assert_eq!(
+        next_ownership(&mut a, &mut tick_loop),
+        ServerEvent::Ownership {
+            entity: car,
+            epoch: 1,
+            yours: true
+        }
+    );
+    assert_eq!(players.lock().expect("players").owner(car), Some((Some(me), 1)));
+
+    assert!(players.lock().expect("players").despawn(car));
+    assert_eq!(
+        next_ownership(&mut a, &mut tick_loop),
+        ServerEvent::Ownership {
+            entity: car,
+            epoch: 2,
+            yours: false
+        }
+    );
+}

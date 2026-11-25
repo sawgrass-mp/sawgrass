@@ -298,6 +298,7 @@ impl ServerStats {
 /// Event codes. The values are part of the wire format.
 const JOINED: u8 = 1;
 const STATS: u8 = 2;
+const OWNERSHIP: u8 = 3;
 const REQUEST_STATS: u8 = 128;
 
 /// An event from the server.
@@ -313,6 +314,16 @@ pub enum ServerEvent {
     /// Server figures, sent periodically to clients that sent [`ClientEvent::RequestStats`] when the server
     /// allows it.
     Stats(ServerStats),
+    /// The client now simulates `entity` (`yours`), or no longer does (ADR 0006, section 4). Its
+    /// [`OwnedState`]s for the entity must carry `epoch`; the server drops any other.
+    Ownership {
+        /// The entity's id.
+        entity: u32,
+        /// The entity's epoch from now on.
+        epoch: u8,
+        /// Whether this client is its owner now.
+        yours: bool,
+    },
 }
 
 impl ServerEvent {
@@ -340,6 +351,12 @@ impl ServerEvent {
                 }
                 out.extend_from_slice(&s.sent_bytes_per_sec.to_le_bytes());
                 out.extend_from_slice(&s.received_bytes_per_sec.to_le_bytes());
+            }
+            Self::Ownership { entity, epoch, yours } => {
+                out.push(OWNERSHIP);
+                out.extend_from_slice(&entity.to_le_bytes());
+                out.push(*epoch);
+                out.push(u8::from(*yours));
             }
         }
     }
@@ -383,6 +400,18 @@ impl ServerEvent {
                     sent_bytes_per_sec: u64::from_le_bytes(r.array()?),
                     received_bytes_per_sec: u64::from_le_bytes(r.array()?),
                 }))
+            }
+            OWNERSHIP => {
+                let entity = u32::from_le_bytes(r.array()?);
+                let [epoch, yours] = r.array::<2>()?;
+                if yours > 1 {
+                    return Err(DecodeError::OutOfRange);
+                }
+                Ok(Self::Ownership {
+                    entity,
+                    epoch,
+                    yours: yours == 1,
+                })
             }
             other => Err(DecodeError::UnknownEvent(other)),
         }?;
