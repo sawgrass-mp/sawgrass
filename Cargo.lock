@@ -1334,6 +1334,7 @@ dependencies = [
 name = "sawgrass-client-module"
 version = "0.0.0"
 dependencies = [
+ "sawgrass-netcode",
  "sawgrass-protocol",
 ]
 

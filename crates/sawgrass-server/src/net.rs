@@ -58,6 +58,7 @@ use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
 use crate::money::Money;
 use crate::movement::{Movement, MovementRules, Violation};
+use crate::ownership::{Change, Ownership, OwnershipRules};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
 
@@ -81,7 +82,11 @@ pub struct PlayerState(pub ClientState);
 
 /// Events queued for one player before the oldest new one is dropped. The server sends only `Joined` and a
 /// `Stats` every few seconds, so a client that reads its stream never comes near it.
-const EVENT_QUEUE: usize = 16;
+const EVENT_QUEUE: usize = 16 + 2 * OWNERSHIP_CAP as usize;
+
+/// Most entities one player owns: [`OwnershipRules::cap`]'s default. A player may gain and lose that many in one
+/// evaluation cycle, so the event queue leaves room for both.
+const OWNERSHIP_CAP: u16 = 24;
 
 /// Shortest time between two [`ServerEvent::Corrected`] for one entity. A client keeps sending refused states
 /// until the correction reaches it, one round trip later; one correction per round trip is enough, and the
@@ -170,6 +175,9 @@ pub struct Traffic {
     pub dropped_states: AtomicU64,
     /// Client events dropped because the connection sent more than its rate.
     pub dropped_events: AtomicU64,
+    /// Ownership events not sent because the player's event queue was full: that client's view of what it owns
+    /// is stale until the next change. Should stay 0.
+    pub lost_owner_events: AtomicU64,
     /// Connections closed for a sustained flood of datagrams or events.
     pub closed_floods: AtomicU64,
     /// Connections closed for an event that is not a known [`ClientEvent`].
@@ -180,6 +188,8 @@ pub struct Traffic {
     pub refused_handshakes: AtomicU64,
     /// Connection attempts refused because their address had too many connections.
     pub refused_per_address: AtomicU64,
+    /// Times a visible player was left out of another player's snapshot by the cut (IM-7), all players together.
+    pub players_cut: AtomicU64,
     /// Client states refused by [`Movement::check`], all players together: outside the map.
     pub refused_bounds: AtomicU64,
     /// Client states refused for a velocity above the speed limit.
@@ -335,6 +345,12 @@ pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<A
         states: Vec::new(),
         peds: Vec::new(),
         spawned: Vec::new(),
+        ownership: Ownership::new(),
+        ownership_rules: OwnershipRules {
+            cap: OWNERSHIP_CAP,
+            ..OwnershipRules::default()
+        },
+        owner_changes: Vec::new(),
         tick: 0,
         infos: Vec::new(),
         info_ticks: Vec::new(),
@@ -560,6 +576,11 @@ pub struct Players {
     peds: Vec<PedBlock>,
     /// Whether each slot holds an entity [`Players::spawn`] made.
     spawned: Vec<bool>,
+    /// Who simulates each spawned entity.
+    ownership: Ownership,
+    ownership_rules: OwnershipRules,
+    /// This tick's changes of owner, to tell the players about.
+    owner_changes: Vec<Change>,
     /// The tick being run, or the last one run.
     tick: u32,
     /// The info each slot sends, built from `peds`, and the tick it last changed at.
@@ -661,6 +682,7 @@ impl Players {
         self.grid.upsert(EntityId(slot.index), Point::new(x, y));
         self.spawned.resize(self.spawned.len().max(index + 1), false);
         self.spawned[index] = true;
+        self.ownership.track(slot.index);
         Some(id)
     }
 
@@ -675,6 +697,10 @@ impl Players {
             return false;
         }
         self.spawned[index] = false;
+        if let Some(change) = self.ownership.untrack(slot.index) {
+            // Its state is gone, so the owner is told here, with the id, rather than with the tick's changes.
+            self.tell_owner(change.old, id, change.epoch, false);
+        }
         self.states[index] = None;
         self.infos[index] = Info::PLAYER;
         self.grid.remove(EntityId(slot.index));
@@ -694,10 +720,77 @@ impl Players {
         self.apply_inbound(world, info);
         self.apply_states(world, info.tick as u32);
         self.grid.rebuild();
+        self.assign_owners();
         self.send_snapshots(info.tick as u32);
         // Every visible set has been recomputed without the players who left: their slots may be reused.
         self.slots.release();
         self.send_stats();
+    }
+
+    /// The owner of a spawned entity and its epoch: `None` for an id that is not one, `Some((None, _))` while
+    /// nobody owns it.
+    #[must_use]
+    pub fn owner(&self, id: u32) -> Option<(Option<u32>, u8)> {
+        self.spawned(id)?;
+        let (owner, epoch) = self.ownership.owner(id >> 16)?;
+        let wire = |slot: u32| {
+            self.players
+                .get(slot as usize)?
+                .as_ref()
+                .map(|p| p.slot.wire_id())
+        };
+        Some((owner.and_then(wire), epoch))
+    }
+
+    /// Runs the ownership rules for this tick's share of the entities, then tells each old and new owner about
+    /// every change, and stops an entity nobody owns any more.
+    fn assign_owners(&mut self) {
+        let (states, players) = (&self.states, &self.players);
+        let position = |slot: u32| {
+            let [x, y, _] = states.get(slot as usize).copied().flatten()?.position.to_metres();
+            Some(Point::new(x, y))
+        };
+        let is_player = |slot: u32| players.get(slot as usize).is_some_and(Option::is_some);
+        self.ownership.evaluate(
+            &self.ownership_rules,
+            self.tick,
+            &self.grid,
+            position,
+            is_player,
+            &mut self.owner_changes,
+        );
+        let mut changes = std::mem::take(&mut self.owner_changes);
+        for change in changes.drain(..) {
+            let Some(state) = self
+                .states
+                .get_mut(change.entity as usize)
+                .and_then(Option::as_mut)
+            else {
+                continue;
+            };
+            if change.new.is_none() {
+                // Rule 4: at rest until someone simulates it again.
+                state.velocity = sawgrass_protocol::Velocity { cm_per_s: [0; 3] };
+            }
+            let entity = state.id;
+            self.tell_owner(change.old, entity, change.epoch, false);
+            self.tell_owner(change.new, entity, change.epoch, true);
+        }
+        self.owner_changes = changes;
+    }
+
+    /// Sends the player in slot `player`, if any, the ownership event for `entity`.
+    fn tell_owner(&self, player: Option<u32>, entity: u32, epoch: u8, yours: bool) {
+        let Some(Some(p)) = player.and_then(|s| self.players.get(s as usize)) else {
+            return;
+        };
+        let event = ServerEvent::Ownership { entity, epoch, yours };
+        if p.events
+            .try_send(event_packet(&event, u64::from(self.tick)))
+            .is_err()
+        {
+            self.traffic.lost_owner_events.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn apply_inbound(&mut self, world: &mut World, info: &TickInfo) {
@@ -766,6 +859,7 @@ impl Players {
                         let _ = roster.send(Roster::Left(slot.wire_id()));
                     }
                     self.slots.free(slot);
+                    self.ownership.player_left(slot.index, &mut self.owner_changes);
                 }
             }
         }
@@ -843,11 +937,16 @@ impl Players {
                 .map(|p| p.inbox.ack.load(Ordering::Relaxed))
                 .collect()
         };
+        let traffic = &self.traffic;
         let build = |history: &History, player: &mut Player| {
             let ack = player.inbox.ack.load(Ordering::Relaxed);
             player
                 .view
                 .build(player.slot.index as usize, grid, history, config, tick, ack);
+            let cut = player.view.take_players_cut();
+            if cut > 0 {
+                traffic.players_cut.fetch_add(cut, Ordering::Relaxed);
+            }
         };
         match &self.pool {
             Some(pool) => pool.install(|| {

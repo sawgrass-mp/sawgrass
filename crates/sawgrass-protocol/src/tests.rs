@@ -423,6 +423,31 @@ mod game_payloads {
     }
 
     #[test]
+    fn the_ownership_event_round_trips() {
+        for event in [
+            ServerEvent::Ownership {
+                entity: 5 << 16 | 2,
+                epoch: 255,
+                yours: true,
+            },
+            ServerEvent::Ownership {
+                entity: 0,
+                epoch: 0,
+                yours: false,
+            },
+        ] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(out.len(), 7);
+            assert_eq!(ServerEvent::decode(&out), Ok(event));
+            assert_eq!(ServerEvent::decode(&out[..6]), Err(DecodeError::Truncated));
+            let mut bad = out.clone();
+            bad[6] = 2;
+            assert_eq!(ServerEvent::decode(&bad), Err(DecodeError::OutOfRange));
+        }
+    }
+
+    #[test]
     fn full_snapshot_fits_in_one_datagram() {
         let states: Vec<_> = (0..SNAPSHOT_MAX_ENTITIES as u32).map(state).collect();
         let mut out = vec![0; PacketHeader::SIZE];

@@ -409,14 +409,15 @@ fn main() -> ExitCode {
                 let count = |counter: &std::sync::atomic::AtomicU64| counter.load(Ordering::Relaxed);
                 line += &format!(
                     ", limits: dropped {} states {} events, closed {} floods {} bad events, \
-                     handshakes retried {} refused {}, refused per address {}",
+                     handshakes retried {} refused {}, refused per address {}, players cut {}",
                     count(&traffic.dropped_states),
                     count(&traffic.dropped_events),
                     count(&traffic.closed_floods),
                     count(&traffic.closed_bad_events),
                     count(&traffic.retried_handshakes),
                     count(&traffic.refused_handshakes),
-                    count(&traffic.refused_per_address)
+                    count(&traffic.refused_per_address),
+                    count(&traffic.players_cut)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);
