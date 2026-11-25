@@ -8,6 +8,8 @@
 //!                 [--max-players N] [--max-per-address N] [--max-handshakes N] [--tick-threads N]
 //!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]
 //!                 [--vehicles N] [--vehicle-area M]
+//!                 [--map-min X,Y] [--map-size M] [--height MIN,MAX] [--max-speed M/S] [--move-slack S]
+//!                 [--movement-report-only]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -33,6 +35,17 @@
 //! - `--resources DIR`: run every resource in `DIR` (a folder with a `resource.toml`) in the tick. A resource that
 //!   fails to load is reported and left out.
 //! - `--script-budget-ms N`: the time all resources together may take in one tick (default 8).
+//!
+//! Movement checks (task SRV-9), for the first sessions with the game, whose coordinates and speeds are not known
+//! yet. The defaults are wide on purpose; the interest grid covers the same square as the checks.
+//!
+//! - `--map-min X,Y`: the map's south-west corner, in metres (default -8192,-8192).
+//! - `--map-size M`: the map square's edge, in metres (default 16384; at most 409600).
+//! - `--height MIN,MAX`: the lowest and highest height allowed, in metres (default -500,3000).
+//! - `--max-speed M/S`: the fastest a player may move, on foot or in any vehicle (default 150).
+//! - `--move-slack S`: seconds of movement at the speed limit forgiven for jitter (default 0.5).
+//! - `--movement-report-only`: count a state that breaks a rule but apply it, and send no correction. For a first
+//!   session, to see which limits are wrong; not for public servers.
 
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
@@ -45,7 +58,9 @@ use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::{ClientState, ServerStats};
 use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{Position, Rotation, Velocity};
+use sawgrass_server::interest::{MapBounds, Point};
 use sawgrass_server::limits::Limits;
+use sawgrass_server::movement::MovementRules;
 use sawgrass_server::net::{self, NetId};
 use sawgrass_server::scripts::{self, Scripts};
 use sawgrass_server::{TickConfig, TickLoop, cpu};
@@ -73,6 +88,16 @@ struct Args {
     vehicle_area: f32,
     resources: Option<PathBuf>,
     script_budget: Duration,
+    movement: MovementRules,
+}
+
+/// Parses `A,B` into two numbers.
+fn pair(name: &str, text: &str) -> Result<(f32, f32), String> {
+    let (a, b) = text
+        .split_once(',')
+        .ok_or_else(|| format!("{name}: expected two numbers as A,B"))?;
+    let number = |t: &str| t.trim().parse::<f32>().map_err(|e| format!("{name}: {e}"));
+    Ok((number(a)?, number(b)?))
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -92,6 +117,7 @@ fn parse_args() -> Result<Args, String> {
         vehicle_area: 1500.0,
         resources: None,
         script_budget: scripts::DEFAULT_BUDGET,
+        movement: MovementRules::default(),
     };
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -155,13 +181,58 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--script-budget-ms: {e}"))?;
                 args.script_budget = Duration::from_millis(ms);
             }
+            "--map-min" => {
+                let (x, y) = pair("--map-min", &value("--map-min")?)?;
+                args.movement.bounds.min = Point::new(x, y);
+            }
+            "--map-size" => {
+                args.movement.bounds.size = value("--map-size")?
+                    .parse()
+                    .map_err(|e| format!("--map-size: {e}"))?;
+            }
+            "--height" => args.movement.height = pair("--height", &value("--height")?)?,
+            "--max-speed" => {
+                args.movement.max_speed = value("--max-speed")?
+                    .parse()
+                    .map_err(|e| format!("--max-speed: {e}"))?;
+            }
+            "--move-slack" => {
+                args.movement.slack_seconds = value("--move-slack")?
+                    .parse()
+                    .map_err(|e| format!("--move-slack: {e}"))?;
+            }
+            "--movement-report-only" => args.movement.report_only = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
     if args.listen.is_some() && (args.cert.is_none() || args.key.is_none()) {
         return Err("--listen needs --cert and --key".to_owned());
     }
+    args.movement
+        .validate()
+        .map_err(|e| format!("movement rules: {e}"))?;
     Ok(args)
+}
+
+/// One line with the movement rules the server runs with.
+fn describe(rules: &MovementRules) -> String {
+    let MapBounds { min, size } = rules.bounds;
+    format!(
+        "movement: map x {} to {} m, y {} to {} m, height {} to {} m, at most {} m/s with {} s of slack, refusals {}",
+        min.x,
+        min.x + size,
+        min.y,
+        min.y + size,
+        rules.height.0,
+        rules.height.1,
+        rules.max_speed,
+        rules.slack_seconds,
+        if rules.report_only {
+            "counted and applied (report only)"
+        } else {
+            "enforced"
+        },
+    )
 }
 
 /// Spawns `count` parked vehicles at even spacing over a square of edge `area` centred on the origin, and returns
@@ -215,7 +286,9 @@ fn main() -> ExitCode {
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
                  [--net-threads N] [--max-players N] [--max-per-address N] [--max-handshakes N] \
                  [--tick-threads N] \
-                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]"
+                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]] \
+                 [--vehicles N] [--vehicle-area M] [--map-min X,Y] [--map-size M] [--height MIN,MAX] \
+                 [--max-speed M/S] [--move-slack S] [--movement-report-only]"
             );
             return ExitCode::from(2);
         }
@@ -257,6 +330,7 @@ fn main() -> ExitCode {
                     println!(
                         "listening on {listen} with {threads} gateway threads and {tick_threads} tick threads"
                     );
+                    println!("{}", describe(&args.movement));
                     net::listen(
                         gateway,
                         net::ListenConfig {
@@ -268,7 +342,7 @@ fn main() -> ExitCode {
                                 max_handshakes: args.max_handshakes,
                                 ..Limits::default()
                             },
-                            ..net::ListenConfig::default()
+                            movement: args.movement,
                         },
                     )
                 }

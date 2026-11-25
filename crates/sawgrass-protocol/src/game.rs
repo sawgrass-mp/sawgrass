@@ -307,7 +307,11 @@ const ENTER_SEAT: u8 = 130;
 const LEAVE_SEAT: u8 = 131;
 
 /// An event from the server.
+///
+/// New events are added in later protocol versions, so readers outside this crate need a catch-all arm and
+/// ignore what they do not use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ServerEvent {
     /// The player's character was spawned with this entity id; snapshots arrive at `tick_hz`.
     Joined {
@@ -442,7 +446,11 @@ impl ServerEvent {
 }
 
 /// An event from a client.
+///
+/// New events are added in later protocol versions, so readers outside this crate need a catch-all arm and
+/// ignore what they do not use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ClientEvent {
     /// Ask for [`ServerEvent::Stats`]. A server started without load-test reporting ignores it.
     RequestStats,

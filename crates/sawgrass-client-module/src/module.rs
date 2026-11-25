@@ -65,9 +65,10 @@ impl World<'_> {
         if self.pool.handle(net).is_some() {
             return Err(WorldError::Bind(BindError::NetIdTaken(net)));
         }
-        let game_asset = self
-            .assets
-            .game_asset(asset)
+        let fallback = (asset == AssetId::NONE && kind == EntityKind::Ped).then(|| self.assets.default_ped());
+        let game_asset = fallback
+            .flatten()
+            .or_else(|| self.assets.game_asset(asset))
             .ok_or(WorldError::UnknownAsset(asset))?;
         let handle = self
             .game
