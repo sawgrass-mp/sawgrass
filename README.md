@@ -64,7 +64,7 @@ So the work is split in three, in this order:
 | | Step | What it covers | Gate | Difficulty | Tasks |
 |---|---|---|---|---|---|
 | ✅ | [**1. Foundation**](docs/roadmap.md#1-foundation)<br><sub>Stage 0</sub> | Workspace, rules, CI, claim bot, review agent | — | 🟢 **Easy**<br><sub>Known tools, no game and no server code</sub> | done |
-| ✅ | [**2. Prototype and measurements**](docs/roadmap.md#2-prototype-and-measurements)<br><sub>Stage 1</sub> | First server, protocol and load-test bots; the storage, transport, serialization, compression, visibility, scripting, voice, tick and allocator comparisons, checked on the real server | — | 🟡 **Medium**<br><sub>A first server and many benchmarks, but each one small and without the game</sub> | 42 of 42 done |
+| ✅ | [**2. Prototype and measurements**](docs/roadmap.md#2-prototype-and-measurements)<br><sub>Stage 1</sub> | First server, protocol and load-test bots; the storage, transport, serialization, compression, visibility, scripting, voice, tick and allocator comparisons, checked on the real server | — | 🟡 **Medium**<br><sub>A first server and many benchmarks, but each one small and without the game</sub> | 44 of 44 done |
 | ✅ | [**3. Make the tick fit**](docs/roadmap.md#3-make-the-tick-fit)<br><sub>Stage 1, plan phase 1</sub> | jemalloc, one hand-off of datagrams per tick, dense entity slots, dense grid with bitset visible sets, per-player work in parallel | 3,000 bots in the 1.5 km square on one machine, no dropped bots, tick p99 under 35 ms (70% of the 20 Hz interval) | 🟠 **Hard**<br><sub>Rebuilds the core of the tick: entity slots, the visibility index and parallel work that must stay deterministic</sub> | 5 of 5 done: ✅ [SRV-6](https://github.com/sawgrass-mp/sawgrass/issues/94) · ✅ [NET-9](https://github.com/sawgrass-mp/sawgrass/issues/95) · ✅ [IM-4](https://github.com/sawgrass-mp/sawgrass/issues/96) · ✅ [IM-5](https://github.com/sawgrass-mp/sawgrass/issues/97) · ✅ [SRV-7](https://github.com/sawgrass-mp/sawgrass/issues/98) |
 | 📍 | [**4. Fewer bytes, then 30 Hz**](docs/roadmap.md#4-fewer-bytes-then-30-hz)<br><sub>Stage 1, plan phase 2</sub> | postcard payloads, delta snapshots, visible sets cut to a byte budget, 30 Hz by default | 4,096 bots from a second machine: the roadmap's stage 1 gate | 🟡 **Medium**<br><sub>The formats are chosen and measured; delta snapshots against acknowledgements need care, the rest is plumbing</sub> | 2 of 4 done: ⚪ NET-10 · ✅ [NET-11](https://github.com/sawgrass-mp/sawgrass/issues/107) · ✅ [IM-6](https://github.com/sawgrass-mp/sawgrass/issues/112) · 🛠️ [SRV-8](https://github.com/sawgrass-mp/sawgrass/issues/224) |
 | ✅ | [**5. Reliability of the realtime core**](docs/roadmap.md#5-reliability-of-the-realtime-core)<br><sub>Stage 1, plan phase 3</sub> | Movement validation, per-connection limits, overload policy, misbehaving bots as a load test | — | 🟡 **Medium**<br><sub>Well-known techniques; the work is covering every abuse case and testing it with hostile bots</sub> | 4 of 4 done: ✅ [SRV-9](https://github.com/sawgrass-mp/sawgrass/issues/117) · ✅ [NET-12](https://github.com/sawgrass-mp/sawgrass/issues/119) · ✅ [SRV-10](https://github.com/sawgrass-mp/sawgrass/issues/121) · ✅ [BOT-4](https://github.com/sawgrass-mp/sawgrass/issues/124) |
@@ -75,12 +75,12 @@ So the work is split in three, in this order:
 | ⚪ | [**10. Launcher and releases**](docs/roadmap.md#10-launcher-and-releases)<br><sub>Stage 4</sub> | Detects the runtime and checks its build, installs the signed client module, auto-update, server list, downloads server resources, release process | — | 🟡 **Medium**<br><sub>Known technology (Tauri, signing, updates), but a security boundary on every player's machine</sub> | not started |
 | ⚪ | [**11. Scale**](docs/roadmap.md#11-scale)<br><sub>Stage 5</sub> | Real players on public servers, gateways in their own processes if the gateway limits, zones with entity hand-off only if measurements call for them, operations and moderation | — | 🔴 **Very hard**<br><sub>Real players behave unlike bots; zones with hand-off are the most error-prone step of the architecture</sub> | not started |
 
-Tooling and docs run alongside every step: 22 of 29 tasks done.
+Tooling and docs run alongside every step: 22 of 30 tasks done.
 
-Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🔍 [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
+Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: 🔍 [NET-22](https://github.com/sawgrass-mp/sawgrass/issues/243) · ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🔍 [SRV-25](https://github.com/sawgrass-mp/sawgrass/issues/242) · 🟢 [BOT-10](https://github.com/sawgrass-mp/sawgrass/issues/244) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
 
 <details>
-<summary><b>All tasks</b>: 102 done, 1 in review, 5 in progress, 2 ready, 8 planned</summary>
+<summary><b>All tasks</b>: 105 done, 3 in review, 5 in progress, 3 ready, 8 planned</summary>
 
 | | Task | Step | Size | Status |
 |---|---|---|---|---|
@@ -96,6 +96,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [NET-18](https://github.com/sawgrass-mp/sawgrass/issues/176): Tell a client where the server holds an entity after a refused state | 2. Prototype | M | done |
 | ✅ | [NET-19](https://github.com/sawgrass-mp/sawgrass/issues/203): New events without touching every reader | 2. Prototype | M | done |
 | ✅ | [NET-20](https://github.com/sawgrass-mp/sawgrass/issues/205): Shot reports on the wire, with their own rate limit | 2. Prototype | M | done |
+| ✅ | [NET-21](https://github.com/sawgrass-mp/sawgrass/issues/238): Answer every seat request with granted or the reason it was refused | 2. Prototype | M | done |
 | ✅ | [SRV-1](https://github.com/sawgrass-mp/sawgrass/issues/5): Tick loop with metrics | 2. Prototype | M | done |
 | ✅ | [SRV-2](https://github.com/sawgrass-mp/sawgrass/issues/20): follow\-ups\: bounded metrics window, robust rate tests, measured between\-hook time | 2. Prototype | M | done |
 | ✅ | [SRV-3](https://github.com/sawgrass-mp/sawgrass/issues/72): Players join the world through an in\-process gateway | 2. Prototype | M | done |
@@ -117,6 +118,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [BOT-6](https://github.com/sawgrass-mp/sawgrass/issues/140): Honest mass entry and a lighter bot generator | 2. Prototype | M | done |
 | ✅ | [BOT-7](https://github.com/sawgrass-mp/sawgrass/issues/178): Bots that pay each other through the ledger | 2. Prototype | M | done |
 | ✅ | [BOT-8](https://github.com/sawgrass-mp/sawgrass/issues/196): Play a recorded session through the bots | 2. Prototype | M | done |
+| ✅ | [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232): Bots shoot only intact vehicles, keep driving speed and check their seat | 2. Prototype | M | done |
 | ✅ | [DB-1](https://github.com/sawgrass-mp/sawgrass/issues/8): Character and wallet schema | 2. Prototype | S | done |
 | ✅ | [DB-2](https://github.com/sawgrass-mp/sawgrass/issues/38): Compare SpacetimeDB with PostgreSQL for roleplay state | 2. Prototype | M | done |
 | ✅ | [DB-3](https://github.com/sawgrass-mp/sawgrass/issues/45): ADR for roleplay state in server memory with its own write\-ahead log | 2. Prototype | S | done |
@@ -158,7 +160,8 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [CLIENT-11](https://github.com/sawgrass-mp/sawgrass/issues/185): Connect the client module to a server, and two clients that see each other | 7. In game | M | done |
 | ✅ | [CLIENT-12](https://github.com/sawgrass-mp/sawgrass/issues/189): Send owned entities' states from the network core | 7. In game | M | done |
 | ✅ | [CLIENT-13](https://github.com/sawgrass-mp/sawgrass/issues/207): Send owned entity states from the client module | 7. In game | M | done |
-| 🛠️ | [CLIENT-14](https://github.com/sawgrass-mp/sawgrass/issues/235): Apply the server's clock, weather and doors in the client module | 7. In game | M | in progress |
+| ✅ | [CLIENT-14](https://github.com/sawgrass-mp/sawgrass/issues/235): Apply the server's clock, weather and doors in the client module | 7. In game | M | done |
+| 🛠️ | [CLIENT-15](https://github.com/sawgrass-mp/sawgrass/issues/239): Report the local player's shots and weapon from the client module | 7. In game | M | in progress |
 | ✅ | [NET-15](https://github.com/sawgrass-mp/sawgrass/issues/136): Entity kinds, model ids and the blocks list in delta snapshots | 9. Sync | M | done |
 | ✅ | [NET-16](https://github.com/sawgrass-mp/sawgrass/issues/148): The ped block in the protocol | 9. Sync | M | done |
 | ✅ | [SRV-18](https://github.com/sawgrass-mp/sawgrass/issues/152): Send entity infos and relay the players' ped blocks | 9. Sync | M | done |
@@ -170,8 +173,10 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [SRV-16](https://github.com/sawgrass-mp/sawgrass/issues/213): Hit reports checked against the snapshot history, with damage and death on the server | 9. Sync | M | done |
 | ✅ | [SRV-17](https://github.com/sawgrass-mp/sawgrass/issues/215): Clock, weather and doors sent on joining and on change | 9. Sync | M | done |
 | ✅ | [BOT-5](https://github.com/sawgrass-mp/sawgrass/issues/219): Bots that drive, change seats and shoot | 9. Sync | M | done |
+| 🔍 | [NET-22](https://github.com/sawgrass-mp/sawgrass/issues/243): Check hits at the client's render time, between two snapshot ticks | Outside the plan | M | in review |
 | ⚪ | [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122): Show movement refusals per player for admins | Outside the plan | M | planned |
-| 🔍 | [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232): Bots shoot only intact vehicles, keep driving speed and check their seat | Outside the plan | M | in review |
+| 🔍 | [SRV-25](https://github.com/sawgrass-mp/sawgrass/issues/242): Stamp the environment with the tick its whole minute began | Outside the plan | M | in review |
+| 🟢 | [BOT-10](https://github.com/sawgrass-mp/sawgrass/issues/244): Shooters that aim where a client draws the targets | Outside the plan | M | ready |
 | 🛠️ | [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157): Turn off a resource that keeps overrunning | Outside the plan | M | in progress |
 | ⚪ | [OPS-1](https://github.com/sawgrass-mp/sawgrass/issues/9): Benchmark regression gate | Tooling and docs | M | planned |
 | ⚪ | [OPS-2](https://github.com/sawgrass-mp/sawgrass/issues/10): Markdown link check | Tooling and docs | S | planned |
@@ -201,7 +206,8 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [DOC-14](https://github.com/sawgrass-mp/sawgrass/issues/199): A guide to run a server for a playtest | Tooling and docs | M | done |
 | ✅ | [DOC-15](https://github.com/sawgrass-mp/sawgrass/issues/211): Redraw the README pictures with every README update | Tooling and docs | M | done |
 | ✅ | [DOC-16](https://github.com/sawgrass-mp/sawgrass/issues/222): Record DB\-8's change to the store writer, and ask scopes to list every crate | Tooling and docs | M | done |
-| 🛠️ | [DOC-17](https://github.com/sawgrass-mp/sawgrass/issues/233): Regenerate the README progress and pictures on current main | Tooling and docs | M | in progress |
+| 🔍 | [DOC-17](https://github.com/sawgrass-mp/sawgrass/issues/233): Regenerate the README progress and pictures on current main | Tooling and docs | M | in review |
+| 🛠️ | [DOC-18](https://github.com/sawgrass-mp/sawgrass/issues/247): Steps that need the game are not done from their tasks alone | Tooling and docs | M | in progress |
 
 </details>
 
