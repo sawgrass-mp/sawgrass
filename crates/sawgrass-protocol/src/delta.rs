@@ -34,8 +34,14 @@ pub const MAX_FRAGMENTS: usize = 16;
 /// Payload bytes in one fragment.
 pub const FRAGMENT_PAYLOAD: usize = MAX_DATAGRAM - PacketHeader::SIZE - 1;
 
-/// More entities than this in one snapshot is treated as hostile.
-pub const MAX_ENTITIES: usize = 2048;
+/// Most bytes one entity can take in a payload: removed (two 3-byte id varints) and another added in its place
+/// (ids, three 4-byte positions, three 3-byte velocities, a 5-byte rotation). One changed entity takes at most 34.
+const WORST_ENTITY_BYTES: usize = 6 + 32;
+
+/// Most entities in one snapshot, and in its baseline. Derived from [`MAX_FRAGMENTS`] so that any snapshot of this
+/// many entities fits in its fragments, whatever their values; the decoder treats more as hostile. The header (age
+/// and three counts) takes at most 20 bytes.
+pub const MAX_ENTITIES: usize = (MAX_FRAGMENTS * FRAGMENT_PAYLOAD - 20) / WORST_ENTITY_BYTES;
 
 const ROT_SHIFT: u32 = 10;
 const ROT_MASK: u32 = (1 << ROT_SHIFT) - 1;
@@ -203,6 +209,10 @@ impl Reader<'_> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
             let b = self.byte()?;
+            // The tenth byte holds only the top bit; anything more would be lost.
+            if shift == 63 && b > 1 {
+                return Err(DecodeError::OutOfRange);
+            }
             v |= u64::from(b & 0x7f)
                 .checked_shl(shift)
                 .ok_or(DecodeError::OutOfRange)?;
@@ -231,7 +241,10 @@ impl Reader<'_> {
     fn id(&mut self, last: &mut Option<u32>) -> Result<u32, DecodeError> {
         let gap = self.get()?;
         let low = self.get()?;
-        let high = u64::from(last.map_or(0, |l| l >> 16)) + gap;
+        // The gap comes from the payload: it may be anything up to u64::MAX.
+        let high = u64::from(last.map_or(0, |l| l >> 16))
+            .checked_add(gap)
+            .ok_or(DecodeError::OutOfRange)?;
         if high > 0xffff || low > 0xffff {
             return Err(DecodeError::OutOfRange);
         }
@@ -609,6 +622,68 @@ mod tests {
                 assert!(out.len() <= MAX_ENTITIES);
             }
         }
+    }
+
+    #[test]
+    fn an_id_gap_that_overflows_is_refused() {
+        // Baseline ids use the high bits, so the previous id's high part is non-zero when the huge gap is added.
+        let base = vec![entity(1 << 16, 1.0, 0.0, 0.0), entity(2 << 16, 2.0, 0.0, 0.0)];
+        let b = Baseline {
+            tick: 1,
+            entities: &base,
+        };
+        // Age 1, two removed: (gap 1, low 0), then (gap of about u64::MAX, low 0).
+        let mut payload = vec![1, 2, 1, 0];
+        payload.extend_from_slice(&[0xff; 9]);
+        payload.extend_from_slice(&[0x01, 0, 0, 0]);
+        let mut out = Vec::new();
+        assert_eq!(
+            decode_delta(&payload, 2, Some(b), &mut out),
+            Err(DecodeError::OutOfRange)
+        );
+        // A tenth varint byte above 1 is refused too, rather than losing its bits.
+        let mut payload = vec![1, 2, 1, 0];
+        payload.extend_from_slice(&[0xff; 9]);
+        payload.extend_from_slice(&[0x02, 0, 0, 0]);
+        assert_eq!(
+            decode_delta(&payload, 2, Some(b), &mut out),
+            Err(DecodeError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn the_largest_snapshot_fits_in_its_fragments() {
+        // Every entity of the baseline removed and as many others added, all at the ends of their ranges.
+        let far = |id: u32, sign: f32| EntityState {
+            id,
+            position: Position::from_cm([8_388_607 * sign as i32; 3]).expect("position"),
+            velocity: Velocity {
+                cm_per_s: [i16::MAX * sign as i16; 3],
+            },
+            rotation: Rotation::from_quaternion([0.5, -0.5, 0.5, 0.5]).expect("rotation"),
+        };
+        let n = MAX_ENTITIES as u32;
+        let base: Vec<EntityState> = (0..n).map(|i| far((i * 2) << 16 | 0xffff, 1.0)).collect();
+        let current: Vec<EntityState> = (0..n).map(|i| far((i * 2 + 1) << 16 | 0xfffe, -1.0)).collect();
+        let b = Baseline {
+            tick: 1,
+            entities: &base,
+        };
+        let mut payload = Vec::new();
+        DeltaEncoder::default()
+            .encode(2, &current, Some(b), &mut payload)
+            .expect("encode");
+        assert!(fragments(&payload).is_ok(), "{} bytes", payload.len());
+        let mut out = Vec::new();
+        decode_delta(&payload, 2, Some(b), &mut out).expect("decode");
+        assert_eq!(out, current);
+        // The same entities changed instead, against a baseline at the other end of every range.
+        let moved: Vec<EntityState> = base.iter().map(|e| far(e.id, -1.0)).collect();
+        payload.clear();
+        DeltaEncoder::default()
+            .encode(2, &moved, Some(b), &mut payload)
+            .expect("encode");
+        assert!(fragments(&payload).is_ok(), "{} bytes", payload.len());
     }
 
     #[test]
