@@ -9,7 +9,7 @@
 //!                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]]
 //!                 [--resources DIR [--script-budget-ms N]] [--vehicles N] [--vehicle-area M]
 //!                 [--map-min X,Y] [--map-size M] [--height MIN,MAX] [--max-speed M/S] [--move-slack S]
-//!                 [--movement-report-only]
+//!                 [--movement-report-only] [--list-players]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -50,6 +50,8 @@
 //! - `--move-slack S`: seconds of movement at the speed limit forgiven for jitter (default 0.5).
 //! - `--movement-report-only`: count a state that breaks a rule but apply it, and send no correction. For a first
 //!   session, to see which limits are wrong; not for public servers.
+//! - `--list-players`: after each five-second line, one line per connected player (at most 32): its id, address,
+//!   time connected, position and refused states. For playtests with a few players (task SRV-23).
 
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
@@ -98,6 +100,7 @@ struct Args {
     resources: Option<PathBuf>,
     script_budget: Duration,
     movement: MovementRules,
+    list_players: bool,
 }
 
 /// Parses `A,B` into two numbers.
@@ -130,6 +133,7 @@ fn parse_args() -> Result<Args, String> {
         resources: None,
         script_budget: scripts::DEFAULT_BUDGET,
         movement: MovementRules::default(),
+        list_players: false,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -221,6 +225,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--move-slack: {e}"))?;
             }
             "--movement-report-only" => args.movement.report_only = true,
+            "--list-players" => args.list_players = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -231,6 +236,34 @@ fn parse_args() -> Result<Args, String> {
         .validate()
         .map_err(|e| format!("movement rules: {e}"))?;
     Ok(args)
+}
+
+/// Most players `--list-players` prints a line for.
+const LISTED_PLAYERS: usize = 32;
+
+/// One line per player for `--list-players`, at most [`LISTED_PLAYERS`].
+fn describe_players(players: &[net::PlayerView]) -> String {
+    let mut out = String::new();
+    for p in players.iter().take(LISTED_PLAYERS) {
+        let at = p.position.map_or_else(
+            || "not placed yet".to_owned(),
+            |[x, y, z]| format!("at {x:.1}, {y:.1}, {z:.1} m"),
+        );
+        let r = p.refused;
+        out += &format!(
+            "  player {} from {} for {} s, {at}, refused {} bounds {} speed {} teleport\n",
+            p.id,
+            p.address,
+            p.connected.as_secs(),
+            r.bounds,
+            r.speed,
+            r.teleport
+        );
+    }
+    if players.len() > LISTED_PLAYERS {
+        out += &format!("  and {} more players\n", players.len() - LISTED_PLAYERS);
+    }
+    out
 }
 
 /// One line with the movement rules the server runs with.
@@ -308,7 +341,8 @@ fn main() -> ExitCode {
                  [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]] \
                  [--resources DIR [--script-budget-ms N]] \
                  [--vehicles N] [--vehicle-area M] [--map-min X,Y] [--map-size M] [--height MIN,MAX] \
-                 [--max-speed M/S] [--move-slack S] [--movement-report-only]"
+                 [--max-speed M/S] [--move-slack S] [--movement-report-only] \
+                 [--list-players]"
             );
             return ExitCode::from(2);
         }
@@ -355,6 +389,9 @@ fn main() -> ExitCode {
         None => None,
     };
     let mut roster = None;
+    let mut player_list = None;
+    // Set on the report tick that asked for the list; the tick after it filled the list in.
+    let mut listing = false;
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let (threads, tick_threads) = split_cores(cores, args.net_threads, args.tick_threads);
@@ -409,6 +446,7 @@ fn main() -> ExitCode {
             println!("spawned {spawned} of {} vehicles", args.vehicles);
         }
         roster = Some(players.roster());
+        player_list = args.list_players.then(|| players.player_list());
         tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
         runtime = Some(rt);
     }
@@ -443,6 +481,10 @@ fn main() -> ExitCode {
         let tick = tick_loop.tick();
         if args.ticks.is_some_and(|limit| tick >= limit) {
             return ControlFlow::Break(());
+        }
+        if let Some(list) = player_list.as_ref().filter(|_| listing) {
+            listing = false;
+            print!("{}", describe_players(&list.take()));
         }
         if tick > 0 && tick % report_every == 0 {
             let stats = tick_loop.metrics().stats();
@@ -523,6 +565,10 @@ fn main() -> ExitCode {
                 line += &format!(", worst overrun {overrun}");
             }
             println!("{line}");
+            if let Some(list) = &player_list {
+                list.request();
+                listing = true;
+            }
             last = (now.0, now.1, now.2, last.3, last.4);
         }
         ControlFlow::Continue(())
