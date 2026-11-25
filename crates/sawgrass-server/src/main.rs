@@ -434,7 +434,8 @@ fn main() -> ExitCode {
                 let count = |counter: &std::sync::atomic::AtomicU64| counter.load(Ordering::Relaxed);
                 line += &format!(
                     ", limits: dropped {} states {} events, closed {} floods {} bad events, \
-                     handshakes retried {} refused {}, refused per address {}, players cut {}",
+                     handshakes retried {} refused {}, refused per address {}, players cut {}, \
+                     shots {} refused {}, hits {} refused {}",
                     count(&traffic.dropped_states),
                     count(&traffic.dropped_events),
                     count(&traffic.closed_floods),
@@ -442,7 +443,11 @@ fn main() -> ExitCode {
                     count(&traffic.retried_handshakes),
                     count(&traffic.refused_handshakes),
                     count(&traffic.refused_per_address),
-                    count(&traffic.players_cut)
+                    count(&traffic.players_cut),
+                    count(&traffic.shots_received),
+                    count(&traffic.shots_refused),
+                    count(&traffic.hits_accepted),
+                    count(&traffic.hits_refused)
                 );
                 line += &format!(
                     ", owned states refused {} stale {} movement {} far, owner events lost {}",
