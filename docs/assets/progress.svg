@@ -9,7 +9,7 @@
 <text x="28" y="68" class="s">Step 4 of 11 · roadmap stage 1, server without the game; plan phase 2 · 2 of 4 done</text>
 <rect x="28.0" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="28.0" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
-<text x="62.7" y="170" class="l" text-anchor="middle">1. Foundation</text>
+<text x="62.7" y="170" class="l" text-anchor="middle">1. Setup</text>
 <text x="62.7" y="186" class="n" text-anchor="middle">done</text>
 <text x="62.7" y="202" class="d" fill="#7cf000" text-anchor="middle">easy</text>
 <rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
@@ -38,20 +38,21 @@
 <text x="364.5" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
 <rect x="405.3" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="405.3" y="132" width="27.8" height="18" rx="5" fill="url(#g)"/>
-<text x="440.0" y="170" class="l" text-anchor="middle">6. Roleplay</text>
+<text x="440.0" y="170" class="l" text-anchor="middle">6. Infra</text>
 <text x="440.0" y="186" class="n" text-anchor="middle">2 of 5 done</text>
 <text x="440.0" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
-<rect x="480.7" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
-<rect x="480.7" y="132" width="43.8" height="18" rx="5" fill="url(#g)"/>
-<text x="515.5" y="170" class="l" text-anchor="middle">7. Phase 5</text>
-<text x="515.5" y="186" class="n" text-anchor="middle">7 of 11 done</text>
+<rect x="481.2" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
+<text x="515.5" y="170" class="l" text-anchor="middle">7. In game</text>
+<text x="515.5" y="186" class="w" text-anchor="middle">waiting</text>
+<text x="515.5" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
 <rect x="556.7" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
-<text x="590.9" y="170" class="l" text-anchor="middle">8. In game</text>
+<text x="590.9" y="170" class="l" text-anchor="middle">8. Roleplay</text>
 <text x="590.9" y="186" class="w" text-anchor="middle">waiting</text>
-<text x="590.9" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
-<rect x="632.1" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
+<text x="590.9" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
+<rect x="631.6" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="631.6" y="132" width="43.8" height="18" rx="5" fill="url(#g)"/>
 <text x="666.4" y="170" class="l" text-anchor="middle">9. Sync</text>
-<text x="666.4" y="186" class="w" text-anchor="middle">waiting</text>
+<text x="666.4" y="186" class="n" text-anchor="middle">7 of 11 done</text>
 <text x="666.4" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
 <rect x="707.1" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <text x="741.8" y="170" class="l" text-anchor="middle">10. Launcher</text>
@@ -65,10 +66,10 @@
 <text x="62.7" y="240" class="b" text-anchor="middle">Stage 0</text>
 <path d="M105.5 216 L105.5 222 L397.3 222 L397.3 216" fill="none" stroke="#2a4a3d"/>
 <text x="251.4" y="240" class="b" text-anchor="middle">Stage 1 · server without the game</text>
-<path d="M407.3 216 L407.3 222 L548.2 222 L548.2 216" fill="none" stroke="#2a4a3d"/>
-<text x="477.7" y="240" class="b" text-anchor="middle">Stage 2</text>
-<path d="M558.2 216 L558.2 222 L699.1 222 L699.1 216" fill="none" stroke="#2a4a3d"/>
-<text x="628.6" y="240" class="b" text-anchor="middle">Stage 3</text>
+<path d="M407.3 216 L407.3 222 L472.7 222 L472.7 216" fill="none" stroke="#2a4a3d"/>
+<text x="440.0" y="240" class="b" text-anchor="middle">Stage 2</text>
+<path d="M482.7 216 L482.7 222 L699.1 222 L699.1 216" fill="none" stroke="#2a4a3d"/>
+<text x="590.9" y="240" class="b" text-anchor="middle">Stage 3 · client in the game</text>
 <path d="M709.1 216 L709.1 222 L774.5 222 L774.5 216" fill="none" stroke="#2a4a3d"/>
 <text x="741.8" y="240" class="b" text-anchor="middle">Stage 4</text>
 <path d="M784.5 216 L784.5 222 L850.0 222 L850.0 216" fill="none" stroke="#2a4a3d"/>
