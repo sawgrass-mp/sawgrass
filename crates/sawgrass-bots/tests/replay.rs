@@ -64,6 +64,8 @@ async fn a_recorded_session_plays_again_on_another_server() {
         record: None,
         decoders: u64::MAX,
         sockets: Vec::new(),
+        pay_every: None,
+        payees: Arc::default(),
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(2);
