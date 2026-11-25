@@ -9,12 +9,15 @@
 //! updates the spatial grid, recomputes each player's visible set and sends each player a whole snapshot of
 //! the entities in it, split into datagrams of at most [`SNAPSHOT_MAX_ENTITIES`] states.
 //!
-//! The tick thread does not hand datagrams to quinn itself (task NET-9). It writes every datagram of a tick into
-//! chunks of [`ARENA_CHUNK`] bytes, reused once the gateway has sent them, and passes the whole tick to one task
-//! on the gateway runtime in a single [`Batch`]. That task hands each datagram to its connection. So the tick
+//! The tick thread does not hand datagrams to quinn itself (task NET-9). It encodes each player's datagrams
+//! of a tick into one buffer sized to exactly those bytes, cuts them out of it, and passes the whole tick to one
+//! task on the gateway runtime in a single [`Batch`]. That task hands each datagram to its connection. So the tick
 //! wakes the gateway once per tick instead of once per datagram (BOT-3 measured 22% of the tick thread in those
-//! wake-ups) and allocates no buffer per datagram. At most [`OUTBOX_TICKS`] batches wait for the gateway; if it
-//! falls further behind, the tick's snapshots are dropped and counted rather than queued.
+//! wake-ups) and allocates once per player instead of once per datagram. A datagram keeps only its own player's
+//! buffer of that tick alive, so a client that stops acknowledging pins no more than the bytes quinn queues for it
+//! (the gateway's 64 KiB datagram send buffer), plus one allocation's overhead per queued tick. At most
+//! [`OUTBOX_TICKS`] batches wait for the gateway; if it falls further behind, the tick's snapshots are dropped and
+//! counted rather than queued.
 //!
 //! Every player takes a dense [`Slot`] when the tick thread sees it join (task IM-4). The slot indexes the
 //! per-player arrays here (players, wire states) and the ids in the grid and the visible sets; its
@@ -30,7 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use hecs::{Entity, World};
 use sawgrass_gateway::{Datagrams, Gateway, Session};
 use sawgrass_protocol::game::{
@@ -57,10 +60,6 @@ const EVENT_QUEUE: usize = 16;
 
 /// Ticks of snapshots that may wait for the gateway's send task before a tick's snapshots are dropped.
 const OUTBOX_TICKS: usize = 2;
-
-/// Size of each chunk the tick writes datagrams into. A chunk is freed once every datagram cut from it has been
-/// sent, so a tick allocates one chunk per this many bytes instead of one buffer per datagram.
-pub const ARENA_CHUNK: usize = 64 * 1024;
 
 /// One tick's datagrams for the gateway's send task: each packet with the index of its connection in `senders`.
 #[derive(Debug, Default)]
@@ -161,7 +160,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         states: Vec::new(),
         scratch: Vec::new(),
         packet: Vec::new(),
-        arena: BytesMut::new(),
+        lens: Vec::new(),
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
@@ -278,10 +277,10 @@ pub struct Players {
     /// The wire state of every placed player, by slot index.
     states: Vec<Option<EntityState>>,
     scratch: Vec<EntityState>,
-    /// One datagram being encoded, before it is copied into `arena`.
+    /// One player's datagrams of this tick, back to back, before they are cut into their own buffer.
     packet: Vec<u8>,
-    /// Where this tick's datagrams are written; each is split off and frozen when complete.
-    arena: BytesMut,
+    /// The length of each datagram in `packet`.
+    lens: Vec<usize>,
     outbox: tokio_mpsc::Sender<Batch>,
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
@@ -429,21 +428,23 @@ impl Players {
             batch.senders.push(player.sender.clone());
             // At least one datagram: an empty snapshot still tells the client the tick advanced.
             let datagrams = self.scratch.len().div_ceil(SNAPSHOT_MAX_ENTITIES).max(1);
+            self.packet.clear();
+            self.lens.clear();
             for i in 0..datagrams {
                 let start = i * SNAPSHOT_MAX_ENTITIES;
                 let chunk = &self.scratch[start..(start + SNAPSHOT_MAX_ENTITIES).min(self.scratch.len())];
-                self.packet.clear();
+                let begin = self.packet.len();
                 write_header(&mut self.packet, PacketKind::Snapshot, player.sequence, tick);
                 player.sequence = player.sequence.wrapping_add(1);
                 if encode_snapshot(chunk, &mut self.packet).is_err() {
+                    self.packet.truncate(begin);
                     continue;
                 }
-                if self.arena.capacity() < self.packet.len() {
-                    self.arena.reserve(ARENA_CHUNK.max(self.packet.len()));
-                }
-                self.arena.extend_from_slice(&self.packet);
-                batch.packets.push((sender, self.arena.split().freeze()));
+                self.lens.push(self.packet.len() - begin);
             }
+            cut_datagrams(&self.packet, &self.lens, |datagram| {
+                batch.packets.push((sender, datagram))
+            });
         }
         if self.outbox.try_send(batch).is_err() {
             // The gateway is still sending the last ticks (or is gone): drop this one rather than queue more.
@@ -465,6 +466,15 @@ impl Players {
         {
             let _ = player.events.try_send(packet.clone());
         }
+    }
+}
+
+/// Copies `bytes`, datagrams back to back with the lengths in `lens`, into one buffer of exactly that size and
+/// hands each datagram, cut from it, to `out` in order. The datagrams share that buffer and nothing else.
+fn cut_datagrams(bytes: &[u8], lens: &[usize], mut out: impl FnMut(Bytes)) {
+    let mut buffer = Bytes::copy_from_slice(bytes);
+    for &len in lens {
+        out(buffer.split_to(len));
     }
 }
 
@@ -499,4 +509,28 @@ pub fn bind_gateway(
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One player's datagrams of a tick come out in order, as one buffer of exactly their bytes: contiguous, with
+    /// nothing before or after them that a queued datagram could keep alive.
+    #[test]
+    fn a_players_datagrams_share_one_buffer_of_exactly_their_size() {
+        let bytes: Vec<u8> = (0..2500u32).map(|i| i as u8).collect();
+        let lens = [1100, 1100, 300];
+        let mut cut = Vec::new();
+        cut_datagrams(&bytes, &lens, |d| cut.push(d));
+        assert_eq!(cut.iter().map(Bytes::len).collect::<Vec<_>>(), lens);
+        assert_eq!(cut.concat(), bytes);
+        for pair in cut.windows(2) {
+            assert_eq!(pair[0].as_ptr().wrapping_add(pair[0].len()), pair[1].as_ptr());
+        }
+        // Dropping all but the last leaves it whole and unchanged: it owns nothing but its share of the buffer.
+        let last = cut.pop().expect("last");
+        drop(cut);
+        assert_eq!(&last[..], &bytes[2200..]);
+    }
 }
