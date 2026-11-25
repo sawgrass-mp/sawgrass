@@ -2,7 +2,7 @@
 //! says it is, and sends each a snapshot with the other. A flood of states costs one slot, not a queue, and
 //! connections beyond the player cap are refused. Each connection is held to its rates: states beyond them are
 //! dropped, a sustained flood or an undecodable event closes the connection, and one address gets only so many
-//! connections. A client that teleports stays where it was, and is told so.
+//! connections. A client that teleports stays where it was, and is told so, unless the rules only report.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -16,6 +16,7 @@ use sawgrass_protocol::{
     EntityState, PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity,
 };
 use sawgrass_server::limits::Limits;
+use sawgrass_server::movement::MovementRules;
 use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState, Roster};
 use sawgrass_server::{TickConfig, TickLoop};
 
@@ -544,6 +545,57 @@ fn a_teleport_is_refused_and_counted() {
     }));
 }
 
+/// With `report_only`, a teleport is counted like a refusal but applied, and nobody is corrected: a first session
+/// with the game learns which limit is wrong without fighting it.
+#[test]
+fn report_only_counts_a_teleport_and_applies_it() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let config = ListenConfig {
+        movement: MovementRules {
+            report_only: true,
+            ..MovementRules::default()
+        },
+        ..ListenConfig::default()
+    };
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, config))
+    };
+    let traffic = players.traffic();
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    let spawn = state_packet(10.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(spawn.clone());
+        position_of(t, id) == Some([10.0, 5.0, 30.0])
+    }));
+    let jump = state_packet(5000.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(jump.clone());
+        position_of(t, id) == Some([5000.0, 5.0, 30.0])
+    }));
+    assert!(traffic.refused_teleport.load(Ordering::Relaxed) >= 1);
+    assert_eq!(traffic.corrections.load(Ordering::Relaxed), 0);
+    // A walk from the new place is a normal move.
+    let refused = traffic.refused_teleport.load(Ordering::Relaxed);
+    let step = state_packet(5002.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(step.clone());
+        position_of(t, id) == Some([5002.0, 5.0, 30.0])
+    }));
+    assert_eq!(traffic.refused_teleport.load(Ordering::Relaxed), refused);
+}
+
 /// Entities the server spawns (ADR 0006): a vehicle reaches a nearby client's snapshot with its kind, model and
 /// block, and leaves it when despawned. Players and positions off the map are not spawned.
 #[test]
@@ -714,4 +766,214 @@ fn the_nearest_player_is_told_it_owns_a_vehicle() {
             yours: false
         }
     );
+}
+
+/// ADR 0006, sections 4 and 5: the server takes a vehicle's state only from its owner with the current epoch,
+/// near the owner, and the owner's damage values only for a vehicle nobody owns as property.
+#[test]
+fn only_the_owner_moves_a_vehicle_and_damages_it_by_the_rule() {
+    use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+    use sawgrass_protocol::game::OwnedState;
+    use sawgrass_protocol::ped::PedBlock;
+    use sawgrass_protocol::vehicle::VehicleBlock;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let traffic = players.traffic();
+    let players = Arc::new(Mutex::new(players));
+    let at = |x: f32| ClientState {
+        position: Position::from_metres([x, 5.0, 30.0]).expect("position"),
+        velocity: Velocity::from_metres_per_second([0.0; 3]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let info =
+        Info::with_fields(EntityKind::Vehicle, AssetId(3), &VehicleBlock::INTACT.to_fields()).expect("info");
+    let car = players
+        .lock()
+        .expect("players")
+        .spawn(info, at(30.0))
+        .expect("spawned");
+
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let mut a = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("a connects");
+    std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut a)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    let send = |x: f32, epoch: u8, car_state: ClientState, block: VehicleBlock| {
+        let owned = OwnedState::new(car, epoch, car_state, &block.to_fields()).expect("owned");
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::ClientState,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        at(x)
+            .encode_with_owned(&PedBlock::default(), &[owned], &mut packet)
+            .expect("state");
+        a.send_datagram(Bytes::from(packet)).expect("send");
+    };
+    let car_at = |players: &Mutex<net::Players>| {
+        players.lock().expect("players").spawned(car).map(|(i, s)| {
+            let block = VehicleBlock::from_fields(i.fields()).expect("block");
+            (s.position.to_metres()[0], block.engine)
+        })
+    };
+    // Placed at 10 m, A becomes the owner at epoch 1.
+    send(10.0, 0, at(30.0), VehicleBlock::INTACT);
+    assert!(tick_until(&mut tick_loop, |_| {
+        players
+            .lock()
+            .expect("players")
+            .owner(car)
+            .is_some_and(|(o, e)| o.is_some() && e == 1)
+    }));
+    // A stale epoch is dropped; the right one moves the car and lowers its engine within the budget.
+    send(10.0, 0, at(31.0), VehicleBlock::INTACT);
+    assert!(wait_for(&traffic.refused_owned_stale, 1, || {
+        tick_loop.run_tick();
+    }));
+    let wrecked = VehicleBlock {
+        engine: 0,
+        ..VehicleBlock::INTACT
+    };
+    send(10.0, 1, at(32.0), wrecked);
+    assert!(tick_until(&mut tick_loop, |_| car_at(&players)
+        .is_some_and(|(x, _)| x == 32.0)));
+    let (_, engine) = car_at(&players).expect("car");
+    assert!((155..255).contains(&engine), "engine {engine}");
+    // Beyond the keep radius of its owner, refused.
+    send(10.0, 1, at(200.0), wrecked);
+    assert!(wait_for(&traffic.refused_owned_far, 1, || {
+        tick_loop.run_tick();
+    }));
+    // Within the keep radius but too far from the last accepted state, or faster than any vehicle: refused.
+    send(10.0, 1, at(-135.0), wrecked);
+    assert!(wait_for(&traffic.refused_owned_movement, 1, || {
+        tick_loop.run_tick();
+    }));
+    let speeding = ClientState {
+        velocity: Velocity::from_metres_per_second([200.0, 0.0, 0.0]).expect("velocity"),
+        ..at(32.5)
+    };
+    send(10.0, 1, speeding, wrecked);
+    assert!(wait_for(&traffic.refused_owned_movement, 2, || {
+        tick_loop.run_tick();
+    }));
+    // A player's vehicle keeps the server's damage, and still moves.
+    assert!(players.lock().expect("players").set_property(car, true));
+    send(10.0, 1, at(33.0), wrecked);
+    assert!(tick_until(&mut tick_loop, |_| car_at(&players)
+        .is_some_and(|(x, _)| x == 33.0)));
+    assert_eq!(car_at(&players).map(|(_, e)| e), Some(engine));
+}
+
+/// SRV-19: a player that does not own a vehicle cannot move it, and when the owner leaves at speed, the next owner's
+/// first state is checked from the last accepted one, so carrying on at the same speed is not refused.
+#[test]
+fn a_hand_off_at_speed_is_not_refused() {
+    use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+    use sawgrass_protocol::game::OwnedState;
+    use sawgrass_protocol::ped::PedBlock;
+    use sawgrass_protocol::vehicle::VehicleBlock;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let traffic = players.traffic();
+    let players = Arc::new(Mutex::new(players));
+    let at = |x: f32, vx: f32| ClientState {
+        position: Position::from_metres([x, 5.0, 30.0]).expect("position"),
+        velocity: Velocity::from_metres_per_second([vx, 0.0, 0.0]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let info =
+        Info::with_fields(EntityKind::Vehicle, AssetId(3), &VehicleBlock::INTACT.to_fields()).expect("info");
+    let car = players
+        .lock()
+        .expect("players")
+        .spawn(info, at(30.0, 0.0))
+        .expect("spawned");
+
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let join = |tick_loop: &mut TickLoop| {
+        let mut session = runtime
+            .block_on(connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION))
+            .expect("connects");
+        let id = std::thread::scope(|scope| {
+            let id = scope.spawn(|| runtime.block_on(joined(&mut session)));
+            tick_until(tick_loop, |_| id.is_finished());
+            id.join().expect("joined")
+        });
+        (session, id)
+    };
+    let (a, id_a) = join(&mut tick_loop);
+    let (b, id_b) = join(&mut tick_loop);
+    let send = |session: &Session, x: f32, owned: &[OwnedState]| {
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::ClientState,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        at(x, 0.0)
+            .encode_with_owned(&PedBlock::default(), owned, &mut packet)
+            .expect("state");
+        session.send_datagram(Bytes::from(packet)).expect("send");
+    };
+    let car_state = |epoch: u8, x: f32| {
+        OwnedState::new(car, epoch, at(x, 40.0), &VehicleBlock::INTACT.to_fields()).expect("owned")
+    };
+    let owner = |players: &Mutex<net::Players>| players.lock().expect("players").owner(car);
+    let car_x = |players: &Mutex<net::Players>| {
+        players
+            .lock()
+            .expect("players")
+            .spawned(car)
+            .map(|(_, s)| s.position.to_metres()[0])
+    };
+    // A, at 25 m, is nearest and owns the car; it drives the car at 40 m/s.
+    send(&b, 5.0, &[]);
+    send(&a, 25.0, &[]);
+    assert!(tick_until(&mut tick_loop, |_| owner(&players) == Some((Some(id_a), 1))));
+    send(&a, 25.0, &[car_state(1, 31.0)]);
+    assert!(tick_until(&mut tick_loop, |_| car_x(&players) == Some(31.0)));
+    // B, not the owner, cannot move it with A's epoch.
+    send(&b, 5.0, &[car_state(1, 50.0)]);
+    assert!(wait_for(&traffic.refused_owned_stale, 1, || {
+        tick_loop.run_tick();
+    }));
+    assert_eq!(car_x(&players), Some(31.0));
+    // A leaves; B is handed the car and carries on from where A left it.
+    a.close();
+    assert!(tick_until(&mut tick_loop, |_| owner(&players) == Some((Some(id_b), 3))));
+    send(&b, 5.0, &[car_state(3, 34.0)]);
+    assert!(tick_until(&mut tick_loop, |_| car_x(&players) == Some(34.0)));
+    assert_eq!(traffic.refused_owned_movement.load(Ordering::Relaxed), 0);
 }
