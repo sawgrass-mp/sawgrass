@@ -50,6 +50,7 @@ use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::OwnedState;
 use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
+use sawgrass_protocol::recording::RecordKind;
 use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use sawgrass_store::WalletId;
@@ -62,6 +63,7 @@ use crate::money::Money;
 use crate::movement::{Movement, MovementRules, Violation, Violations};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
+use crate::recording::Recorder;
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
 
@@ -295,11 +297,27 @@ impl Drop for AddressGuard {
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
 pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
-    listen_with_money(gateway, config, None)
+    listen_full(gateway, config, None, None)
 }
 
 /// As [`listen`], and gives every player a wallet in `money`'s ledger.
 pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<Arc<Money>>) -> Players {
+    listen_full(gateway, config, money, None)
+}
+
+/// [`listen`], and with `recorder` every connection's joins, datagrams, events and leaves are recorded as they
+/// arrive, before any limit applies ([`crate::recording`]).
+pub fn listen_recorded(gateway: Gateway, config: ListenConfig, recorder: Option<Arc<Recorder>>) -> Players {
+    listen_full(gateway, config, None, recorder)
+}
+
+/// [`listen`] with both a ledger for wallets ([`listen_with_money`]) and a recorder ([`listen_recorded`]).
+pub fn listen_full(
+    gateway: Gateway,
+    config: ListenConfig,
+    money: Option<Arc<Money>>,
+    recorder: Option<Arc<Recorder>>,
+) -> Players {
     let (inbound_tx, inbound_rx) = mpsc::channel();
     let traffic = Arc::new(Traffic::default());
     let next_id = AtomicU32::new(1);
@@ -355,11 +373,12 @@ pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<A
             let handshakes = handshakes.clone();
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let money = money.clone();
+            let recorder = recorder.clone();
             tokio::spawn(async move {
                 let session = incoming.handshake().await;
                 handshakes.fetch_sub(1, Ordering::Relaxed);
                 if let Ok(session) = session {
-                    serve(session, id, inbound, traffic, config, money).await;
+                    serve(session, id, inbound, traffic, config, money, recorder).await;
                 }
                 drop(guard);
                 active.fetch_sub(1, Ordering::Relaxed);
@@ -449,6 +468,7 @@ async fn serve(
     traffic: Arc<Traffic>,
     config: ListenConfig,
     money: Option<Arc<Money>>,
+    recorder: Option<Arc<Recorder>>,
 ) {
     let address = session.remote_address();
     let (stats_to_clients, limits) = (config.stats_to_clients, config.limits);
@@ -479,6 +499,9 @@ async fn serve(
     if inbound.send(join).is_err() {
         return;
     }
+    if let Some(r) = &recorder {
+        r.record(id, RecordKind::Join, &[]);
+    }
     tokio::spawn(async move {
         while let Some(packet) = events_rx.recv().await {
             if event_sender.send(&packet).await.is_err() {
@@ -489,10 +512,14 @@ async fn serve(
     let events_inbox = inbox.clone();
     let events_traffic = traffic.clone();
     let events_connection = datagrams.clone();
+    let events_recorder = recorder.clone();
     tokio::spawn(async move {
         let mut bucket = Bucket::for_events(&limits, Instant::now());
         let mut shots = Bucket::for_shots(&limits, Instant::now());
         while let Ok((_, packet)) = event_receiver.recv().await {
+            if let Some(r) = &events_recorder {
+                r.record(id, RecordKind::Event, &packet);
+            }
             let event = ClientEvent::decode(&packet[PacketHeader::SIZE..]);
             let Ok(event) = event else {
                 // No valid client sends one, so whatever sent it is not a client to keep.
@@ -543,6 +570,9 @@ async fn serve(
     let mut bucket = Bucket::for_states(&limits, Instant::now());
     let mut owned = Vec::new();
     while let Ok((header, packet)) = datagrams.recv().await {
+        if let Some(r) = &recorder {
+            r.record(id, RecordKind::Datagram, &packet);
+        }
         traffic
             .received_bytes
             .fetch_add(packet.len() as u64, Ordering::Relaxed);
@@ -573,6 +603,9 @@ async fn serve(
         }
     }
     datagrams.close();
+    if let Some(r) = &recorder {
+        r.record(id, RecordKind::Leave, &[]);
+    }
     let _ = inbound.send(Inbound::Leave { id });
 }
 

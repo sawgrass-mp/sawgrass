@@ -9,7 +9,7 @@
 //!                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]]
 //!                 [--resources DIR [--script-budget-ms N]] [--vehicles N] [--vehicle-area M]
 //!                 [--map-min X,Y] [--map-size M] [--height MIN,MAX] [--max-speed M/S] [--move-slack S]
-//!                 [--movement-report-only] [--list-players]
+//!                 [--movement-report-only] [--list-players] [--record FILE]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -40,6 +40,9 @@
 //!   fails to load is reported and left out.
 //! - `--script-budget-ms N`: the time all resources together may take in one tick (default a quarter of the
 //!   tick's 70% p99 target: 8 at 20 Hz, 5 at 30 Hz).
+//! - `--record FILE`: write every connection's joins, datagrams, events and leaves to `FILE` as they arrive, for
+//!   `sawgrass-bots replay` (task SRV-22). The file is written out every half second, so a killed server loses at
+//!   most that much. It holds what players sent: keep it private and never commit one.
 //!
 //! Movement checks (task SRV-9), for the first sessions with the game, whose coordinates and speeds are not known
 //! yet. The defaults are wide on purpose; the interest grid covers the same square as the checks.
@@ -103,6 +106,7 @@ struct Args {
     script_budget: Option<Duration>,
     movement: MovementRules,
     list_players: bool,
+    record: Option<PathBuf>,
 }
 
 /// Parses `A,B` into two numbers.
@@ -136,6 +140,7 @@ fn parse_args() -> Result<Args, String> {
         script_budget: None,
         movement: MovementRules::default(),
         list_players: false,
+        record: None,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -228,6 +233,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--movement-report-only" => args.movement.report_only = true,
             "--list-players" => args.list_players = true,
+            "--record" => args.record = Some(value("--record")?.into()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -344,7 +350,7 @@ fn main() -> ExitCode {
                  [--resources DIR [--script-budget-ms N]] \
                  [--vehicles N] [--vehicle-area M] [--map-min X,Y] [--map-size M] [--height MIN,MAX] \
                  [--max-speed M/S] [--move-slack S] [--movement-report-only] \
-                 [--list-players]"
+                 [--list-players] [--record FILE]"
             );
             return ExitCode::from(2);
         }
@@ -391,10 +397,23 @@ fn main() -> ExitCode {
         None => None,
     };
     let mut roster = None;
+    let mut recorder = None;
     let mut player_list = None;
     // Set on the report tick that asked for the list; the tick after it filled the list in.
     let mut listing = false;
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
+        if let Some(path) = &args.record {
+            match sawgrass_server::recording::Recorder::create(path) {
+                Ok(r) => {
+                    println!("recording what clients send to {}", path.display());
+                    recorder = Some(r);
+                }
+                Err(e) => {
+                    eprintln!("sawgrass-server: --record {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let (threads, tick_threads) = split_cores(cores, args.net_threads, args.tick_threads);
         let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -417,7 +436,7 @@ fn main() -> ExitCode {
                         "listening on {listen} with {threads} gateway threads and {tick_threads} tick threads"
                     );
                     println!("{}", describe(&args.movement));
-                    net::listen_with_money(
+                    net::listen_full(
                         gateway,
                         net::ListenConfig {
                             stats_to_clients: args.stats_to_clients,
@@ -432,6 +451,7 @@ fn main() -> ExitCode {
                             movement: args.movement,
                         },
                         money.clone(),
+                        recorder.clone(),
                     )
                 }
                 Err(e) => {
@@ -555,6 +575,9 @@ fn main() -> ExitCode {
                 last.3 = sent;
                 last.4 = received;
             }
+            if let Some(r) = &recorder {
+                line += &format!(", recording {} written {} dropped", r.written(), r.dropped());
+            }
             if let Some(money) = &money {
                 let stats = money.ledger().stats();
                 line += &format!(
@@ -576,6 +599,16 @@ fn main() -> ExitCode {
         ControlFlow::Continue(())
     });
     println!("tick {}", tick_loop.metrics().stats());
+    if let Some(r) = &recorder {
+        if let Err(e) = r.finish() {
+            eprintln!("sawgrass-server: recording: {e}");
+        }
+        println!(
+            "recording: {} records written, {} dropped",
+            r.written(),
+            r.dropped()
+        );
+    }
     if let Err(panic) = result {
         // The world may be half-written: close every connection and stop rather than tick on.
         eprintln!("sawgrass-server: {panic}; stopping");
