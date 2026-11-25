@@ -11,6 +11,7 @@ pub mod interest;
 pub mod metrics;
 pub mod net;
 pub mod slots;
+pub mod snapshot;
 pub mod tick;
 
 pub use hecs;
