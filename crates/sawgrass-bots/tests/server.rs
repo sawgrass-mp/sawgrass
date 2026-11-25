@@ -56,6 +56,8 @@ async fn bots_move_on_the_server_and_see_each_other() {
         record: None,
         decoders: u64::MAX,
         sockets: Vec::new(),
+        pay_every: None,
+        payees: Arc::default(),
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(4);
@@ -155,6 +157,8 @@ async fn misbehaving_bots_are_stopped_and_an_honest_one_plays_on() {
         record: None,
         decoders: u64::MAX,
         sockets: Vec::new(),
+        pay_every: None,
+        payees: Arc::default(),
     });
     let stop = Instant::now() + Duration::from_secs(3);
     let honest = Arc::new(Counters::default());
@@ -236,6 +240,8 @@ async fn refused_bots_retry_and_light_bots_on_shared_sockets_play() {
         record: None,
         decoders: 2,
         sockets,
+        pay_every: None,
+        payees: Arc::default(),
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(5);
@@ -272,4 +278,84 @@ async fn refused_bots_retry_and_light_bots_on_shared_sockets_play() {
         load(&counters.received_entities) > decoded,
         "decoders saw the others"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bots_pay_each_other_through_the_ledger() {
+    use sawgrass_server::money::Money;
+    use sawgrass_store::{Config, Kind, Operation, Outcome, RocksStore, Writer};
+
+    let dir = std::env::temp_dir().join(format!("sawgrass-bots-pay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let writer = Writer::start(RocksStore::open(&dir).expect("store"), Config::default()).expect("writer");
+    let money = Money::open(writer.handle(), 10_000, 1).expect("money");
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    let listen = ListenConfig {
+        money_events: true,
+        ..ListenConfig::default()
+    };
+    let mut players = net::listen_with_money(gateway, listen, Some(money.clone()));
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+
+    const BOTS: u64 = 4;
+    let config = Arc::new(BotConfig {
+        server: addr,
+        server_name: "localhost".to_owned(),
+        roots,
+        send_hz: 20,
+        area: Area {
+            size: 100.0,
+            hotspots: 0,
+            ..Area::default()
+        },
+        record: None,
+        decoders: u64::MAX,
+        sockets: Vec::new(),
+        pay_every: Some(Duration::from_millis(100)),
+        payees: Arc::default(),
+    });
+    let counters = Arc::new(Counters::default());
+    let stop = Instant::now() + Duration::from_secs(3);
+    for index in 0..BOTS {
+        tokio::spawn(run(config.clone(), index, counters.clone(), false, stop, None));
+    }
+    let ticks = std::thread::spawn(move || {
+        while std::time::Instant::now() < stop.into_std() + Duration::from_millis(300) {
+            tick_loop.run_tick();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    tokio::task::spawn_blocking(move || ticks.join().expect("tick thread"))
+        .await
+        .expect("join");
+
+    let load = |n: &std::sync::atomic::AtomicU64| n.load(Ordering::Relaxed);
+    let (sent, done) = (load(&counters.payments_sent), load(&counters.payments_done));
+    assert!(done > 40, "{done} of {sent} payments done");
+    // Each bot started with 10,000 and pays at most 100 a time: none ran short, and none was refused.
+    assert_eq!(load(&counters.payments_short), 0);
+    assert_eq!(load(&counters.payments_refused), 0);
+    assert!(done <= sent && sent - done <= BOTS, "{done} done of {sent} sent");
+
+    // The money only moved between the bots: their wallets still hold what the treasury gave out.
+    drop(money);
+    let ledger = writer.handle();
+    let mut total = 0;
+    for connection in 1..=BOTS {
+        let Ok(Outcome::Opened { wallet, .. }) = ledger
+            .submit(Operation::OpenWallet {
+                key: format!("player/1/{connection}"),
+                kind: Kind::Character,
+            })
+            .wait()
+        else {
+            panic!("wallet {connection}");
+        };
+        total += ledger.balance(wallet).wait().expect("balance");
+    }
+    assert_eq!(total, 10_000 * BOTS as i64);
+    writer.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }
