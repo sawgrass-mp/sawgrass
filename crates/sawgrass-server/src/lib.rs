@@ -8,6 +8,7 @@
 
 pub mod cpu;
 pub mod interest;
+pub mod limits;
 pub mod metrics;
 pub mod net;
 pub mod slots;

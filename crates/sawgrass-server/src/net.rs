@@ -30,10 +30,12 @@
 //! sent, applied as is. Validating movement (speed limits, teleports) belongs to the authority work and is not
 //! done here.
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bytes::Bytes;
 use hecs::{Entity, World};
@@ -45,6 +47,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
+use crate::limits::{Admit, Bucket, Limits};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
 
@@ -95,7 +98,7 @@ enum Inbound {
 }
 
 /// How the server accepts players.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ListenConfig {
     /// Let clients ask for [`ServerStats`] (load tests); otherwise the request is ignored.
     pub stats_to_clients: bool,
@@ -103,6 +106,8 @@ pub struct ListenConfig {
     pub max_players: usize,
     /// Threads that build players' snapshots in parallel. 1 builds them on the tick thread.
     pub tick_threads: usize,
+    /// Rates, handshakes and connections per address each connection is held to.
+    pub limits: Limits,
 }
 
 impl Default for ListenConfig {
@@ -112,6 +117,7 @@ impl Default for ListenConfig {
             stats_to_clients: false,
             max_players: 4096,
             tick_threads: 1,
+            limits: Limits::default(),
         }
     }
 }
@@ -127,6 +133,58 @@ pub struct Traffic {
     pub send_errors: AtomicU64,
     /// Ticks whose snapshots were dropped because the gateway had not sent the previous [`OUTBOX_TICKS`] yet.
     pub dropped_ticks: AtomicU64,
+    /// Client datagrams dropped undecoded because the connection sent more than its rate.
+    pub dropped_states: AtomicU64,
+    /// Client events dropped because the connection sent more than its rate.
+    pub dropped_events: AtomicU64,
+    /// Connections closed for a sustained flood of datagrams or events.
+    pub closed_floods: AtomicU64,
+    /// Connections closed for an event that is not a known [`ClientEvent`].
+    pub closed_bad_events: AtomicU64,
+    /// Connection attempts asked for a QUIC Retry because too many handshakes were in progress.
+    pub retried_handshakes: AtomicU64,
+    /// Connection attempts refused because too many handshakes were in progress.
+    pub refused_handshakes: AtomicU64,
+    /// Connection attempts refused because their address had too many connections.
+    pub refused_per_address: AtomicU64,
+}
+
+/// Connections, handshakes included, by IP address.
+type PerAddress = Arc<Mutex<HashMap<IpAddr, usize>>>;
+
+/// One connection counted against its address; dropping it takes the count back.
+struct AddressGuard {
+    counts: PerAddress,
+    ip: IpAddr,
+}
+
+impl AddressGuard {
+    /// Counts a connection from `ip`, or returns `None` if the address already has `max`.
+    fn take(counts: &PerAddress, ip: IpAddr, max: usize) -> Option<Self> {
+        let mut map = counts.lock().ok()?;
+        let count = map.entry(ip).or_insert(0);
+        if *count >= max {
+            return None;
+        }
+        *count += 1;
+        Some(Self {
+            counts: counts.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for AddressGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.counts.lock()
+            && let Some(count) = map.get_mut(&self.ip)
+        {
+            *count -= 1;
+            if *count == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
 }
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
@@ -135,6 +193,9 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let traffic = Arc::new(Traffic::default());
     let next_id = AtomicU32::new(1);
     let active = Arc::new(AtomicUsize::new(0));
+    let handshakes = Arc::new(AtomicUsize::new(0));
+    let per_address: PerAddress = Arc::default();
+    let limits = config.limits;
     let accept_traffic = traffic.clone();
     let (outbox, recycle) = spawn_sender(traffic.clone());
     tokio::spawn(async move {
@@ -143,15 +204,37 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
                 incoming.refuse();
                 continue;
             }
+            if handshakes.load(Ordering::Relaxed) >= limits.max_handshakes {
+                // A Retry costs one packet and proves the address; a proven one beyond the cap is refused.
+                if incoming.address_validated() {
+                    accept_traffic.refused_handshakes.fetch_add(1, Ordering::Relaxed);
+                    incoming.refuse();
+                } else {
+                    accept_traffic.retried_handshakes.fetch_add(1, Ordering::Relaxed);
+                    incoming.retry();
+                }
+                continue;
+            }
+            let ip = incoming.remote_address().ip().to_canonical();
+            let Some(guard) = AddressGuard::take(&per_address, ip, limits.max_per_address) else {
+                accept_traffic.refused_per_address.fetch_add(1, Ordering::Relaxed);
+                incoming.refuse();
+                continue;
+            };
             active.fetch_add(1, Ordering::Relaxed);
+            handshakes.fetch_add(1, Ordering::Relaxed);
             let inbound = inbound_tx.clone();
             let traffic = accept_traffic.clone();
             let active = active.clone();
+            let handshakes = handshakes.clone();
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
-                if let Ok(session) = incoming.handshake().await {
-                    serve(session, id, inbound, traffic, config.stats_to_clients).await;
+                let session = incoming.handshake().await;
+                handshakes.fetch_sub(1, Ordering::Relaxed);
+                if let Ok(session) = session {
+                    serve(session, id, inbound, traffic, config.stats_to_clients, limits).await;
                 }
+                drop(guard);
                 active.fetch_sub(1, Ordering::Relaxed);
             });
         }
@@ -216,6 +299,7 @@ async fn serve(
     inbound: mpsc::Sender<Inbound>,
     traffic: Arc<Traffic>,
     stats_to_clients: bool,
+    limits: Limits,
 ) {
     let (datagrams, mut event_sender, mut event_receiver) = session.split();
     let (events_tx, mut events_rx) = tokio_mpsc::channel::<Vec<u8>>(EVENT_QUEUE);
@@ -237,19 +321,53 @@ async fn serve(
         }
     });
     let events_inbox = inbox.clone();
+    let events_traffic = traffic.clone();
+    let events_connection = datagrams.clone();
     tokio::spawn(async move {
+        let mut bucket = Bucket::for_events(&limits, Instant::now());
         while let Ok((_, packet)) = event_receiver.recv().await {
-            if stats_to_clients
-                && ClientEvent::decode(&packet[PacketHeader::SIZE..]) == Ok(ClientEvent::RequestStats)
-            {
-                events_inbox.wants_stats.store(true, Ordering::Relaxed);
+            match bucket.admit(Instant::now()) {
+                Admit::Pass => {}
+                Admit::Drop => {
+                    events_traffic.dropped_events.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                Admit::Close => {
+                    events_traffic.closed_floods.fetch_add(1, Ordering::Relaxed);
+                    events_connection.close();
+                    break;
+                }
+            }
+            match ClientEvent::decode(&packet[PacketHeader::SIZE..]) {
+                Ok(ClientEvent::RequestStats) if stats_to_clients => {
+                    events_inbox.wants_stats.store(true, Ordering::Relaxed);
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    // No valid client sends one, so whatever sent it is not a client to keep.
+                    events_traffic.closed_bad_events.fetch_add(1, Ordering::Relaxed);
+                    events_connection.close();
+                    break;
+                }
             }
         }
     });
+    let mut bucket = Bucket::for_states(&limits, Instant::now());
     while let Ok((header, packet)) = datagrams.recv().await {
         traffic
             .received_bytes
             .fetch_add(packet.len() as u64, Ordering::Relaxed);
+        match bucket.admit(Instant::now()) {
+            Admit::Pass => {}
+            Admit::Drop => {
+                traffic.dropped_states.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            Admit::Close => {
+                traffic.closed_floods.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
         if header.kind != PacketKind::ClientState {
             continue;
         }
