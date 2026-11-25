@@ -28,7 +28,7 @@ const USAGE: &str = "usage:
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
                     [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
                     [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]
-                    [--decoders N] [--sockets N]
+                    [--decoders N] [--sockets N] [--pay-every SECS]
                     [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]";
 
 struct RunArgs {
@@ -47,6 +47,7 @@ struct RunArgs {
     misbehave: [u64; 4],
     decoders: u64,
     sockets: usize,
+    pay_every: Option<Duration>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, value: Option<String>) -> Result<T, String>
@@ -77,6 +78,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
         misbehave: [0; 4],
         decoders: u64::MAX,
         sockets: 0,
+        pay_every: None,
     };
     while let Some(flag) = args.next() {
         let value = args.next();
@@ -97,6 +99,9 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--record-bots" => run.record_bots = parse(&flag, value)?,
             "--decoders" => run.decoders = parse(&flag, value)?,
             "--sockets" => run.sockets = parse(&flag, value)?,
+            "--pay-every" => {
+                run.pay_every = Some(Duration::from_secs_f64(parse::<f64>(&flag, value)?.max(0.01)))
+            }
             "--misbehave" => run.misbehave = misbehave::parse(&value.ok_or("--misbehave needs a value")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -157,6 +162,8 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         record: record.clone(),
         decoders: args.decoders,
         sockets,
+        pay_every: args.pay_every,
+        payees: Arc::default(),
     });
     let counters = Arc::new(Counters::default());
     let ctx = Context {
