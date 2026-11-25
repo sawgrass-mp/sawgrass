@@ -50,6 +50,13 @@ impl Generations {
     pub fn current(&self, raw: u64) -> Option<GameHandle> {
         self.current.get(&raw).map(|g| GameHandle::new(raw, *g))
     }
+
+    /// The entity `raw` names now, numbering it as generation 1 if no creation hook saw it: entities that existed
+    /// before the module started (the local player's ped, the map's props) are met first through other hooks or
+    /// calls. Its next reuse then counts from there.
+    pub fn current_or_adopt(&mut self, raw: u64) -> GameHandle {
+        GameHandle::new(raw, *self.current.entry(raw).or_insert(1))
+    }
 }
 
 /// A model or other asset as the game knows it. Opaque, like [`GameHandle`]; [`crate::assets`] maps the protocol's
@@ -236,6 +243,20 @@ mod tests {
         assert_eq!(generations.created(6), GameHandle::new(6, 1));
         assert_eq!(generations.created(5), GameHandle::new(5, 2));
         assert_eq!(generations.current(5), Some(GameHandle::new(5, 2)));
+    }
+
+    #[test]
+    fn entities_older_than_the_module_are_adopted_as_generation_one() {
+        let mut generations = Generations::default();
+        assert_eq!(generations.current_or_adopt(9), GameHandle::new(9, 1));
+        assert_eq!(generations.current_or_adopt(9), GameHandle::new(9, 1));
+        assert_eq!(generations.current(9), Some(GameHandle::new(9, 1)));
+        assert_eq!(
+            generations.created(9),
+            GameHandle::new(9, 2),
+            "its reuse counts on from the adoption"
+        );
+        assert_eq!(generations.current_or_adopt(9), GameHandle::new(9, 2));
     }
 
     #[test]
