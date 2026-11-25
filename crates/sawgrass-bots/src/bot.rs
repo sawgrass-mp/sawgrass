@@ -131,8 +131,8 @@ pub async fn run(
                     }
                 }
                 // Bots simulate no vehicle until BOT-5, and an honest walker stays within the limits; a correction
-                // would show up in the server's counts.
-                Ok(ServerEvent::Ownership { .. } | ServerEvent::Corrected(_)) | Err(_) => {}
+                // would show up in the server's counts. Other events are not for bots.
+                Ok(_) | Err(_) => {}
             }
         }
     });

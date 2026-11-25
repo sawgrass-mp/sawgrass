@@ -48,16 +48,18 @@ use rayon::prelude::*;
 use sawgrass_gateway::{Datagrams, Gateway, Session};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::OwnedState;
-use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, ServerStats};
+use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::recording::RecordKind;
 use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
+use sawgrass_store::WalletId;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
 use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
+use crate::money::Money;
 use crate::movement::{Movement, MovementRules, Violation};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
@@ -152,6 +154,7 @@ enum Inbound {
         sender: Datagrams,
         events: tokio_mpsc::Sender<Vec<u8>>,
         inbox: Arc<Inbox>,
+        wallet: Option<WalletId>,
     },
     Leave {
         id: u32,
@@ -171,6 +174,9 @@ pub struct ListenConfig {
     pub limits: Limits,
     /// What a client's movement is checked against.
     pub movement: MovementRules,
+    /// Let clients pay each other with [`ClientEvent::Pay`] when the server has a ledger (load tests, DB-8);
+    /// otherwise a payment is answered [`PayResult::Refused`].
+    pub money_events: bool,
 }
 
 impl Default for ListenConfig {
@@ -182,6 +188,7 @@ impl Default for ListenConfig {
             tick_threads: 1,
             limits: Limits::default(),
             movement: MovementRules::default(),
+            money_events: false,
         }
     }
 }
@@ -206,8 +213,11 @@ pub struct Traffic {
     pub lost_owner_events: AtomicU64,
     /// Owned-entity states dropped because the sender does not own the entity, or not with that epoch.
     pub refused_owned_stale: AtomicU64,
-    /// Owned-entity states refused by the movement checks.
+    /// Owned-entity states refused by the movement checks (with [`MovementRules::report_only`]: that broke them and
+    /// were applied anyway).
     pub refused_owned_movement: AtomicU64,
+    /// Spawns whose state broke the movement checks and were made anyway, because the rules only report.
+    pub reported_spawns: AtomicU64,
     /// Owned-entity states refused because the entity is beyond the keep radius of its owner.
     pub refused_owned_far: AtomicU64,
     /// Connections closed for a sustained flood of datagrams or events.
@@ -284,12 +294,27 @@ impl Drop for AddressGuard {
 
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
 pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
-    listen_recorded(gateway, config, None)
+    listen_full(gateway, config, None, None)
+}
+
+/// As [`listen`], and gives every player a wallet in `money`'s ledger.
+pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<Arc<Money>>) -> Players {
+    listen_full(gateway, config, money, None)
 }
 
 /// [`listen`], and with `recorder` every connection's joins, datagrams, events and leaves are recorded as they
 /// arrive, before any limit applies ([`crate::recording`]).
 pub fn listen_recorded(gateway: Gateway, config: ListenConfig, recorder: Option<Arc<Recorder>>) -> Players {
+    listen_full(gateway, config, None, recorder)
+}
+
+/// [`listen`] with both a ledger for wallets ([`listen_with_money`]) and a recorder ([`listen_recorded`]).
+pub fn listen_full(
+    gateway: Gateway,
+    config: ListenConfig,
+    money: Option<Arc<Money>>,
+    recorder: Option<Arc<Recorder>>,
+) -> Players {
     let (inbound_tx, inbound_rx) = mpsc::channel();
     let traffic = Arc::new(Traffic::default());
     let next_id = AtomicU32::new(1);
@@ -301,7 +326,9 @@ pub fn listen_recorded(gateway: Gateway, config: ListenConfig, recorder: Option<
     let (outbox, recycle) = spawn_sender(traffic.clone());
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let close = shutdown.clone();
+    let accept_money = money.clone();
     tokio::spawn(async move {
+        let money = accept_money;
         loop {
             let incoming = tokio::select! {
                 incoming = gateway.accept() => incoming,
@@ -342,21 +369,13 @@ pub fn listen_recorded(gateway: Gateway, config: ListenConfig, recorder: Option<
             let active = active.clone();
             let handshakes = handshakes.clone();
             let id = next_id.fetch_add(1, Ordering::Relaxed);
+            let money = money.clone();
             let recorder = recorder.clone();
             tokio::spawn(async move {
                 let session = incoming.handshake().await;
                 handshakes.fetch_sub(1, Ordering::Relaxed);
                 if let Ok(session) = session {
-                    serve(
-                        session,
-                        id,
-                        inbound,
-                        traffic,
-                        config.stats_to_clients,
-                        limits,
-                        recorder,
-                    )
-                    .await;
+                    serve(session, id, inbound, traffic, config, money, recorder).await;
                 }
                 drop(guard);
                 active.fetch_sub(1, Ordering::Relaxed);
@@ -364,6 +383,7 @@ pub fn listen_recorded(gateway: Gateway, config: ListenConfig, recorder: Option<
         }
     });
     Players {
+        money,
         inbound: inbound_rx,
         traffic,
         players: Vec::new(),
@@ -442,18 +462,33 @@ async fn serve(
     id: u32,
     inbound: mpsc::Sender<Inbound>,
     traffic: Arc<Traffic>,
-    stats_to_clients: bool,
-    limits: Limits,
+    config: ListenConfig,
+    money: Option<Arc<Money>>,
     recorder: Option<Arc<Recorder>>,
 ) {
+    let (stats_to_clients, limits) = (config.stats_to_clients, config.limits);
     let (datagrams, mut event_sender, mut event_receiver) = session.split();
+    // A player whose wallet cannot be opened is not let in: the ledger has stopped, and money would be lost.
+    let wallet = match &money {
+        Some(money) => match money.open_wallet(id).await {
+            Ok(wallet) => Some(wallet),
+            Err(_) => {
+                datagrams.close();
+                return;
+            }
+        },
+        None => None,
+    };
+    let payments = money.filter(|_| config.money_events).zip(wallet);
     let (events_tx, mut events_rx) = tokio_mpsc::channel::<Vec<u8>>(EVENT_QUEUE);
+    let answers = events_tx.clone();
     let inbox = Arc::new(Inbox::default());
     let join = Inbound::Join {
         id,
         sender: datagrams.clone(),
         events: events_tx,
         inbox: inbox.clone(),
+        wallet,
     };
     if inbound.send(join).is_err() {
         return;
@@ -493,6 +528,15 @@ async fn serve(
             match ClientEvent::decode(&packet[PacketHeader::SIZE..]) {
                 Ok(ClientEvent::RequestStats) if stats_to_clients => {
                     events_inbox.wants_stats.store(true, Ordering::Relaxed);
+                }
+                Ok(ClientEvent::Pay { key, to, amount }) => {
+                    let (result, balance) = match &payments {
+                        Some((money, wallet)) => money.pay(*wallet, key, to, amount).await,
+                        None => (PayResult::Refused, 0),
+                    };
+                    let answer = ServerEvent::Paid { key, result, balance };
+                    // A full queue means the client reads nothing; the answer is dropped like the others.
+                    let _ = answers.try_send(event_packet(&answer, 0));
                 }
                 Ok(_) => {}
                 Err(_) => {
@@ -595,6 +639,8 @@ struct Player {
 /// The tick-side half of the network: applies what players sent and sends them snapshots.
 #[derive(Debug)]
 pub struct Players {
+    /// Players' wallets, when the server has a ledger.
+    money: Option<Arc<Money>>,
     inbound: mpsc::Receiver<Inbound>,
     traffic: Arc<Traffic>,
     /// Connected players by slot index.
@@ -713,16 +759,22 @@ impl Players {
     /// Spawns an entity that is not a player (a vehicle, an NPC or an object; ADR 0006) with its info and
     /// kinematics, and returns its id, which snapshots carry from the next tick on. `None` if `info` is a player's,
     /// the position is outside the map, the speed is above the limit, or every slot is taken. The server's scripts and admin commands spawn
-    /// through this; who simulates the entity is decided by its ownership (SRV-14).
+    /// through this; who simulates the entity is decided by its ownership (SRV-14). With
+    /// [`MovementRules::report_only`] a state outside the movement rules is spawned anyway and counted
+    /// ([`Traffic::reported_spawns`]).
     pub fn spawn(&mut self, info: Info, state: ClientState) -> Option<u32> {
+        if info.kind == EntityKind::Player {
+            return None;
+        }
         // The spawn is the first accepted state, so an owner's first state is checked against it.
         let mut moves = Movement::new();
-        if info.kind == EntityKind::Player
-            || moves
-                .check(&self.movement, &state, std::time::Instant::now())
-                .is_err()
-        {
-            return None;
+        let now = std::time::Instant::now();
+        if moves.check(&self.movement, &state, now).is_err() {
+            if !self.movement.report_only {
+                return None;
+            }
+            self.traffic.reported_spawns.fetch_add(1, Ordering::Relaxed);
+            moves.accept(&self.movement, &state, now);
         }
         let [x, y, _] = state.position.to_metres();
         let slot = self.slots.alloc()?;
@@ -895,11 +947,15 @@ impl Players {
                     sender,
                     events,
                     inbox,
+                    wallet,
                 } => {
                     let Some(slot) = self.slots.alloc() else {
                         sender.close();
                         continue;
                     };
+                    if let (Some(money), Some(wallet)) = (&self.money, wallet) {
+                        money.register(slot.wire_id(), wallet);
+                    }
                     let tick_hz =
                         (std::time::Duration::from_secs(1).as_nanos() / info.dt.as_nanos().max(1)) as u16;
                     let _ = events.try_send(event_packet(
@@ -936,6 +992,9 @@ impl Players {
                     let Some(slot) = self.by_connection.remove(&id) else {
                         continue;
                     };
+                    if let Some(money) = &self.money {
+                        money.unregister(slot.wire_id());
+                    }
                     let index = slot.index as usize;
                     if let Some(entity) = self.players[index].take().and_then(|p| p.entity) {
                         let _ = world.despawn(entity);
@@ -1040,7 +1099,8 @@ impl Players {
 
     /// Takes one owned-entity state from the player in slot `player` if it owns the entity with that epoch, the
     /// state passes the movement checks and the entity stays within the keep radius of the player (ADR 0006,
-    /// section 4). Its block is merged by [`crate::owned`]'s rules.
+    /// section 4). Its block is merged by [`crate::owned`]'s rules. With [`MovementRules::report_only`] a state that
+    /// breaks the movement checks is counted and applied; the ownership and keep-radius checks still hold.
     fn apply_owned(&mut self, player: u32, o: &OwnedState, tick: u32, now: std::time::Instant) {
         let slot = o.id >> 16;
         let index = slot as usize;
@@ -1068,7 +1128,10 @@ impl Players {
             self.traffic
                 .refused_owned_movement
                 .fetch_add(1, Ordering::Relaxed);
-            return;
+            if !self.movement.report_only {
+                return;
+            }
+            self.entity_moves[index].accept(&self.movement, &o.state, now);
         }
         self.states[index] = Some(EntityState {
             id: o.id,
