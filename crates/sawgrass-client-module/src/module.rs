@@ -33,6 +33,8 @@ pub trait NetCore {
 pub enum WorldError {
     UnknownAsset(AssetId),
     UnknownEntity(NetId),
+    /// The game has no local player ped yet.
+    NoLocalPlayer,
     Bind(BindError),
     Game(GameError),
 }
@@ -90,6 +92,12 @@ impl World<'_> {
 
     pub fn local_player_pose(&self) -> Option<Pose> {
         self.game.pose(self.game.local_player()?)
+    }
+
+    /// Moves the local player, to apply a correction from the server.
+    pub fn set_local_player_pose(&mut self, pose: Pose) -> Result<(), WorldError> {
+        let handle = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
+        self.game.set_pose(handle, pose).map_err(WorldError::Game)
     }
 
     pub fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
