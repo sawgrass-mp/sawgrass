@@ -93,14 +93,16 @@ STEPS = (
      "difficulty": "very hard",
      "why": "The hardest part: an undocumented game on a young runtime, functions found by pattern per runtime "
             "and game version, everything can change with a game or runtime update",
-     "covers": "Runtime adapter for the first of VIctory or XCL to reach a world, module loading (an API proposed "
-               "upstream), hooks, the real GameApi, the second runtime's adapter later",
+     "covers": "VIctory adapter with module loading through an API proposed upstream; game functions found per "
+               "build; hooks for the frame, peds, vehicles, input, camera and streaming; single-player systems "
+               "turned off; the real GameApi; XCL's adapter later",
      "gate": "Starts when the game runs on PC through VIctory or XCL with a controllable character"},
     {"name": "Sync in the game", "short": "Sync", "stage": 3, "state": "waiting", "difficulty": "very hard",
-     "why": "Game physics and animation the server does not own: prediction, interpolation and damage must look "
-            "right at 4096 players",
-     "covers": "Sync of players, vehicles and damage with prediction and interpolation, in-game UI and chat, "
-               "client scripts, voice in the game; runtime-independent parts can start earlier over the fake GameApi",
+     "why": "Game physics and animation the server does not own; animations and ped tasks are the largest piece "
+            "of work",
+     "covers": "Interpolation and prediction of players, animations and ped tasks, vehicles with owners, weapons "
+               "and damage decided by the server, world state, NPCs, in-game UI, client scripts, voice; the server "
+               "side and the code over the fake GameApi can start before the game",
      "gate": "Players see each other move, drive and fight in one world"},
     {"name": "Launcher and releases", "short": "Launcher", "stage": 4, "areas": ("LAUNCH",), "difficulty": "medium",
      "why": "Known technology (Tauri, signing, updates), but a security boundary on every player's machine",
@@ -169,7 +171,7 @@ def steps_for(plan):
         last = max(i for i, s in enumerate(steps) if "phase" in s)
         steps.insert(last + 1, {"name": f"Plan phase {phase}", "short": f"Phase {phase}",
                                 "stage": steps[last]["stage"], "phase": phase,
-                                "covers": "See docs/implementation-plan.md"})
+                                "covers": "See docs/implementation-plan.md", "generated": True})
     return steps
 
 
@@ -347,6 +349,11 @@ def where_in_roadmap(step):
     return text + (f"; plan phase {step['phase']}" if "phase" in step else "")
 
 
+def roadmap_anchor(i, step):
+    """GitHub's anchor for the step's `### N. Name` heading in docs/roadmap.md."""
+    return re.sub(r"[^a-z0-9 -]", "", f"{i + 1}. {step['name']}".lower()).replace(" ", "-")
+
+
 def difficulty_cell(step):
     if "difficulty" not in step:
         return "—"
@@ -372,7 +379,8 @@ def render_markdown(tasks, repo, plan=None):
         f"({where_in_roadmap(step)}): {text}. "
         "A step is done when its last task is merged, so the marker follows `main`, not the plans. "
         "Difficulty is the maintainers' estimate of risk and unknowns, not of size: the hardest part starts with "
-        "the client in the game.",
+        "the client in the game. Each step's work, dependencies and risks are in "
+        "[docs/roadmap.md](docs/roadmap.md#steps-in-detail).",
         "",
         "| | Step | What it covers | Gate | Difficulty | Tasks |",
         "|---|---|---|---|---|---|",
@@ -383,6 +391,8 @@ def render_markdown(tasks, repo, plan=None):
         if own and len(own) <= LIST_LIMIT and s.get("state") is None:
             detail += ": " + " · ".join(f"{ICON[t['status']]} {task_link(t, repo)}" for t in own)
         name = f"**{i + 1}. {s['name']}**"
+        if not s.get("generated"):
+            name = f"[{name}](docs/roadmap.md#{roadmap_anchor(i, s)})"
         lines.append(f"| {icons[key]} | {name}<br><sub>{stage_label(s)}</sub> | {s['covers']} | "
                      f"{s.get('gate', '—')} | {difficulty_cell(s)} | {detail} |")
     track = [t for t in tasks if t["step"] is None and track_of(t) == TRACK["name"]]

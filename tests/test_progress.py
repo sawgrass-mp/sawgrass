@@ -210,6 +210,14 @@ class Marker(unittest.TestCase):
         svg = progress.render_svg(self.tasks(), self.plan)
         self.assertEqual(svg.count('class="d"'), len(progress.STEPS))
 
+    def test_every_step_links_to_its_roadmap_section(self):
+        import re
+        roadmap = open(os.path.join(progress.ROOT, progress.ROADMAP), encoding="utf-8").read()
+        headings = {re.sub(r"[^a-z0-9 -]", "", h.lower()).replace(" ", "-")
+                    for h in re.findall(r"^### (.+)$", roadmap, re.M)}
+        for i, step in enumerate(progress.STEPS):
+            self.assertIn(progress.roadmap_anchor(i, step), headings, step["name"])
+
     def test_waiting_step(self):
         rows = progress.step_rows(self.tasks(), self.plan)
         client = next(r for r in rows if r[0]["name"] == "Client module in the game")
