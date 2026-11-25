@@ -301,9 +301,48 @@ mod game_payloads {
         let mut buf = [0; ClientState::SIZE + 1];
         assert_eq!(client.encode(&mut buf), Ok(19));
         assert_eq!(ClientState::decode(&buf[..19]), Ok(client));
-        assert_eq!(ClientState::decode(&buf), Err(DecodeError::TrailingBytes));
+        // A byte after the state starts a ped block, and a block of no fields is not one.
+        assert_eq!(ClientState::decode(&buf), Err(DecodeError::OutOfRange));
         assert_eq!(ClientState::decode(&buf[..18]), Err(DecodeError::Truncated));
         assert_eq!(client.encode(&mut [0; 18]), Err(EncodeError::BufferTooSmall));
+    }
+
+    #[test]
+    fn client_state_carries_the_ped_block() {
+        use crate::entity::AssetId;
+        use crate::ped::{Motion, PedBlock};
+        let s = state(1);
+        let client = ClientState {
+            position: s.position,
+            velocity: s.velocity,
+            rotation: s.rotation,
+        };
+        let ped = PedBlock {
+            motion: Motion::Sprint,
+            flags: PedBlock::AIMING,
+            weapon: AssetId(u32::MAX),
+            aim_pitch: 128,
+            ..PedBlock::default()
+        };
+        let mut payload = Vec::new();
+        client.encode_with_ped(&ped, &mut payload).expect("encode");
+        assert_eq!(ClientState::decode_with_ped(&payload), Ok((client, Some(ped))));
+        assert_eq!(ClientState::decode(&payload), Ok(client));
+        assert_eq!(ClientState::decode_with_ped(&payload[..19]), Ok((client, None)));
+        // Cut short, followed by more bytes, or claiming more fields than a block holds.
+        let n = payload.len();
+        assert_eq!(
+            ClientState::decode(&payload[..n - 1]),
+            Err(DecodeError::Truncated)
+        );
+        let mut longer = payload.clone();
+        longer.push(0);
+        assert_eq!(ClientState::decode(&longer), Err(DecodeError::TrailingBytes));
+        let mut many = payload[..19].to_vec();
+        many.push(17);
+        many.extend_from_slice(&[0; 17]);
+        assert_eq!(ClientState::decode(&many), Err(DecodeError::OutOfRange));
+        assert!(n <= game::MAX_DATAGRAM);
     }
 
     #[test]

@@ -237,3 +237,30 @@ fn resources_can_move_to_the_tick_thread() {
     let handle = std::thread::spawn(move || r.dispatch(TICK));
     assert_eq!(handle.join().ok(), Some(Ok(())));
 }
+
+/// One call into a built-in that calls a C function many times, with no loop around it: only a guard that routes
+/// the calls through Luau lets the deadline stop it. Without one the call finishes and returns `Ok`.
+#[test]
+fn built_ins_calling_c_functions_are_stopped_inside_one_call() {
+    let tight = Limits {
+        deadline: Duration::from_millis(1),
+        load_deadline: Duration::from_secs(10),
+        memory: 16 << 20,
+        ..limits()
+    };
+    for op in [
+        "table.sort(t, rawequal)",
+        "table.foreach(t, math.randomseed)",
+        "table.foreachi(t, math.randomseed)",
+    ] {
+        let source = format!(
+            "local t = {{}} for i = 1, 200000 do t[i] = (i * 7919) % 200003 end
+             sawgrass.on('tick', function() {op} end)"
+        );
+        let mut r = match Resource::from_sources("c", &[("main.luau".into(), source)], tight) {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(r.dispatch(TICK), Err(CallError::Deadline), "{op}");
+    }
+}

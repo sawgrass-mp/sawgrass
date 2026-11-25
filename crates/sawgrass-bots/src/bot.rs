@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use sawgrass_gateway::{Datagrams, RootCertStore, connect};
+use sawgrass_gateway::{Connector, Datagrams, RootCertStore, connect};
 use sawgrass_protocol::EntityState;
 use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta};
 use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent};
@@ -19,7 +19,12 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::record::Recorder;
 use crate::stats::Counters;
-use crate::walker::{Area, Walker};
+use crate::walker::{Area, Rng, Walker};
+
+/// The longest pause before a bot's first new connection attempt, doubled after each failure up to [`LAST_RETRY`].
+pub const FIRST_RETRY: Duration = Duration::from_millis(250);
+/// The longest pause between a bot's connection attempts.
+pub const LAST_RETRY: Duration = Duration::from_secs(4);
 
 /// What every bot of a run shares.
 #[derive(Debug, Clone)]
@@ -36,6 +41,13 @@ pub struct BotConfig {
     pub area: Area,
     /// Records the snapshots of the first few bots, if set.
     pub record: Option<Arc<Recorder>>,
+    /// Bots numbered below this decode every snapshot; the others check that a snapshot is whole and its
+    /// baseline is one they acknowledged, then acknowledge it without decoding the entities. The server sees the
+    /// same acknowledgements either way, so its work is the same, and the generator saves most of its CPU.
+    pub decoders: u64,
+    /// Sockets the bots share, bot `i` using socket `i % len`; empty gives every bot its own, as players have.
+    /// Sharing saves the generator a receive loop per bot and leaves the server one connection per bot.
+    pub sockets: Vec<Connector>,
 }
 
 /// What one bot learned from the server, for tests.
@@ -58,19 +70,39 @@ pub async fn run(
     stop: Instant,
     joined: Option<tokio::sync::oneshot::Sender<Joined>>,
 ) {
-    let session = match connect(
-        config.server,
-        &config.server_name,
-        config.roots.clone(),
-        PROTOCOL_VERSION,
-    )
-    .await
-    {
-        Ok(session) => session,
-        Err(e) => {
-            Counters::add(&counters.failed, 1);
-            counters.error(e.to_string());
-            return;
+    // A refused or timed-out attempt is tried again after a growing pause, as a game client does when a server
+    // is busy, until the run's stop. Each pause is drawn between half and all of the step, so bots refused together
+    // do not all come back in the same instant.
+    let mut jitter = Rng::new(!index);
+    let mut step = FIRST_RETRY;
+    let session = loop {
+        let attempt = if config.sockets.is_empty() {
+            connect(
+                config.server,
+                &config.server_name,
+                config.roots.clone(),
+                PROTOCOL_VERSION,
+            )
+            .await
+        } else {
+            let socket = &config.sockets[(index % config.sockets.len() as u64) as usize];
+            socket
+                .connect(config.server, &config.server_name, PROTOCOL_VERSION)
+                .await
+        };
+        match attempt {
+            Ok(session) => break session,
+            Err(e) => {
+                counters.error(e.to_string());
+                let pause = step.mul_f32(jitter.range(0.5, 1.0));
+                if Instant::now() + pause >= stop {
+                    Counters::add(&counters.failed, 1);
+                    return;
+                }
+                Counters::add(&counters.connect_retries, 1);
+                tokio::time::sleep(pause).await;
+                step = (step * 2).min(LAST_RETRY);
+            }
         }
     };
     Counters::add(&counters.connected, 1);
@@ -109,6 +141,7 @@ pub async fn run(
         ack.clone(),
         counters.clone(),
         recorder.map(|r| (r, index)),
+        index < config.decoders,
     ));
     let ended_early = send_states(&config, index, &datagrams, &ack, &counters, stop).await;
     datagrams.close();
@@ -172,6 +205,7 @@ async fn read_snapshots(
     ack: Arc<AtomicU32>,
     counters: Arc<Counters>,
     record: Option<(Arc<Recorder>, u64)>,
+    decode: bool,
 ) {
     let mut reassembler = Reassembler::new();
     let mut kept: Vec<(Option<u32>, Vec<EntityState>)> = vec![(None, Vec::new()); KEPT_TICKS];
@@ -201,11 +235,18 @@ async fn read_snapshots(
             },
             Err(_) => continue,
         };
+        Counters::add(&counters.ticks_seen, 1);
+        if !decode {
+            // Only the tick is kept: a later snapshot against it is checked against the same rule as above.
+            kept[tick as usize % KEPT_TICKS].0 = Some(tick);
+            ack.fetch_max(tick, Ordering::Relaxed);
+            continue;
+        }
         if decode_delta(payload, tick, base, &mut decoded).is_err() {
             continue;
         }
         Counters::add(&counters.received_entities, decoded.len() as u64);
-        Counters::add(&counters.ticks_seen, 1);
+        Counters::add(&counters.decoded_ticks, 1);
         let slot = &mut kept[tick as usize % KEPT_TICKS];
         slot.0 = Some(tick);
         std::mem::swap(&mut slot.1, &mut decoded);

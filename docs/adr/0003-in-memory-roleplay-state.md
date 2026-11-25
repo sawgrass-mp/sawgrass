@@ -1,6 +1,6 @@
 # ADR 0003: Roleplay state in server memory, stored in RocksDB behind one writer
 
-Status: proposed, 2026-11-23
+Status: accepted, 2026-11-25 (proposed 2026-11-23)
 
 ## Context
 

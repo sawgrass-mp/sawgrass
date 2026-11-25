@@ -63,8 +63,10 @@ impl Histogram {
 pub struct Counters {
     /// Bots that finished the handshake.
     pub connected: AtomicU64,
-    /// Bots whose connection attempt failed.
+    /// Bots that could not connect before the run's stop, retries included.
     pub failed: AtomicU64,
+    /// Connection attempts that failed and were tried again, as a game client does.
+    pub connect_retries: AtomicU64,
     /// Bots whose connection ended before the run did.
     pub dropped: AtomicU64,
     /// State datagrams sent.
@@ -79,6 +81,8 @@ pub struct Counters {
     pub received_entities: AtomicU64,
     /// Distinct server ticks each bot saw a snapshot for, summed over bots.
     pub ticks_seen: AtomicU64,
+    /// Of [`Counters::ticks_seen`], the ticks whose snapshot a bot decoded, so entities per tick need no guess.
+    pub decoded_ticks: AtomicU64,
     /// How late each state send ran after its scheduled time. A generator that runs out of CPU sends late.
     pub send_lateness: Histogram,
     /// The latest figures the server reported, if it was started with `--stats-to-clients`.
@@ -112,6 +116,8 @@ pub struct Sample {
     pub connected: u64,
     /// [`Counters::failed`].
     pub failed: u64,
+    /// [`Counters::connect_retries`].
+    pub connect_retries: u64,
     /// [`Counters::dropped`].
     pub dropped: u64,
     /// [`Counters::sent_datagrams`].
@@ -126,6 +132,8 @@ pub struct Sample {
     pub received_entities: u64,
     /// [`Counters::ticks_seen`].
     pub ticks_seen: u64,
+    /// [`Counters::decoded_ticks`].
+    pub decoded_ticks: u64,
     /// [`Counters::send_lateness`].
     pub lateness: [u64; BUCKETS],
     /// CPU time of this process so far.
@@ -141,6 +149,7 @@ impl Counters {
             at,
             connected: load(&self.connected),
             failed: load(&self.failed),
+            connect_retries: load(&self.connect_retries),
             dropped: load(&self.dropped),
             sent_datagrams: load(&self.sent_datagrams),
             sent_bytes: load(&self.sent_bytes),
@@ -148,6 +157,7 @@ impl Counters {
             received_bytes: load(&self.received_bytes),
             received_entities: load(&self.received_entities),
             ticks_seen: load(&self.ticks_seen),
+            decoded_ticks: load(&self.decoded_ticks),
             lateness: self.send_lateness.counts(),
             cpu: crate::cpu::process_time(),
         }
