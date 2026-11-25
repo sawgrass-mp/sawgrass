@@ -7,6 +7,7 @@
 //! through an in-process gateway and sends them snapshots. [`slots`] gives every entity a dense, recycled index.
 //! [`scripts`] runs the Luau resources in the tick.
 
+pub mod combat;
 pub mod cpu;
 pub mod interest;
 pub mod limits;

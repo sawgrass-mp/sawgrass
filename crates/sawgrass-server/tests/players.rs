@@ -1411,3 +1411,173 @@ fn a_player_enters_drives_and_leaves_a_vehicle() {
     assert_eq!(traffic.seats_granted.load(Ordering::Relaxed), granted);
     assert_eq!(lock(&players).seat_of(me), None);
 }
+
+/// SRV-16, ADR 0006 section 5: the server applies a hit only from a live shooter holding the weapon, at the fire
+/// rate, against a recent tick, and where the target was; the damage is its own, down to death.
+#[test]
+fn a_checked_hit_damages_and_kills() {
+    use sawgrass_protocol::combat::{Hit, Shot, Zone};
+    use sawgrass_protocol::entity::AssetId;
+    use sawgrass_protocol::entity::{EntityKind, Info};
+    use sawgrass_protocol::game::ClientEvent;
+    use sawgrass_protocol::ped::{Motion, PedBlock};
+    use sawgrass_protocol::vehicle::VehicleBlock;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let traffic = players.traffic();
+    let players = Arc::new(Mutex::new(players));
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let join = |tick_loop: &mut TickLoop| {
+        let mut session = runtime
+            .block_on(connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION))
+            .expect("connects");
+        let id = std::thread::scope(|scope| {
+            let id = scope.spawn(|| runtime.block_on(joined(&mut session)));
+            tick_until(tick_loop, |_| id.is_finished());
+            id.join().expect("joined")
+        });
+        (session, id)
+    };
+    let (mut a, _) = join(&mut tick_loop);
+    let (b, id_b) = join(&mut tick_loop);
+    let at = |x: f32| Position::from_metres([x, 5.0, 30.0]).expect("position");
+    let gun = AssetId(9);
+    let send = |session: &Session, x: f32, weapon: AssetId| {
+        let state = ClientState {
+            position: at(x),
+            velocity: Velocity::from_metres_per_second([0.0; 3]).expect("velocity"),
+            rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+        };
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::ClientState,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        let ped = PedBlock {
+            weapon,
+            ..PedBlock::default()
+        };
+        state.encode_with_ped(&ped, &mut packet).expect("state");
+        session.send_datagram(Bytes::from(packet)).expect("send");
+    };
+    fn lock(players: &Mutex<net::Players>) -> std::sync::MutexGuard<'_, net::Players> {
+        players.lock().expect("players")
+    }
+    let b_ped = |players: &Mutex<net::Players>| {
+        let (info, _) = lock(players).entity(id_b).expect("b");
+        PedBlock::from_fields(info.fields()).expect("block")
+    };
+    send(&a, 10.0, gun);
+    send(&b, 20.0, AssetId::NONE);
+    assert!(tick_until(&mut tick_loop, |_| lock(&players)
+        .entity(id_b)
+        .is_some()));
+    // B drives a car parked a metre from it, so its death must also end its seat and its hold on the car.
+    let info =
+        Info::with_fields(EntityKind::Vehicle, AssetId(3), &VehicleBlock::INTACT.to_fields()).expect("info");
+    let car_state = ClientState {
+        position: at(21.0),
+        velocity: Velocity::from_metres_per_second([0.0; 3]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let car = lock(&players).spawn(info, car_state).expect("spawned");
+    let mut enter = vec![0; PacketHeader::SIZE];
+    PacketHeader {
+        kind: PacketKind::Event,
+        sequence: 0,
+        tick: 0,
+    }
+    .encode(&mut enter)
+    .expect("header");
+    ClientEvent::EnterSeat {
+        vehicle: car,
+        seat: 0,
+    }
+    .encode(&mut enter);
+    let mut b = b;
+    runtime.block_on(b.send_event(&enter)).expect("send");
+    assert!(tick_until(&mut tick_loop, |_| lock(&players)
+        .seat_of(id_b)
+        .is_some()));
+    // Far enough into the game that a shot can name a tick past the rewind limit.
+    while lock(&players).tick() < 20 {
+        tick_loop.run_tick();
+    }
+    let mut fire = |tick_loop: &mut TickLoop,
+                    weapon: AssetId,
+                    ago: u32,
+                    from: f32,
+                    point: f32,
+                    zone: Zone,
+                    hits: usize| {
+        // Past the fire interval of the last shot.
+        std::thread::sleep(Duration::from_millis(80));
+        let tick = lock(&players).tick() - ago;
+        let mut shot = Shot::new(tick, weapon, at(from));
+        for _ in 0..hits {
+            assert!(shot.push(Hit {
+                target: id_b,
+                zone,
+                point: at(point),
+            }));
+        }
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::Event,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        ClientEvent::Shot(Box::new(shot)).encode(&mut packet);
+        runtime.block_on(a.send_event(&packet)).expect("send");
+        let seen = traffic.shots_received.load(Ordering::Relaxed) + 1;
+        assert!(wait_for(&traffic.shots_received, seen, || {
+            tick_loop.run_tick();
+        }));
+        tick_loop.run_tick();
+    };
+    // A torso hit where B was a tick ago: 25 points.
+    fire(&mut tick_loop, gun, 1, 10.0, 20.3, Zone::Torso, 1);
+    assert_eq!(traffic.hits_accepted.load(Ordering::Relaxed), 1);
+    assert_eq!(b_ped(&players).health, 75);
+    // A weapon A does not hold, a tick past the rewind limit, and a shot from 10 m off where A is: refused whole.
+    fire(&mut tick_loop, AssetId(8), 1, 10.0, 20.0, Zone::Torso, 1);
+    fire(&mut tick_loop, gun, 10, 10.0, 20.0, Zone::Torso, 1);
+    fire(&mut tick_loop, gun, 1, 0.0, 20.0, Zone::Torso, 1);
+    assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), 3);
+    // More hits than the weapon has pellets: sixteen head hits from one pull of the trigger are refused whole.
+    fire(&mut tick_loop, gun, 1, 10.0, 20.0, Zone::Head, 16);
+    assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), 4);
+    assert_eq!(b_ped(&players).health, 75);
+    // A hit point 5 m from where B was: that hit is refused.
+    fire(&mut tick_loop, gun, 1, 10.0, 25.0, Zone::Torso, 1);
+    assert_eq!(traffic.hits_refused.load(Ordering::Relaxed), 1);
+    assert_eq!(b_ped(&players).health, 75);
+    // A head hit is 100 points: B is dead, and stays dead whatever its client says.
+    fire(&mut tick_loop, gun, 1, 10.0, 20.0, Zone::Head, 1);
+    assert_eq!(
+        (b_ped(&players).health, b_ped(&players).motion),
+        (0, Motion::Dead)
+    );
+    assert_eq!(lock(&players).seat_of(id_b), None);
+    send(&b, 20.0, AssetId::NONE);
+    for _ in 0..3 {
+        tick_loop.run_tick();
+    }
+    assert_eq!(b_ped(&players).motion, Motion::Dead);
+}
