@@ -56,7 +56,7 @@ use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
-use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
+use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
 use crate::movement::{Movement, MovementRules, Violation};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
@@ -90,6 +90,12 @@ const EVENT_QUEUE: usize = 16 + 2 * OWNERSHIP_CAP as usize;
 /// Most lost ownership events kept to be sent again; beyond it they are only counted. Well above what one tick's
 /// changes of owner can lose.
 const MAX_OWNER_RETRIES: usize = 4096;
+
+/// Whether an owned entity at `entity` is within `radius` of its owner at `owner`: on the ground plane, as
+/// `Ownership` measures the keep radius, so an entity it keeps is never one whose every state is refused.
+fn within_keep(owner: [f32; 3], entity: [f32; 2], radius: f32) -> bool {
+    (entity[0] - owner[0]).powi(2) + (entity[1] - owner[1]).powi(2) <= radius * radius
+}
 
 /// Whether a lost ownership event for `player` still says what is true: "yours" while it owns the spawned entity
 /// with `epoch` (`owner` as [`Ownership::owner`] gives it), "not yours" while it does not own it.
@@ -363,7 +369,7 @@ pub fn listen_recorded(gateway: Gateway, config: ListenConfig, recorder: Option<
         players: Vec::new(),
         slots: Slots::new(),
         by_connection: std::collections::HashMap::new(),
-        grid: DenseGrid::default(),
+        grid: DenseGrid::new(config.movement.bounds, DENSE_CELL_SIZE),
         visibility: VisibilityConfig::default(),
         movement: config.movement,
         pool: (config.tick_threads > 1)
@@ -975,19 +981,24 @@ impl Players {
                     Violation::Teleport => &self.traffic.refused_teleport,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
-                // Nothing to send before the first accepted state: the player is not in the world yet.
-                let held = self.states.get(player.slot.index as usize).copied().flatten();
-                let due = player
-                    .corrected_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= CORRECTION_INTERVAL);
-                if let (Some(held), true) = (held, due) {
-                    player.corrected_at = Some(now);
-                    let packet = event_packet(&ServerEvent::Corrected(held), u64::from(tick));
-                    if player.events.try_send(packet).is_ok() {
-                        self.traffic.corrections.fetch_add(1, Ordering::Relaxed);
+                if rules.report_only {
+                    // Counted, then taken as if it had passed: no correction.
+                    player.movement.accept(rules, &state, now);
+                } else {
+                    // Nothing to send before the first accepted state: the player is not in the world yet.
+                    let held = self.states.get(player.slot.index as usize).copied().flatten();
+                    let due = player
+                        .corrected_at
+                        .is_none_or(|at| now.saturating_duration_since(at) >= CORRECTION_INTERVAL);
+                    if let (Some(held), true) = (held, due) {
+                        player.corrected_at = Some(now);
+                        let packet = event_packet(&ServerEvent::Corrected(held), u64::from(tick));
+                        if player.events.try_send(packet).is_ok() {
+                            self.traffic.corrections.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
             let id = player.slot.wire_id();
             match player.entity {
@@ -1039,17 +1050,13 @@ impl Players {
             self.traffic.refused_owned_stale.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let [x, y, z] = o.state.position.to_metres();
+        let [x, y, _] = o.state.position.to_metres();
         let near = self
             .states
             .get(player as usize)
             .copied()
             .flatten()
-            .is_some_and(|p| {
-                let [px, py, pz] = p.position.to_metres();
-                let r = self.ownership_rules.keep_radius;
-                (x - px).powi(2) + (y - py).powi(2) + (z - pz).powi(2) <= r * r
-            });
+            .is_some_and(|p| within_keep(p.position.to_metres(), [x, y], self.ownership_rules.keep_radius));
         if !near {
             self.traffic.refused_owned_far.fetch_add(1, Ordering::Relaxed);
             return;
@@ -1216,6 +1223,14 @@ mod tests {
 
     /// A lost "yours" is sent again only while the player still owns the entity with that epoch; a lost "not
     /// yours" only while it does not own it (again).
+    /// The keep radius ignores height, as in `Ownership`: an entity high above its owner is still near.
+    #[test]
+    fn the_keep_radius_is_measured_on_the_ground_plane() {
+        assert!(within_keep([0.0, 0.0, 0.0], [100.0, 100.0], 150.0));
+        assert!(within_keep([0.0, 0.0, 500.0], [0.0, 10.0], 150.0));
+        assert!(!within_keep([0.0, 0.0, 0.0], [120.0, 120.0], 150.0));
+    }
+
     #[test]
     fn a_lost_ownership_event_is_retried_only_while_it_holds() {
         assert!(still_holds(Some((Some(3), 5)), true, 3, 5, true));

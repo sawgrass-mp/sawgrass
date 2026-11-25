@@ -28,7 +28,7 @@ mod client;
 
 pub use client::{Client, ClientConfig};
 
-use sawgrass_protocol::game::ClientState;
+use sawgrass_protocol::game::{ClientState, OwnedState};
 use sawgrass_protocol::{EncodeError, EntityState, Position, Rotation, Velocity};
 
 /// An entity's position, velocity and rotation in game units: metres, metres per second and a unit quaternion
@@ -71,6 +71,13 @@ impl Pose {
             velocity: Velocity::from_metres_per_second(self.velocity)?,
             rotation: Rotation::from_quaternion(self.rotation)?,
         })
+    }
+
+    /// The quantized state of entity `id`, simulated by this client under ownership `epoch`, with its block
+    /// `fields` (a vehicle block for a vehicle, a ped block for an NPC). Fails for a value outside the wire ranges or
+    /// more than `MAX_FIELDS` fields.
+    pub fn to_owned_state(&self, id: u32, epoch: u8, fields: &[u32]) -> Result<OwnedState, EncodeError> {
+        OwnedState::new(id, epoch, self.to_client_state()?, fields)
     }
 }
 
