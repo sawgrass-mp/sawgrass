@@ -15,6 +15,7 @@ pub mod movement;
 pub mod net;
 pub mod owned;
 pub mod ownership;
+pub mod recording;
 pub mod scripts;
 pub mod slots;
 pub mod snapshot;

@@ -10,6 +10,7 @@ pub mod entity;
 pub mod game;
 pub mod ped;
 pub mod quant;
+pub mod recording;
 pub mod vehicle;
 
 use std::fmt;
