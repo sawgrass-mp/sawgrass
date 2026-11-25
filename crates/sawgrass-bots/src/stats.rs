@@ -83,6 +83,12 @@ pub struct Counters {
     pub ticks_seen: AtomicU64,
     /// Of [`Counters::ticks_seen`], the ticks whose snapshot a bot decoded, so entities per tick need no guess.
     pub decoded_ticks: AtomicU64,
+    /// Seat requests sent by driving bots, entering and leaving (BOT-5).
+    pub seat_requests: AtomicU64,
+    /// Vehicle states sent by driving bots.
+    pub owned_states_sent: AtomicU64,
+    /// Shots sent by shooting bots.
+    pub shots_sent: AtomicU64,
     /// How late each state send ran after its scheduled time. A generator that runs out of CPU sends late.
     pub send_lateness: Histogram,
     /// Payments sent to other bots (BOT-7).

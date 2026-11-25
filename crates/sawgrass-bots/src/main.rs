@@ -30,8 +30,8 @@ const USAGE: &str = "usage:
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
                     [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
                     [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]
-                    [--decoders N] [--sockets N] [--pay-every SECS]
-                    [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]
+                    [--decoders N] [--sockets N] [--pay-every SECS] [--drivers N] [--shooters N]
+                    [--shot-hz N] [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]
   sawgrass-bots replay --file FILE --server ADDR --cert FILE [--name NAME] [--speed X]";
 
 struct RunArgs {
@@ -51,6 +51,9 @@ struct RunArgs {
     decoders: u64,
     sockets: usize,
     pay_every: Option<Duration>,
+    drivers: u64,
+    shooters: u64,
+    shot_hz: u32,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, value: Option<String>) -> Result<T, String>
@@ -82,6 +85,9 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
         decoders: u64::MAX,
         sockets: 0,
         pay_every: None,
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 2,
     };
     while let Some(flag) = args.next() {
         let value = args.next();
@@ -105,6 +111,9 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--pay-every" => {
                 run.pay_every = Some(Duration::from_secs_f64(parse::<f64>(&flag, value)?.max(0.01)))
             }
+            "--drivers" => run.drivers = parse(&flag, value)?,
+            "--shooters" => run.shooters = parse(&flag, value)?,
+            "--shot-hz" => run.shot_hz = parse::<u32>(&flag, value)?.clamp(1, 15),
             "--misbehave" => run.misbehave = misbehave::parse(&value.ok_or("--misbehave needs a value")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -215,6 +224,9 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         sockets,
         pay_every: args.pay_every,
         payees: Arc::default(),
+        drivers: args.drivers,
+        shooters: args.shooters,
+        shot_hz: args.shot_hz,
     });
     let counters = Arc::new(Counters::default());
     let ctx = Context {
@@ -295,6 +307,18 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         println!("first connection error: {error}");
     }
     print!("{}", misbehaving.render(&args.misbehave));
+    if args.drivers > 0 || args.shooters > 0 {
+        let load = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "actions: {} drivers sent {} seat requests and {} vehicle states, {} shooters sent {} shots \
+             (the server's log has seats granted and refused, hits accepted and refused)",
+            args.drivers.min(args.count),
+            load(&counters.seat_requests),
+            load(&counters.owned_states_sent),
+            args.shooters.min(args.count),
+            load(&counters.shots_sent)
+        );
+    }
     let _ = tokio::time::timeout(Duration::from_secs(5), spawner).await;
     if let (Some(recorder), Some(path)) = (&record, &args.record) {
         recorder.flush().map_err(|e| format!("{}: {e}", path.display()))?;
