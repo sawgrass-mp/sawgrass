@@ -47,17 +47,20 @@ use hecs::{Entity, World};
 use rayon::prelude::*;
 use sawgrass_gateway::{Datagrams, Gateway, Session};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+use sawgrass_protocol::game::OwnedState;
 use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
+use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use sawgrass_store::WalletId;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
-use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
+use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
 use crate::money::Money;
 use crate::movement::{Movement, MovementRules, Violation};
+use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
 use crate::ownership::{Change, Ownership, OwnershipRules};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
@@ -84,6 +87,26 @@ pub struct PlayerState(pub ClientState);
 /// `Stats` every few seconds, so a client that reads its stream never comes near it.
 const EVENT_QUEUE: usize = 16 + 2 * OWNERSHIP_CAP as usize;
 
+/// Most lost ownership events kept to be sent again; beyond it they are only counted. Well above what one tick's
+/// changes of owner can lose.
+const MAX_OWNER_RETRIES: usize = 4096;
+
+/// Whether an owned entity at `entity` is within `radius` of its owner at `owner`: on the ground plane, as
+/// `Ownership` measures the keep radius, so an entity it keeps is never one whose every state is refused.
+fn within_keep(owner: [f32; 3], entity: [f32; 2], radius: f32) -> bool {
+    (entity[0] - owner[0]).powi(2) + (entity[1] - owner[1]).powi(2) <= radius * radius
+}
+
+/// Whether a lost ownership event for `player` still says what is true: "yours" while it owns the spawned entity
+/// with `epoch` (`owner` as [`Ownership::owner`] gives it), "not yours" while it does not own it.
+fn still_holds(owner: Option<(Option<u32>, u8)>, spawned: bool, player: u32, epoch: u8, yours: bool) -> bool {
+    if yours {
+        spawned && owner == Some((Some(player), epoch))
+    } else {
+        owner.is_none_or(|(o, _)| o != Some(player))
+    }
+}
+
 /// Most entities one player owns: [`OwnershipRules::cap`]'s default. A player may gain and lose that many in one
 /// evaluation cycle, so the event queue leaves room for both.
 const OWNERSHIP_CAP: u16 = 24;
@@ -103,10 +126,18 @@ struct Batch {
     packets: Vec<(u32, Bytes)>,
 }
 
+/// The latest client state of a player: its own state, ped block and the states of what it simulates.
+#[derive(Debug, Default)]
+struct Pending {
+    state: Option<ClientState>,
+    ped: Option<PedBlock>,
+    owned: Vec<OwnedState>,
+}
+
 /// What one player's connection tasks leave for the tick thread. Each field holds the latest value only.
 #[derive(Debug, Default)]
 struct Inbox {
-    state: Mutex<Option<(ClientState, Option<PedBlock>)>>,
+    state: Mutex<Option<Pending>>,
     wants_stats: AtomicBool,
     /// The newest snapshot tick the client decoded completely, from the tick field of its client states' headers
     /// (0: none). The server uses it as the delta baseline only if it sent that tick to this player.
@@ -178,6 +209,15 @@ pub struct Traffic {
     /// Ownership events not sent because the player's event queue was full: that client's view of what it owns
     /// is stale until the next change. Should stay 0.
     pub lost_owner_events: AtomicU64,
+    /// Owned-entity states dropped because the sender does not own the entity, or not with that epoch.
+    pub refused_owned_stale: AtomicU64,
+    /// Owned-entity states refused by the movement checks (with [`MovementRules::report_only`]: that broke them and
+    /// were applied anyway).
+    pub refused_owned_movement: AtomicU64,
+    /// Spawns whose state broke the movement checks and were made anyway, because the rules only report.
+    pub reported_spawns: AtomicU64,
+    /// Owned-entity states refused because the entity is beyond the keep radius of its owner.
+    pub refused_owned_far: AtomicU64,
     /// Connections closed for a sustained flood of datagrams or events.
     pub closed_floods: AtomicU64,
     /// Connections closed for an event that is not a known [`ClientEvent`].
@@ -330,7 +370,7 @@ pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<A
         players: Vec::new(),
         slots: Slots::new(),
         by_connection: std::collections::HashMap::new(),
-        grid: DenseGrid::default(),
+        grid: DenseGrid::new(config.movement.bounds, DENSE_CELL_SIZE),
         visibility: VisibilityConfig::default(),
         movement: config.movement,
         pool: (config.tick_threads > 1)
@@ -346,11 +386,17 @@ pub fn listen_with_money(gateway: Gateway, config: ListenConfig, money: Option<A
         peds: Vec::new(),
         spawned: Vec::new(),
         ownership: Ownership::new(),
+        entity_moves: Vec::new(),
+        budgets: Vec::new(),
+        property: Vec::new(),
+        owned_by: Vec::new(),
+        owned_pool: Vec::new(),
         ownership_rules: OwnershipRules {
             cap: OWNERSHIP_CAP,
             ..OwnershipRules::default()
         },
         owner_changes: Vec::new(),
+        owner_retries: Vec::new(),
         tick: 0,
         infos: Vec::new(),
         info_ticks: Vec::new(),
@@ -476,6 +522,7 @@ async fn serve(
         }
     });
     let mut bucket = Bucket::for_states(&limits, Instant::now());
+    let mut owned = Vec::new();
     while let Ok((header, packet)) = datagrams.recv().await {
         traffic
             .received_bytes
@@ -494,10 +541,14 @@ async fn serve(
         if header.kind != PacketKind::ClientState {
             continue;
         }
-        if let Ok(state) = ClientState::decode_with_ped(&packet[PacketHeader::SIZE..])
+        if let Ok((state, ped)) = ClientState::decode_with_owned(&packet[PacketHeader::SIZE..], &mut owned)
             && let Ok(mut slot) = inbox.state.lock()
         {
-            *slot = Some(state);
+            let pending = slot.get_or_insert_with(Pending::default);
+            pending.state = Some(state);
+            pending.ped = ped;
+            // The tick thread's list comes back here next time, so neither side allocates per datagram.
+            std::mem::swap(&mut pending.owned, &mut owned);
             // The newest acknowledgement wins: a reordered datagram does not move it back.
             inbox.ack.fetch_max(header.tick, Ordering::Relaxed);
         }
@@ -578,9 +629,20 @@ pub struct Players {
     spawned: Vec<bool>,
     /// Who simulates each spawned entity.
     ownership: Ownership,
+    /// Each spawned entity's movement checks, its owners' damage budget, and whether it belongs to a player as
+    /// property, by slot.
+    entity_moves: Vec<Movement>,
+    budgets: Vec<DamageBudget>,
+    property: Vec<bool>,
+    /// This tick's owned-entity states, by the player slot that sent them, and emptied lists to reuse.
+    owned_by: Vec<(u32, Vec<OwnedState>)>,
+    owned_pool: Vec<Vec<OwnedState>>,
     ownership_rules: OwnershipRules,
     /// This tick's changes of owner, to tell the players about.
     owner_changes: Vec<Change>,
+    /// Ownership events that found the player's event queue full, as (player slot, entity id, epoch, yours): sent
+    /// again each tick while they still hold, so a lost event does not leave an entity without its simulator.
+    owner_retries: Vec<(u32, u32, u8, bool)>,
     /// The tick being run, or the last one run.
     tick: u32,
     /// The info each slot sends, built from `peds`, and the tick it last changed at.
@@ -655,16 +717,31 @@ impl Players {
             self.peds.resize(index + 1, PedBlock::default());
             self.infos.resize(index + 1, Info::PLAYER);
             self.info_ticks.resize(index + 1, 0);
+            self.entity_moves.resize_with(index + 1, Movement::new);
+            self.budgets.resize(index + 1, DamageBudget::default());
+            self.property.resize(index + 1, false);
         }
     }
 
     /// Spawns an entity that is not a player (a vehicle, an NPC or an object; ADR 0006) with its info and
     /// kinematics, and returns its id, which snapshots carry from the next tick on. `None` if `info` is a player's,
-    /// the position is outside the map, or every slot is taken. The server's scripts and admin commands spawn
-    /// through this; who simulates the entity is decided by its ownership (SRV-14).
+    /// the position is outside the map, the speed is above the limit, or every slot is taken. The server's scripts and admin commands spawn
+    /// through this; who simulates the entity is decided by its ownership (SRV-14). With
+    /// [`MovementRules::report_only`] a state outside the movement rules is spawned anyway and counted
+    /// ([`Traffic::reported_spawns`]).
     pub fn spawn(&mut self, info: Info, state: ClientState) -> Option<u32> {
-        if info.kind == EntityKind::Player || !self.movement.contains(&state) {
+        if info.kind == EntityKind::Player {
             return None;
+        }
+        // The spawn is the first accepted state, so an owner's first state is checked against it.
+        let mut moves = Movement::new();
+        let now = std::time::Instant::now();
+        if moves.check(&self.movement, &state, now).is_err() {
+            if !self.movement.report_only {
+                return None;
+            }
+            self.traffic.reported_spawns.fetch_add(1, Ordering::Relaxed);
+            moves.accept(&self.movement, &state, now);
         }
         let [x, y, _] = state.position.to_metres();
         let slot = self.slots.alloc()?;
@@ -683,6 +760,9 @@ impl Players {
         self.spawned.resize(self.spawned.len().max(index + 1), false);
         self.spawned[index] = true;
         self.ownership.track(slot.index);
+        self.entity_moves[index] = moves;
+        self.budgets[index] = DamageBudget::default();
+        self.property[index] = false;
         Some(id)
     }
 
@@ -707,6 +787,16 @@ impl Players {
         self.slots.free(slot)
     }
 
+    /// Marks a spawned vehicle as belonging to a player as property, or to nobody: an owner's damage values are
+    /// then ignored for it (ADR 0006, section 5). Returns `false` for an id that is not a spawned entity.
+    pub fn set_property(&mut self, id: u32, belongs_to_a_player: bool) -> bool {
+        if self.spawned(id).is_none() {
+            return false;
+        }
+        self.property[(id >> 16) as usize] = belongs_to_a_player;
+        true
+    }
+
     /// The info and state of an entity [`Players::spawn`] made.
     #[must_use]
     pub fn spawned(&self, id: u32) -> Option<(Info, EntityState)> {
@@ -720,6 +810,7 @@ impl Players {
         self.apply_inbound(world, info);
         self.apply_states(world, info.tick as u32);
         self.grid.rebuild();
+        self.retry_owner_events();
         self.assign_owners();
         self.send_snapshots(info.tick as u32);
         // Every visible set has been recomputed without the players who left: their slots may be reused.
@@ -780,17 +871,39 @@ impl Players {
     }
 
     /// Sends the player in slot `player`, if any, the ownership event for `entity`.
-    fn tell_owner(&self, player: Option<u32>, entity: u32, epoch: u8, yours: bool) {
-        let Some(Some(p)) = player.and_then(|s| self.players.get(s as usize)) else {
-            return;
+    /// A lost one is counted and kept to be sent again (see [`Players::retry_owner_events`]).
+    fn tell_owner(&mut self, player: Option<u32>, entity: u32, epoch: u8, yours: bool) {
+        let Some(player) = player else { return };
+        if !self.try_tell_owner(player, entity, epoch, yours) {
+            self.traffic.lost_owner_events.fetch_add(1, Ordering::Relaxed);
+            if self.owner_retries.len() < MAX_OWNER_RETRIES {
+                self.owner_retries.push((player, entity, epoch, yours));
+            }
+        }
+    }
+
+    /// Whether the event reached the player's queue; `true` for a slot with no player, as there is no one to tell.
+    fn try_tell_owner(&self, player: u32, entity: u32, epoch: u8, yours: bool) -> bool {
+        let Some(Some(p)) = self.players.get(player as usize) else {
+            return true;
         };
         let event = ServerEvent::Ownership { entity, epoch, yours };
-        if p.events
+        p.events
             .try_send(event_packet(&event, u64::from(self.tick)))
-            .is_err()
-        {
-            self.traffic.lost_owner_events.fetch_add(1, Ordering::Relaxed);
-        }
+            .is_ok()
+    }
+
+    /// Sends again the ownership events that were lost and still hold: "yours" while the player owns the entity
+    /// with that epoch, "not yours" while it does not own it. One the ownership has moved past is dropped.
+    fn retry_owner_events(&mut self) {
+        let mut retries = std::mem::take(&mut self.owner_retries);
+        retries.retain(|&(player, entity, epoch, yours)| {
+            let owner = self.ownership.owner(entity >> 16);
+            let spawned = self.spawned(entity).is_some();
+            still_holds(owner, spawned, player, epoch, yours)
+                && !self.try_tell_owner(player, entity, epoch, yours)
+        });
+        self.owner_retries = retries;
     }
 
     fn apply_inbound(&mut self, world: &mut World, info: &TickInfo) {
@@ -860,6 +973,7 @@ impl Players {
                     }
                     self.slots.free(slot);
                     self.ownership.player_left(slot.index, &mut self.owner_changes);
+                    self.owner_retries.retain(|r| r.0 != slot.index);
                 }
             }
         }
@@ -872,7 +986,18 @@ impl Players {
         let rules = &self.movement;
         let now = std::time::Instant::now();
         for player in self.players.iter_mut().flatten() {
-            let Some((state, ped)) = player.inbox.state.lock().ok().and_then(|mut s| s.take()) else {
+            let pool = &mut self.owned_pool;
+            let owned_by = &mut self.owned_by;
+            let Some((state, ped)) = player.inbox.state.lock().ok().and_then(|mut s| {
+                let pending = s.as_mut()?;
+                let state = pending.state.take()?;
+                if !pending.owned.is_empty() {
+                    let mut list = pool.pop().unwrap_or_default();
+                    std::mem::swap(&mut pending.owned, &mut list);
+                    owned_by.push((player.slot.index, list));
+                }
+                Some((state, pending.ped.take()))
+            }) else {
                 continue;
             };
             if let Err(violation) = player.movement.check(rules, &state, now) {
@@ -882,19 +1007,24 @@ impl Players {
                     Violation::Teleport => &self.traffic.refused_teleport,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
-                // Nothing to send before the first accepted state: the player is not in the world yet.
-                let held = self.states.get(player.slot.index as usize).copied().flatten();
-                let due = player
-                    .corrected_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= CORRECTION_INTERVAL);
-                if let (Some(held), true) = (held, due) {
-                    player.corrected_at = Some(now);
-                    let packet = event_packet(&ServerEvent::Corrected(held), u64::from(tick));
-                    if player.events.try_send(packet).is_ok() {
-                        self.traffic.corrections.fetch_add(1, Ordering::Relaxed);
+                if rules.report_only {
+                    // Counted, then taken as if it had passed: no correction.
+                    player.movement.accept(rules, &state, now);
+                } else {
+                    // Nothing to send before the first accepted state: the player is not in the world yet.
+                    let held = self.states.get(player.slot.index as usize).copied().flatten();
+                    let due = player
+                        .corrected_at
+                        .is_none_or(|at| now.saturating_duration_since(at) >= CORRECTION_INTERVAL);
+                    if let (Some(held), true) = (held, due) {
+                        player.corrected_at = Some(now);
+                        let packet = event_packet(&ServerEvent::Corrected(held), u64::from(tick));
+                        if player.events.try_send(packet).is_ok() {
+                            self.traffic.corrections.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
             let id = player.slot.wire_id();
             match player.entity {
@@ -922,6 +1052,91 @@ impl Players {
                 velocity: state.velocity,
                 rotation: state.rotation,
             });
+        }
+        // Then what each player simulates, now that every player's own position is this tick's.
+        let mut owned = std::mem::take(&mut self.owned_by);
+        for (player, mut list) in owned.drain(..) {
+            for o in list.drain(..) {
+                self.apply_owned(player, &o, tick, now);
+            }
+            self.owned_pool.push(list);
+        }
+        self.owned_by = owned;
+    }
+
+    /// Takes one owned-entity state from the player in slot `player` if it owns the entity with that epoch, the
+    /// state passes the movement checks and the entity stays within the keep radius of the player (ADR 0006,
+    /// section 4). Its block is merged by [`crate::owned`]'s rules. With [`MovementRules::report_only`] a state that
+    /// breaks the movement checks is counted and applied; the ownership and keep-radius checks still hold.
+    fn apply_owned(&mut self, player: u32, o: &OwnedState, tick: u32, now: std::time::Instant) {
+        let slot = o.id >> 16;
+        let index = slot as usize;
+        let owns =
+            self.spawned(o.id).is_some() && self.ownership.owner(slot) == Some((Some(player), o.epoch));
+        if !owns {
+            self.traffic.refused_owned_stale.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let [x, y, _] = o.state.position.to_metres();
+        let near = self
+            .states
+            .get(player as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|p| within_keep(p.position.to_metres(), [x, y], self.ownership_rules.keep_radius));
+        if !near {
+            self.traffic.refused_owned_far.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if self.entity_moves[index]
+            .check(&self.movement, &o.state, now)
+            .is_err()
+        {
+            self.traffic
+                .refused_owned_movement
+                .fetch_add(1, Ordering::Relaxed);
+            if !self.movement.report_only {
+                return;
+            }
+            self.entity_moves[index].accept(&self.movement, &o.state, now);
+        }
+        self.states[index] = Some(EntityState {
+            id: o.id,
+            position: o.state.position,
+            velocity: o.state.velocity,
+            rotation: o.state.rotation,
+        });
+        self.grid.upsert(EntityId(slot), Point::new(x, y));
+        let info = self.infos[index];
+        let budget = &mut self.budgets[index];
+        let fields = match info.kind {
+            EntityKind::Vehicle => match (
+                VehicleBlock::from_fields(info.fields()),
+                VehicleBlock::from_fields(o.fields()),
+            ) {
+                (Ok(server), Ok(sent)) => Some(
+                    merge_vehicle(&server, &sent, self.property[index], budget, now)
+                        .to_fields()
+                        .to_vec(),
+                ),
+                _ => None,
+            },
+            EntityKind::Npc => match (
+                PedBlock::from_fields(info.fields()),
+                PedBlock::from_fields(o.fields()),
+            ) {
+                (Ok(server), Ok(sent)) => Some(merge_npc(&server, &sent, budget, now).to_fields().to_vec()),
+                _ => None,
+            },
+            // An object's state is its kinematics; a player is never spawned.
+            EntityKind::Object | EntityKind::Player => None,
+        };
+        if let Some(fields) = fields
+            && let Ok(merged) = Info::with_fields(info.kind, info.model, &fields)
+            && merged != info
+        {
+            self.infos[index] = merged;
+            self.info_ticks[index] = tick;
         }
     }
 
@@ -1035,6 +1250,28 @@ pub fn bind_gateway(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lost "yours" is sent again only while the player still owns the entity with that epoch; a lost "not
+    /// yours" only while it does not own it (again).
+    /// The keep radius ignores height, as in `Ownership`: an entity high above its owner is still near.
+    #[test]
+    fn the_keep_radius_is_measured_on_the_ground_plane() {
+        assert!(within_keep([0.0, 0.0, 0.0], [100.0, 100.0], 150.0));
+        assert!(within_keep([0.0, 0.0, 500.0], [0.0, 10.0], 150.0));
+        assert!(!within_keep([0.0, 0.0, 0.0], [120.0, 120.0], 150.0));
+    }
+
+    #[test]
+    fn a_lost_ownership_event_is_retried_only_while_it_holds() {
+        assert!(still_holds(Some((Some(3), 5)), true, 3, 5, true));
+        assert!(!still_holds(Some((Some(3), 6)), true, 3, 5, true));
+        assert!(!still_holds(Some((Some(4), 5)), true, 3, 5, true));
+        assert!(!still_holds(Some((Some(3), 5)), false, 3, 5, true));
+        assert!(still_holds(Some((Some(4), 6)), true, 3, 5, false));
+        assert!(still_holds(Some((None, 6)), true, 3, 5, false));
+        assert!(still_holds(None, false, 3, 5, false));
+        assert!(!still_holds(Some((Some(3), 7)), true, 3, 5, false));
+    }
 
     #[test]
     fn ipv6_counts_per_64_and_ipv4_per_address() {

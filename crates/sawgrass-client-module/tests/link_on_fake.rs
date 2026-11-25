@@ -11,6 +11,7 @@ use sawgrass_client_module::table::FunctionTable;
 use sawgrass_netcode::{Client, ClientConfig};
 use sawgrass_protocol::delta::{DeltaEncoder, fragments};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
+use sawgrass_protocol::game::ServerEvent;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position, Rotation, Velocity};
 
 const BUILD_KEY: &str = "victory/1.0.0/00ff";
@@ -202,9 +203,7 @@ fn an_owned_entity_is_left_to_the_game_and_measured() {
     assert_eq!(owned.epoch, 7);
     assert_eq!(owned.pose.map(|p| p.position), Some(parked.position));
 
-    // An older epoch cannot take it back; the current one can, and the snapshots move it again.
-    link.set_ownership(1, 6, false);
-    assert!(link.owned().contains_key(&1));
+    // The server takes it back, and the snapshots move it again.
     link.set_ownership(1, 7, false);
     run(90..120, &mut module, &mut game, &mut link, &mut encoder);
     assert!(link.owned().is_empty());
@@ -254,16 +253,16 @@ fn block_changes_keep_the_entity_and_a_new_model_respawns_it() {
 }
 
 #[test]
-fn a_stale_give_does_not_lower_the_epoch() {
+fn ownership_epochs_wrap_and_each_event_applies_as_it_comes() {
     let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
-    link.set_ownership(1, 7, true);
-    link.set_ownership(1, 5, true);
-    assert_eq!(link.owned()[&1].epoch, 7);
-    link.set_ownership(1, 6, false);
-    assert!(
-        link.owned().contains_key(&1),
-        "a take-back older than the held epoch is ignored"
-    );
+    // 256 hand-offs of one entity: the epoch wraps from 255 to 0, and every give and take-back still applies.
+    for epoch in 0..=300u32 {
+        let epoch = (epoch % 256) as u8;
+        link.set_ownership(1, epoch, true);
+        assert_eq!(link.owned()[&1].epoch, epoch);
+        link.set_ownership(1, epoch, false);
+        assert!(link.owned().is_empty(), "take-back with epoch {epoch} applied");
+    }
 }
 
 #[test]
@@ -276,4 +275,149 @@ fn the_inbox_keeps_only_the_newest_datagrams() {
     let kept = inbox.take();
     assert_eq!(kept.len(), MAX_QUEUED);
     assert_eq!(kept[0], 10u32.to_le_bytes().to_vec(), "the oldest were dropped");
+}
+
+#[test]
+fn a_joining_link_waits_for_the_join_and_takes_corrections() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::joining(ClientConfig::default());
+    let (inbox, events) = (link.inbox(), link.events());
+    let mut encoder = DeltaEncoder::default();
+    let mut frame_at =
+        |frame: u32, module: &mut Module<FakeRuntime>, game: &mut FakeGame, link: &mut NetLink| {
+            if frame % 3 == 0 {
+                let tick = frame / 3;
+                for d in snapshot(
+                    &mut encoder,
+                    tick,
+                    &[state(1, tick as f32 * 0.5), state(LOCAL, 0.0)],
+                ) {
+                    inbox.push(d);
+                }
+            }
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        };
+
+    // Snapshots before the join are dropped: nothing is shown, nothing is sent.
+    for frame in 0..30 {
+        frame_at(frame, &mut module, &mut game, &mut link);
+    }
+    assert!(link.client().is_none());
+    assert!(module.entities().is_empty());
+    assert!(link.outbox().take().is_empty());
+
+    events.push(ServerEvent::Joined {
+        entity: LOCAL,
+        tick_hz: TICK_HZ,
+    });
+    for frame in 30..90 {
+        frame_at(frame, &mut module, &mut game, &mut link);
+    }
+    assert_eq!(link.client().map(|c| c.entity()), Some(LOCAL));
+    let car = module.entities().handle(1).expect("shown after the join");
+
+    // A correction far from where the game has the local player snaps it there.
+    let held = state(LOCAL, 200.0);
+    events.push(ServerEvent::Corrected(held));
+    frame_at(90, &mut module, &mut game, &mut link);
+    let local = game.entities[&me].2.position;
+    assert!(
+        (local[0] - 200.0).abs() < 0.05,
+        "local player snapped to the server's position, at {local:?}"
+    );
+
+    // A correction for an entity this client does not own is dropped (Corrected carries no epoch)...
+    let before = game.entities[&car].2;
+    events.push(ServerEvent::Corrected(state(1, -500.0)));
+    frame_at(91, &mut module, &mut game, &mut link);
+    assert!(
+        game.entities[&car].2.position[0] > -400.0,
+        "not moved to {before:?}'s correction"
+    );
+
+    // ...and taken for one it owns.
+    events.push(ServerEvent::Ownership {
+        entity: 1,
+        epoch: 3,
+        yours: true,
+    });
+    events.push(ServerEvent::Corrected(state(1, -500.0)));
+    frame_at(92, &mut module, &mut game, &mut link);
+    assert!(
+        (game.entities[&car].2.position[0] + 500.0).abs() < 0.05,
+        "owned entity moved back by the server"
+    );
+}
+
+#[test]
+fn a_second_join_starts_the_session_over() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::joining(ClientConfig::default());
+    let (inbox, events) = (link.inbox(), link.events());
+    let mut encoder = DeltaEncoder::default();
+    events.push(ServerEvent::Joined {
+        entity: LOCAL,
+        tick_hz: TICK_HZ,
+    });
+    for frame in 0..60u32 {
+        if frame % 3 == 0 {
+            let tick = frame / 3;
+            for d in snapshot(
+                &mut encoder,
+                tick,
+                &[state(1, tick as f32 * 0.5), state(LOCAL, 0.0)],
+            ) {
+                inbox.push(d);
+            }
+        }
+        module.frame(1.0 / FRAME_HZ, &mut game, &mut link).expect("frame");
+    }
+    let old = module.entities().handle(1).expect("shown in the first session");
+    link.set_ownership(1, 4, true);
+
+    // A reconnect: the new session's snapshots no longer hold entity 1.
+    events.push(ServerEvent::Joined {
+        entity: LOCAL,
+        tick_hz: TICK_HZ,
+    });
+    let mut encoder = DeltaEncoder::default();
+    for frame in 0..60u32 {
+        if frame % 3 == 0 {
+            for d in snapshot(&mut encoder, frame / 3, &[state(LOCAL, 0.0)]) {
+                inbox.push(d);
+            }
+        }
+        module.frame(1.0 / FRAME_HZ, &mut game, &mut link).expect("frame");
+    }
+    assert!(
+        module.entities().handle(1).is_none(),
+        "the old session's entity is gone"
+    );
+    assert!(!game.entities.contains_key(&old));
+    assert!(
+        link.owned().is_empty(),
+        "the new session owns nothing for this client yet"
+    );
+    assert!(game.entities.contains_key(&me), "the local player stays");
+    assert_eq!(link.world_errors, 0);
 }
