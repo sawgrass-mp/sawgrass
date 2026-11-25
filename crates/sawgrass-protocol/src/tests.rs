@@ -336,13 +336,90 @@ mod game_payloads {
             Err(DecodeError::Truncated)
         );
         let mut longer = payload.clone();
-        longer.push(0);
+        // An empty owned list, then a byte too many.
+        longer.extend_from_slice(&[0, 0]);
         assert_eq!(ClientState::decode(&longer), Err(DecodeError::TrailingBytes));
         let mut many = payload[..19].to_vec();
         many.push(17);
         many.extend_from_slice(&[0; 17]);
         assert_eq!(ClientState::decode(&many), Err(DecodeError::OutOfRange));
         assert!(n <= game::MAX_DATAGRAM);
+    }
+
+    #[test]
+    fn client_state_carries_owned_entities() {
+        use crate::ped::PedBlock;
+        use crate::vehicle::VehicleBlock;
+        let kinematics = |id: u32| {
+            let s = state(id);
+            ClientState {
+                position: s.position,
+                velocity: s.velocity,
+                rotation: s.rotation,
+            }
+        };
+        let car = |id: u32, epoch: u8| {
+            let block = VehicleBlock {
+                throttle: 100,
+                angular_velocity: [0, 0, -300],
+                ..VehicleBlock::INTACT
+            };
+            OwnedState::new(id, epoch, kinematics(id), &block.to_fields()).expect("owned")
+        };
+        let own = kinematics(1);
+        let owned = [car(5 << 16, 3), car(9 << 16 | 2, 255)];
+        let mut payload = Vec::new();
+        own.encode_with_owned(&PedBlock::default(), &owned, &mut payload)
+            .expect("encode");
+        let mut out = Vec::new();
+        assert_eq!(
+            ClientState::decode_with_owned(&payload, &mut out),
+            Ok((own, Some(PedBlock::default())))
+        );
+        assert_eq!(out, owned);
+        assert_eq!(
+            VehicleBlock::from_fields(out[0].fields()).map(|b| b.throttle),
+            Ok(100)
+        );
+        // Callers that read only the state or the ped block still read it.
+        assert_eq!(ClientState::decode(&payload), Ok(own));
+        // Cut short, followed by a byte, or counting more than a state may carry.
+        assert_eq!(
+            ClientState::decode(&payload[..payload.len() - 1]),
+            Err(DecodeError::Truncated)
+        );
+        let mut longer = payload.clone();
+        longer.push(0);
+        assert_eq!(ClientState::decode(&longer), Err(DecodeError::TrailingBytes));
+        let mut many = Vec::new();
+        own.encode_with_ped(&PedBlock::default(), &mut many)
+            .expect("encode");
+        many.push(MAX_OWNED as u8 + 1);
+        assert_eq!(ClientState::decode(&many), Err(DecodeError::OutOfRange));
+
+        // The encoder keeps a state within one datagram: as many large vehicles as fit, and no more.
+        let big = OwnedState::new(u32::MAX, 0, own, &[u32::MAX; crate::entity::MAX_FIELDS]).expect("owned");
+        let fit = (1..=MAX_OWNED)
+            .take_while(|&n| {
+                let mut p = Vec::new();
+                own.encode_with_owned(&PedBlock::default(), &vec![big; n], &mut p)
+                    .is_ok()
+            })
+            .last()
+            .expect("one fits");
+        let mut p = vec![7];
+        assert_eq!(
+            own.encode_with_owned(&PedBlock::default(), &vec![big; fit + 1], &mut p),
+            Err(EncodeError::BufferTooSmall)
+        );
+        assert_eq!(p, vec![7]);
+        assert!(fit >= 8, "only {fit} of the largest fit");
+        // Six-field vehicle blocks: every one of MAX_OWNED fits.
+        let all = vec![car(u32::MAX, 0); MAX_OWNED];
+        assert!(
+            own.encode_with_owned(&PedBlock::default(), &all, &mut Vec::new())
+                .is_ok()
+        );
     }
 
     #[test]

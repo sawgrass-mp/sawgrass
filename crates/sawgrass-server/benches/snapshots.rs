@@ -80,7 +80,7 @@ fn run(players: usize, area: f32, threads: usize, ticks: usize, warmup: usize) -
         let tick = tick as u32 + 1;
         pool.install(|| {
             // Every client acknowledged the previous tick, as on a link without loss.
-            history.record(tick, &states, [tick - 1]);
+            history.record(tick, &states, &[], &[], [tick - 1]);
             let history = &history;
             views
                 .par_iter_mut()
