@@ -71,6 +71,11 @@ so an outside contributor can neither grant scope by editing their own issue nor
 own changes to `.github/` and the rules need such a task too. The guard runs from `main`, so a pull request that
 changes it is checked by the old version; review guard changes by hand.
 
+A task's `### Scope` also lists every crate the work is expected to change, tier 2 ones included, the crates it
+builds on as well as the one it is about: the review checks the diff against it. A pull request that has to change
+one more says which and why in its description. DB-8 (#162), for example, changed `sawgrass-store`'s writer while
+its task listed only the server and protocol crates.
+
 Required status checks are matched by name. A pull request that adds a workflow with a job named `pr-guard` fails
 the real guard (a new workflow is a tier 3 path), but check the run's workflow name ("PR Guard") before merging
 anything that touches `.github/`.
