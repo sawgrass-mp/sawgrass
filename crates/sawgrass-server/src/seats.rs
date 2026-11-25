@@ -89,16 +89,21 @@ impl Seats {
         Some((vehicle, seat))
     }
 
-    /// Takes everyone out of `vehicle` and forgets its lock, as when it is removed; returns who sat there.
-    pub fn vacate(&mut self, vehicle: u32) -> Vec<u32> {
+    /// Takes everyone out of `vehicle` and forgets its lock, as when it is removed; returns who sat there, with
+    /// their seats.
+    pub fn vacate(&mut self, vehicle: u32) -> Vec<(u32, u8)> {
         if let Some(l) = self.locked.get_mut(vehicle as usize) {
             *l = false;
         }
         let Some(seats) = self.by_vehicle.get_mut(vehicle as usize) else {
             return Vec::new();
         };
-        let players: Vec<u32> = seats.iter_mut().filter_map(Option::take).collect();
-        for &p in &players {
+        let players: Vec<(u32, u8)> = seats
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(seat, p)| Some((p.take()?, seat as u8)))
+            .collect();
+        for &(p, _) in &players {
             self.by_player[p as usize] = None;
         }
         players
@@ -172,7 +177,7 @@ mod tests {
         seats.set_locked(4, true);
         assert_eq!(seats.enter(2, 4, 1), Err(Refusal::Locked));
         assert_eq!(seats.seat_of(1), Some((4, 0)));
-        assert_eq!(seats.vacate(4), [1]);
+        assert_eq!(seats.vacate(4), [(1, 0)]);
         assert_eq!(seats.seat_of(1), None);
         assert!(!seats.is_locked(4));
         assert_eq!(seats.enter(2, 4, 1), Ok(()));
