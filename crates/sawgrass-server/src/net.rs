@@ -220,8 +220,11 @@ pub struct Traffic {
     pub lost_owner_events: AtomicU64,
     /// Owned-entity states dropped because the sender does not own the entity, or not with that epoch.
     pub refused_owned_stale: AtomicU64,
-    /// Owned-entity states refused by the movement checks.
+    /// Owned-entity states refused by the movement checks (with [`MovementRules::report_only`]: that broke them and
+    /// were applied anyway).
     pub refused_owned_movement: AtomicU64,
+    /// Spawns whose state broke the movement checks and were made anyway, because the rules only report.
+    pub reported_spawns: AtomicU64,
     /// Owned-entity states refused because the entity is beyond the keep radius of its owner.
     pub refused_owned_far: AtomicU64,
     /// Connections closed for a sustained flood of datagrams or events.
@@ -514,7 +517,8 @@ async fn serve(
                     events_traffic.shots_received.fetch_add(1, Ordering::Relaxed);
                     let _ = events_inbound.send(Inbound::Shot { id, shot });
                 }
-                ClientEvent::RequestStats => {}
+                // A server without load-test reporting ignores RequestStats; later events are not used yet.
+                _ => {}
             }
         }
     });
@@ -725,16 +729,22 @@ impl Players {
     /// Spawns an entity that is not a player (a vehicle, an NPC or an object; ADR 0006) with its info and
     /// kinematics, and returns its id, which snapshots carry from the next tick on. `None` if `info` is a player's,
     /// the position is outside the map, the speed is above the limit, or every slot is taken. The server's scripts and admin commands spawn
-    /// through this; who simulates the entity is decided by its ownership (SRV-14).
+    /// through this; who simulates the entity is decided by its ownership (SRV-14). With
+    /// [`MovementRules::report_only`] a state outside the movement rules is spawned anyway and counted
+    /// ([`Traffic::reported_spawns`]).
     pub fn spawn(&mut self, info: Info, state: ClientState) -> Option<u32> {
+        if info.kind == EntityKind::Player {
+            return None;
+        }
         // The spawn is the first accepted state, so an owner's first state is checked against it.
         let mut moves = Movement::new();
-        if info.kind == EntityKind::Player
-            || moves
-                .check(&self.movement, &state, std::time::Instant::now())
-                .is_err()
-        {
-            return None;
+        let now = std::time::Instant::now();
+        if moves.check(&self.movement, &state, now).is_err() {
+            if !self.movement.report_only {
+                return None;
+            }
+            self.traffic.reported_spawns.fetch_add(1, Ordering::Relaxed);
+            moves.accept(&self.movement, &state, now);
         }
         let [x, y, _] = state.position.to_metres();
         let slot = self.slots.alloc()?;
@@ -1168,7 +1178,8 @@ impl Players {
 
     /// Takes one owned-entity state from the player in slot `player` if it owns the entity with that epoch, the
     /// state passes the movement checks and the entity stays within the keep radius of the player (ADR 0006,
-    /// section 4). Its block is merged by [`crate::owned`]'s rules.
+    /// section 4). Its block is merged by [`crate::owned`]'s rules. With [`MovementRules::report_only`] a state that
+    /// breaks the movement checks is counted and applied; the ownership and keep-radius checks still hold.
     fn apply_owned(&mut self, player: u32, o: &OwnedState, tick: u32, now: std::time::Instant) {
         let slot = o.id >> 16;
         let index = slot as usize;
@@ -1196,7 +1207,10 @@ impl Players {
             self.traffic
                 .refused_owned_movement
                 .fetch_add(1, Ordering::Relaxed);
-            return;
+            if !self.movement.report_only {
+                return;
+            }
+            self.entity_moves[index].accept(&self.movement, &o.state, now);
         }
         self.states[index] = Some(EntityState {
             id: o.id,
