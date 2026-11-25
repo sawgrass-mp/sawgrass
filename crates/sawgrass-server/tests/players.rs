@@ -930,6 +930,101 @@ fn only_the_owner_moves_a_vehicle_and_damages_it_by_the_rule() {
     assert_eq!(car_at(&players).map(|(_, e)| e), Some(engine));
 }
 
+/// With `report_only`, a spawn and an owner's state that break the movement rules are counted and applied, so a
+/// wrong limit in a first session does not freeze the cars clients drive. Ownership is still checked.
+#[test]
+fn report_only_applies_owned_and_spawned_states_and_counts_them() {
+    use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+    use sawgrass_protocol::game::OwnedState;
+    use sawgrass_protocol::ped::PedBlock;
+    use sawgrass_protocol::vehicle::VehicleBlock;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let config = ListenConfig {
+        movement: MovementRules {
+            report_only: true,
+            ..MovementRules::default()
+        },
+        ..ListenConfig::default()
+    };
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, config))
+    };
+    let traffic = players.traffic();
+    let players = Arc::new(Mutex::new(players));
+    let at = |x: f32, speed: f32| ClientState {
+        position: Position::from_metres([x, 5.0, 30.0]).expect("position"),
+        velocity: Velocity::from_metres_per_second([speed, 0.0, 0.0]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let info =
+        Info::with_fields(EntityKind::Vehicle, AssetId(3), &VehicleBlock::INTACT.to_fields()).expect("info");
+    // Faster than the limit: spawned anyway, and counted.
+    let car = players
+        .lock()
+        .expect("players")
+        .spawn(info, at(30.0, 200.0))
+        .expect("spawned");
+    assert_eq!(traffic.reported_spawns.load(Ordering::Relaxed), 1);
+
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let mut a = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("a connects");
+    std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut a)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    let send = |epoch: u8, car_state: ClientState| {
+        let owned = OwnedState::new(car, epoch, car_state, &VehicleBlock::INTACT.to_fields()).expect("owned");
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::ClientState,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        at(10.0, 0.0)
+            .encode_with_owned(&PedBlock::default(), &[owned], &mut packet)
+            .expect("state");
+        a.send_datagram(Bytes::from(packet)).expect("send");
+    };
+    let car_x = |players: &Mutex<net::Players>| {
+        players
+            .lock()
+            .expect("players")
+            .spawned(car)
+            .map(|(_, s)| s.position.to_metres()[0])
+    };
+    send(0, at(30.0, 0.0));
+    assert!(tick_until(&mut tick_loop, |_| {
+        players
+            .lock()
+            .expect("players")
+            .owner(car)
+            .is_some_and(|(o, e)| o.is_some() && e == 1)
+    }));
+    // A jump the movement checks refuse is applied and counted; a stale epoch is still dropped.
+    send(1, at(-135.0, 0.0));
+    assert!(tick_until(&mut tick_loop, |_| car_x(&players) == Some(-135.0)));
+    assert!(traffic.refused_owned_movement.load(Ordering::Relaxed) >= 1);
+    send(0, at(-130.0, 0.0));
+    assert!(wait_for(&traffic.refused_owned_stale, 1, || {
+        tick_loop.run_tick();
+    }));
+    assert_eq!(car_x(&players), Some(-135.0));
+}
+
 /// SRV-19: a player that does not own a vehicle cannot move it, and when the owner leaves at speed, the next owner's
 /// first state is checked from the last accepted one, so carrying on at the same speed is not refused.
 #[test]
