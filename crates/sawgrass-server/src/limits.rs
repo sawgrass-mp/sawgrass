@@ -19,6 +19,12 @@ pub struct Limits {
     pub events_per_sec: f32,
     /// Events admitted at once after a quiet spell.
     pub event_burst: f32,
+    /// Shots admitted per second, counted apart from the other events (ADR 0006, section 5) so that firing never
+    /// closes the connection: above the fastest weapon's fire rate, which the per-weapon check then bounds. 20
+    /// is a placeholder for about 900 rounds a minute until the game's figures are known.
+    pub shots_per_sec: f32,
+    /// Shots admitted at once after a quiet spell.
+    pub shot_burst: f32,
     /// The window over which a flood is judged.
     pub window: Duration,
     /// Strikes (windows with more than twice the rate, less one for each calmer window) at which the connection is
@@ -40,6 +46,8 @@ impl Default for Limits {
             state_burst: 30.0,
             events_per_sec: 20.0,
             event_burst: 40.0,
+            shots_per_sec: 20.0,
+            shot_burst: 20.0,
             window: Duration::from_secs(1),
             strikes: 3,
             max_handshakes: 1024,
@@ -100,6 +108,12 @@ impl Bucket {
     #[must_use]
     pub fn for_events(limits: &Limits, now: Instant) -> Self {
         Self::new(limits.events_per_sec, limits.event_burst, limits, now)
+    }
+
+    /// For shots, by `limits`.
+    #[must_use]
+    pub fn for_shots(limits: &Limits, now: Instant) -> Self {
+        Self::new(limits.shots_per_sec, limits.shot_burst, limits, now)
     }
 
     /// Judges one arrival at `now`.

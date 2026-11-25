@@ -553,6 +553,53 @@ fn a_teleport_is_refused_and_counted() {
     }));
 }
 
+/// The player list an operator reads: each connected player's id, address, position and refused states, filled
+/// only on the tick after it is asked for.
+#[test]
+fn the_player_list_shows_who_is_where() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let list = players.player_list();
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    // Not asked for: nothing is filled in.
+    tick_loop.run_tick();
+    assert!(list.take().is_empty());
+    let spawn = state_packet(10.0);
+    let jump = state_packet(5000.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(spawn.clone());
+        position_of(t, id) == Some([10.0, 5.0, 30.0])
+    }));
+    let _ = client.send_datagram(jump);
+    std::thread::sleep(Duration::from_millis(50));
+    tick_loop.run_tick();
+    list.request();
+    tick_loop.run_tick();
+    let views = list.take();
+    assert_eq!(views.len(), 1);
+    let view = views[0];
+    assert_eq!(view.id, id);
+    assert!(view.address.ip().is_loopback());
+    assert_eq!(view.position, Some([10.0, 5.0, 30.0]));
+    assert_eq!(view.refused.teleport, 1);
+    // Taken once: the next take is empty until asked again.
+    assert!(list.take().is_empty());
+}
+
 /// With `report_only`, a teleport is counted like a refusal but applied, and nobody is corrected: a first session
 /// with the game learns which limit is wrong without fighting it.
 #[test]
@@ -1172,4 +1219,48 @@ fn a_joining_player_gets_the_world_state_then_its_changes() {
     players.lock().expect("players").set_door(opened);
     let seen = read_until(&mut tick_loop, &|seen| seen.contains(&ServerEvent::Door(opened)));
     assert!(!seen.is_empty());
+}
+
+/// NET-20, ADR 0006 section 5: shots have their own budget, so a burst of shots does not use up the other events'
+/// and is dropped beyond its own, without closing the connection.
+#[test]
+fn shots_are_limited_apart_from_other_events() {
+    use sawgrass_protocol::combat::Shot;
+    use sawgrass_protocol::entity::AssetId;
+    use sawgrass_protocol::game::ClientEvent;
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (mut client, traffic, _players) = limited(&runtime, Limits::default());
+    let packet = |event: ClientEvent| {
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::Event,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        event.encode(&mut packet);
+        packet
+    };
+    let from = Position::from_metres([1.0, 2.0, 3.0]).expect("position");
+    let shot = packet(ClientEvent::Shot(Box::new(Shot::new(1, AssetId(9), from))));
+    let other = packet(ClientEvent::RequestStats);
+    // 30 shots against a burst of 20, and 30 other events against a burst of 40.
+    for _ in 0..30 {
+        runtime.block_on(client.send_event(&shot)).expect("send");
+        runtime.block_on(client.send_event(&other)).expect("send");
+    }
+    let limits = Limits::default();
+    assert!(wait_for(&traffic.shots_received, limits.shot_burst as u64, || ()));
+    assert!(wait_for(&traffic.dropped_events, 1, || ()));
+    std::thread::sleep(Duration::from_millis(100));
+    let (shots, dropped) = (
+        traffic.shots_received.load(Ordering::Relaxed),
+        traffic.dropped_events.load(Ordering::Relaxed),
+    );
+    // Only shots were dropped: the other events stayed within their own burst.
+    assert_eq!(shots + dropped, 30, "{shots} shots, {dropped} dropped");
+    assert!(shots < 30);
+    assert_eq!(traffic.closed_floods.load(Ordering::Relaxed), 0);
 }

@@ -498,6 +498,11 @@ mod game_payloads {
                 tick_hz: 20,
             },
             ServerEvent::Stats(stats),
+            ServerEvent::Paid {
+                key: u64::MAX,
+                result: PayResult::InsufficientFunds,
+                balance: -3,
+            },
             ServerEvent::Corrected(EntityState {
                 id: 0x0001_0007,
                 position: Position::from_metres([-12.5, 3000.25, 31.0]).expect("position"),
@@ -522,6 +527,74 @@ mod game_payloads {
         assert_eq!(ClientEvent::decode(&[128, 0]), Err(DecodeError::TrailingBytes));
         assert_eq!(ServerEvent::decode(&out), Err(DecodeError::UnknownEvent(128)));
         assert_eq!(ClientEvent::decode(&[1]), Err(DecodeError::UnknownEvent(1)));
+
+        let pay = ClientEvent::Pay {
+            key: 1 << 40,
+            to: 9,
+            amount: u32::MAX,
+        };
+        let mut out = Vec::new();
+        pay.encode(&mut out);
+        assert_eq!(out.len(), 17);
+        assert_eq!(ClientEvent::decode(&out), Ok(pay));
+        assert_eq!(ClientEvent::decode(&out[..16]), Err(DecodeError::Truncated));
+        // A result code the format does not define.
+        let mut out = Vec::new();
+        ServerEvent::Paid {
+            key: 1,
+            result: PayResult::Done,
+            balance: 0,
+        }
+        .encode(&mut out);
+        out[9] = 6;
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::OutOfRange));
+    }
+
+    #[test]
+    fn a_shot_round_trips_with_up_to_sixteen_hits_and_rejects_more() {
+        use crate::combat::{Hit, MAX_HITS, Shot, Zone};
+        use crate::entity::AssetId;
+        let at = |x: f32| Position::from_metres([x, 2.0, 3.0]).expect("position");
+        let mut shot = Shot::new(77, AssetId(9), at(1.0));
+        for (i, zone) in [Zone::Head, Zone::Torso, Zone::Arm, Zone::Leg, Zone::Other]
+            .into_iter()
+            .cycle()
+            .take(MAX_HITS)
+            .enumerate()
+        {
+            assert!(shot.push(Hit {
+                target: i as u32 + 1,
+                zone,
+                point: at(i as f32),
+            }));
+        }
+        assert!(!shot.push(Hit::default()));
+        let mut out = Vec::new();
+        ClientEvent::Shot(Box::new(shot)).encode(&mut out);
+        assert_eq!(out.len(), 1 + 4 + 4 + 9 + 1 + MAX_HITS * 14);
+        assert_eq!(ClientEvent::decode(&out), Ok(ClientEvent::Shot(Box::new(shot))));
+        for cut in [1, 10, out.len() - 1] {
+            assert_eq!(
+                ClientEvent::decode(&out[..cut]),
+                Err(DecodeError::Truncated),
+                "cut {cut}"
+            );
+        }
+        let mut more = out.clone();
+        more[18] = MAX_HITS as u8 + 1;
+        assert_eq!(ClientEvent::decode(&more), Err(DecodeError::OutOfRange));
+        let mut bad_zone = out.clone();
+        bad_zone[19 + 4] = 5;
+        assert_eq!(ClientEvent::decode(&bad_zone), Err(DecodeError::OutOfRange));
+        let mut empty = Vec::new();
+        ClientEvent::Shot(Box::new(Shot::new(1, AssetId(9), at(0.0)))).encode(&mut empty);
+        assert_eq!(
+            ClientEvent::decode(&empty).map(|e| match e {
+                ClientEvent::Shot(s) => s.hits().len(),
+                _ => 99,
+            }),
+            Ok(0)
+        );
     }
 
     #[test]
