@@ -34,7 +34,7 @@
 //!   fails to load is reported and left out.
 //! - `--script-budget-ms N`: the time all resources together may take in one tick (default 8).
 //! - `--record FILE`: write every connection's joins, datagrams, events and leaves to `FILE` as they arrive, for
-//!   `sawgrass-bots replay` (task SRV-21). The file is written out every half second, so a killed server loses at
+//!   `sawgrass-bots replay` (task SRV-22). The file is written out every half second, so a killed server loses at
 //!   most that much. It holds what players sent: keep it private and never commit one.
 
 use std::net::SocketAddr;
