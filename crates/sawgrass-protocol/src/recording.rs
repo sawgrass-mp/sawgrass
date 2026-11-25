@@ -9,7 +9,7 @@
 //! | 8 | microseconds since the recording started, little-endian `u64` |
 //! | 4 | the server's connection id, little-endian `u32` |
 //! | 1 | [`RecordKind`] |
-//! | 2 | payload length, little-endian `u16` |
+//! | 4 | payload length, little-endian `u32` |
 //! | n | the payload: a datagram or event with its packet header, or nothing for a join or leave |
 //!
 //! A recording holds what players sent: positions, chat and script events. Keep it private, and never commit one.
@@ -84,20 +84,27 @@ pub enum RecordError {
     Truncated,
     /// An unknown kind: not a recording, or a damaged one.
     UnknownKind(u8),
+    /// A payload too long for the `u32` length field, given to [`Record::encode`].
+    TooLong(usize),
 }
 
 impl<'a> Record<'a> {
     /// Bytes before the payload.
-    pub const HEADER: usize = 8 + 4 + 1 + 2;
+    pub const HEADER: usize = 8 + 4 + 1 + 4;
 
-    /// Appends the record to `out`. A payload longer than `u16::MAX` cannot arrive over QUIC, so it is cut there.
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        let len = self.payload.len().min(usize::from(u16::MAX));
+    /// Appends the record to `out`, whole: a payload is never cut, so a replay sends exactly what arrived.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::TooLong`] if the payload does not fit the `u32` length; `out` is then left as it was.
+    pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), RecordError> {
+        let len = u32::try_from(self.payload.len()).map_err(|_| RecordError::TooLong(self.payload.len()))?;
         out.extend_from_slice(&self.micros.to_le_bytes());
         out.extend_from_slice(&self.connection.to_le_bytes());
         out.push(self.kind as u8);
-        out.extend_from_slice(&(len as u16).to_le_bytes());
-        out.extend_from_slice(&self.payload[..len]);
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(self.payload);
+        Ok(())
     }
 
     /// Reads the record at the start of `input` and returns it with the bytes after it.
@@ -111,7 +118,8 @@ impl<'a> Record<'a> {
         let micros = u64::from_le_bytes(header[..8].try_into().map_err(|_| RecordError::Truncated)?);
         let connection = u32::from_le_bytes(header[8..12].try_into().map_err(|_| RecordError::Truncated)?);
         let kind = RecordKind::from_code(header[12]).ok_or(RecordError::UnknownKind(header[12]))?;
-        let len = usize::from(u16::from_le_bytes([header[13], header[14]]));
+        let len = u32::from_le_bytes(header[13..17].try_into().map_err(|_| RecordError::Truncated)?);
+        let len = usize::try_from(len).map_err(|_| RecordError::Truncated)?;
         let rest = &input[Self::HEADER..];
         let payload = rest.get(..len).ok_or(RecordError::Truncated)?;
         Ok((
@@ -160,7 +168,7 @@ mod tests {
         ];
         let mut file = file_header(9).to_vec();
         for r in &records {
-            r.encode(&mut file);
+            r.encode(&mut file).expect("encode");
         }
         assert_eq!(read_file_header(&file), Some(9));
         let mut rest = &file[FILE_HEADER..];
@@ -183,7 +191,8 @@ mod tests {
             kind: RecordKind::Datagram,
             payload: &[5; 10],
         }
-        .encode(&mut one);
+        .encode(&mut one)
+        .expect("encode");
         for cut in 0..one.len() {
             assert_eq!(
                 Record::decode(&one[..cut]),
@@ -193,5 +202,26 @@ mod tests {
         }
         one[12] = 0;
         assert_eq!(Record::decode(&one), Err(RecordError::UnknownKind(0)));
+    }
+
+    #[test]
+    fn a_payload_past_u16_is_kept_whole() {
+        // The gateway lets events of up to 64 KiB (65,536 bytes) in: one byte more than a u16 length holds.
+        for len in [65_535, 65_536, 70_000] {
+            let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let mut out = Vec::new();
+            Record {
+                micros: 3,
+                connection: 4,
+                kind: RecordKind::Event,
+                payload: &payload,
+            }
+            .encode(&mut out)
+            .expect("encode");
+            assert_eq!(out.len(), Record::HEADER + len);
+            let (read, rest) = Record::decode(&out).expect("decode");
+            assert_eq!(read.payload, &payload[..]);
+            assert!(rest.is_empty());
+        }
     }
 }
