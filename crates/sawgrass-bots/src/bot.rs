@@ -1,12 +1,19 @@
 //! One bot: connects through the gateway like a player, sends its state every client tick and reads snapshots.
+//!
+//! Snapshots are delta-encoded (NET-14): the bot reassembles each tick's fragments, decodes it against the
+//! baseline it names from the ticks it decoded lately, and acknowledges the newest one in the tick field of its
+//! client states' headers, as a game client does.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use sawgrass_gateway::{Datagrams, RootCertStore, connect};
-use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent, decode_snapshot};
+use sawgrass_protocol::EntityState;
+use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta};
+use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent};
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity};
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -96,12 +103,14 @@ pub async fn run(
     });
 
     let recorder = config.record.clone().filter(|r| r.records(index));
+    let ack = Arc::new(AtomicU32::new(0));
     let reader = tokio::spawn(read_snapshots(
         datagrams.clone(),
+        ack.clone(),
         counters.clone(),
         recorder.map(|r| (r, index)),
     ));
-    let ended_early = send_states(&config, index, &datagrams, &counters, stop).await;
+    let ended_early = send_states(&config, index, &datagrams, &ack, &counters, stop).await;
     datagrams.close();
     reader.abort();
     if ended_early {
@@ -114,6 +123,7 @@ async fn send_states(
     config: &BotConfig,
     index: u64,
     datagrams: &Datagrams,
+    ack: &AtomicU32,
     counters: &Counters,
     stop: Instant,
 ) -> bool {
@@ -138,7 +148,7 @@ async fn send_states(
         let Some(state) = client_state(&walker) else {
             continue;
         };
-        let mut packet = header(PacketKind::ClientState, sequence, 0);
+        let mut packet = header(PacketKind::ClientState, sequence, ack.load(Ordering::Relaxed));
         sequence = sequence.wrapping_add(1);
         let mut buf = [0; ClientState::SIZE];
         if state.encode(&mut buf).is_err() {
@@ -154,10 +164,20 @@ async fn send_states(
     }
 }
 
-async fn read_snapshots(datagrams: Datagrams, counters: Arc<Counters>, record: Option<(Arc<Recorder>, u64)>) {
-    let mut last_tick = None;
+/// Decoded snapshots a bot keeps as baselines, as many as the server keeps history for.
+const KEPT_TICKS: usize = 16;
+
+async fn read_snapshots(
+    datagrams: Datagrams,
+    ack: Arc<AtomicU32>,
+    counters: Arc<Counters>,
+    record: Option<(Arc<Recorder>, u64)>,
+) {
+    let mut reassembler = Reassembler::new();
+    let mut kept: Vec<(Option<u32>, Vec<EntityState>)> = vec![(None, Vec::new()); KEPT_TICKS];
+    let mut decoded = Vec::new();
     while let Ok((header, packet)) = datagrams.recv().await {
-        if header.kind != PacketKind::Snapshot {
+        if header.kind != PacketKind::DeltaSnapshot {
             continue;
         }
         Counters::add(&counters.received_datagrams, 1);
@@ -165,13 +185,31 @@ async fn read_snapshots(datagrams: Datagrams, counters: Arc<Counters>, record: O
         if let Some((recorder, index)) = &record {
             recorder.write(*index, &packet);
         }
-        if let Ok(n) = decode_snapshot(&packet[PacketHeader::SIZE..], |_| {}) {
-            Counters::add(&counters.received_entities, n as u64);
+        let Ok(Some(payload)) = reassembler.push(header.tick, &packet[PacketHeader::SIZE..]) else {
+            continue;
+        };
+        let tick = header.tick;
+        let base = match baseline_age(payload) {
+            Ok(0) => None,
+            Ok(age) => match tick.checked_sub(age) {
+                Some(t) if kept[t as usize % KEPT_TICKS].0 == Some(t) => Some(Baseline {
+                    tick: t,
+                    entities: &kept[t as usize % KEPT_TICKS].1,
+                }),
+                // A baseline this bot no longer has: wait for one against a tick it acknowledged since.
+                _ => continue,
+            },
+            Err(_) => continue,
+        };
+        if decode_delta(payload, tick, base, &mut decoded).is_err() {
+            continue;
         }
-        if last_tick != Some(header.tick) {
-            last_tick = Some(header.tick);
-            Counters::add(&counters.ticks_seen, 1);
-        }
+        Counters::add(&counters.received_entities, decoded.len() as u64);
+        Counters::add(&counters.ticks_seen, 1);
+        let slot = &mut kept[tick as usize % KEPT_TICKS];
+        slot.0 = Some(tick);
+        std::mem::swap(&mut slot.1, &mut decoded);
+        ack.fetch_max(tick, Ordering::Relaxed);
     }
 }
 

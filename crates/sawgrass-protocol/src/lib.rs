@@ -2,9 +2,10 @@
 //!
 //! Every packet starts with a [`PacketHeader`]. Entity state uses the quantized encodings in [`quant`]: positions
 //! to 1 cm, velocities to 1 cm/s and rotations in 32 bits; the table in that module lists the wire size, range and
-//! worst-case error of each. [`game`] defines what follows the header for each packet kind. All integers are
+//! worst-case error of each. [`game`] defines what follows the header for each packet kind, and [`delta`] the delta-encoded snapshots. All integers are
 //! little-endian. The connection handshake lives in the gateway crate.
 
+pub mod delta;
 pub mod game;
 pub mod quant;
 
@@ -16,8 +17,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// protocol crate changes (task OPS-3).
 ///
 /// Version 1 is the first wire format: the packet header and the quantized encodings. Version 2 adds the
-/// payloads in [`game`].
-pub const PROTOCOL_VERSION: u32 = 2;
+/// payloads in [`game`]. Version 3 sends snapshots delta-encoded ([`delta`], [`PacketKind::DeltaSnapshot`]) and
+/// makes the tick in a client state's header the newest snapshot tick the client decoded.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///
@@ -88,6 +90,8 @@ pub enum PacketKind {
     ClientState = 2,
     /// A reliable event in either direction.
     Event = 3,
+    /// One fragment of a delta-encoded snapshot from the server ([`delta`]).
+    DeltaSnapshot = 4,
 }
 
 impl TryFrom<u8> for PacketKind {
@@ -98,6 +102,7 @@ impl TryFrom<u8> for PacketKind {
             1 => Ok(Self::Snapshot),
             2 => Ok(Self::ClientState),
             3 => Ok(Self::Event),
+            4 => Ok(Self::DeltaSnapshot),
             other => Err(DecodeError::UnknownKind(other)),
         }
     }

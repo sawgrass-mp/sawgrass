@@ -1,5 +1,5 @@
 //! Benchmark for the per-player phase of the tick (SRV-7): 4096 players move, the dense grid is rebuilt, and every
-//! player's view builds its visible set and snapshot datagrams, on 1, 2 and 4 threads. Reports the time per 20 Hz
+//! player's view builds its visible set and delta snapshot datagrams, on 1, 2 and 4 threads. Reports the time per 20 Hz
 //! tick (p50 and p99) for a city and a crowd. The network is left out: this is the tick thread's part.
 //!
 //!     cargo bench -p sawgrass-server --bench snapshots
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use sawgrass_protocol::{EntityState, Position, Rotation, Velocity};
 use sawgrass_server::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
-use sawgrass_server::snapshot::View;
+use sawgrass_server::snapshot::{History, View};
 
 const TICK_SECONDS: f32 = 1.0 / 20.0;
 
@@ -51,6 +51,7 @@ fn run(players: usize, area: f32, threads: usize, ticks: usize) -> (Duration, Du
         .collect();
     let mut grid = DenseGrid::default();
     let mut states = vec![None; players];
+    let mut history = History::new();
     let mut views: Vec<View> = (0..players).map(|_| View::new()).collect();
     let config = VisibilityConfig::default();
     let mut times = Vec::with_capacity(ticks);
@@ -76,11 +77,14 @@ fn run(players: usize, area: f32, threads: usize, ticks: usize) -> (Duration, Du
             grid.upsert(EntityId(id as u32), Point::new(p[0], p[1]));
         }
         grid.rebuild();
+        let tick = tick as u32 + 1;
+        history.record(tick, &states);
         pool.install(|| {
             views
                 .par_iter_mut()
                 .enumerate()
-                .for_each(|(me, view)| view.build(me, &grid, &states, &config, tick as u32));
+                // Every client acknowledged the previous tick, as on a link without loss.
+                .for_each(|(me, view)| view.build(me, &grid, &history, &config, tick, tick - 1));
         });
         times.push(start.elapsed());
         // The gateway's part: take the datagrams and drop them once sent.

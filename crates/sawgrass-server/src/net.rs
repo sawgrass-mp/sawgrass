@@ -6,10 +6,11 @@
 //! one slot instead of growing a queue; only joins and leaves, once per connection, go over a channel. Nothing
 //! on that path waits for the tick. Once per tick [`Players::run_tick`] applies joins, latest states and leaves
 //! to the ECS world,
-//! rebuilds the spatial grid, recomputes each player's visible set and sends each player a whole snapshot of
-//! the entities in it, split into datagrams of at most [`SNAPSHOT_MAX_ENTITIES`] states.
+//! rebuilds the spatial grid, recomputes each player's visible set and sends each player a snapshot of the
+//! entities in it, in as many datagrams as it needs.
 //!
-//! Each player's visible set and datagrams are built by its own [`View`], on a rayon pool of
+//! Snapshots are delta-encoded against the newest one each client acknowledged (task NET-14, see
+//! [`crate::snapshot`]). Each player's visible set and datagrams are built by its own [`View`], on a rayon pool of
 //! [`ListenConfig::tick_threads`] threads (task SRV-7). The tick thread does not hand datagrams to quinn itself
 //! (task NET-9): each view cuts its datagrams of a tick from one buffer sized to exactly those bytes, and the tick
 //! passes all of them to one task on the gateway runtime in a single [`Batch`]. That task hands each datagram to
@@ -45,7 +46,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::TickInfo;
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::slots::{Slot, Slots};
-use crate::snapshot::View;
+use crate::snapshot::{History, View};
 
 /// The network id of a player's entity, the `id` in snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,6 +75,9 @@ struct Batch {
 struct Inbox {
     state: Mutex<Option<ClientState>>,
     wants_stats: AtomicBool,
+    /// The newest snapshot tick the client decoded completely, from the tick field of its client states' headers
+    /// (0: none). The server uses it as the delta baseline only if it sent that tick to this player.
+    ack: AtomicU32,
 }
 
 /// What a connection task tells the tick thread: once on joining, once on leaving.
@@ -170,6 +174,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
             })
             .flatten(),
         states: Vec::new(),
+        history: History::new(),
         outbox,
         recycle,
         pending_stats: Arc::new(Mutex::new(None)),
@@ -252,6 +257,7 @@ async fn serve(
             && let Ok(mut slot) = inbox.state.lock()
         {
             *slot = Some(state);
+            inbox.ack.store(header.tick, Ordering::Relaxed);
         }
     }
     datagrams.close();
@@ -285,6 +291,8 @@ pub struct Players {
     pool: Option<rayon::ThreadPool>,
     /// The wire state of every placed player, by slot index.
     states: Vec<Option<EntityState>>,
+    /// The wire states of the last ticks, for delta baselines.
+    history: History,
     outbox: tokio_mpsc::Sender<Batch>,
     /// Batches the send task has emptied, to be filled again.
     recycle: mpsc::Receiver<Batch>,
@@ -407,11 +415,13 @@ impl Players {
     }
 
     fn send_snapshots(&mut self, tick: u32) {
-        let (grid, states, config) = (&self.grid, &self.states[..], &self.visibility);
+        self.history.record(tick, &self.states);
+        let (grid, history, config) = (&self.grid, &self.history, &self.visibility);
         let build = |player: &mut Player| {
+            let ack = player.inbox.ack.load(Ordering::Relaxed);
             player
                 .view
-                .build(player.slot.index as usize, grid, states, config, tick);
+                .build(player.slot.index as usize, grid, history, config, tick, ack);
         };
         match &self.pool {
             Some(pool) => pool.install(|| {
