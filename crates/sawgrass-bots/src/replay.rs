@@ -52,6 +52,7 @@ pub fn parse(file: &[u8]) -> Result<BTreeMap<u32, Script>, String> {
             Ok(read) => read,
             Err(RecordError::Truncated) => break,
             Err(RecordError::UnknownKind(kind)) => return Err(format!("a record of unknown kind {kind}")),
+            Err(RecordError::TooLong(len)) => return Err(format!("a record of {len} bytes")),
         };
         let script = scripts.entry(record.connection).or_default();
         match record.kind {
