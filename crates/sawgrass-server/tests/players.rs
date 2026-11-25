@@ -2,7 +2,7 @@
 //! says it is, and sends each a snapshot with the other. A flood of states costs one slot, not a queue, and
 //! connections beyond the player cap are refused. Each connection is held to its rates: states beyond them are
 //! dropped, a sustained flood or an undecodable event closes the connection, and one address gets only so many
-//! connections. A client that teleports stays where it was, and is told so.
+//! connections. A client that teleports stays where it was, and is told so, unless the rules only report.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -16,6 +16,7 @@ use sawgrass_protocol::{
     EntityState, PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity,
 };
 use sawgrass_server::limits::Limits;
+use sawgrass_server::movement::MovementRules;
 use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState, Roster};
 use sawgrass_server::{TickConfig, TickLoop};
 
@@ -544,6 +545,104 @@ fn a_teleport_is_refused_and_counted() {
     }));
 }
 
+/// The player list an operator reads: each connected player's id, address, position and refused states, filled
+/// only on the tick after it is asked for.
+#[test]
+fn the_player_list_shows_who_is_where() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let list = players.player_list();
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    // Not asked for: nothing is filled in.
+    tick_loop.run_tick();
+    assert!(list.take().is_empty());
+    let spawn = state_packet(10.0);
+    let jump = state_packet(5000.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(spawn.clone());
+        position_of(t, id) == Some([10.0, 5.0, 30.0])
+    }));
+    let _ = client.send_datagram(jump);
+    std::thread::sleep(Duration::from_millis(50));
+    tick_loop.run_tick();
+    list.request();
+    tick_loop.run_tick();
+    let views = list.take();
+    assert_eq!(views.len(), 1);
+    let view = views[0];
+    assert_eq!(view.id, id);
+    assert!(view.address.ip().is_loopback());
+    assert_eq!(view.position, Some([10.0, 5.0, 30.0]));
+    assert_eq!(view.refused.teleport, 1);
+    // Taken once: the next take is empty until asked again.
+    assert!(list.take().is_empty());
+}
+
+/// With `report_only`, a teleport is counted like a refusal but applied, and nobody is corrected: a first session
+/// with the game learns which limit is wrong without fighting it.
+#[test]
+fn report_only_counts_a_teleport_and_applies_it() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let config = ListenConfig {
+        movement: MovementRules {
+            report_only: true,
+            ..MovementRules::default()
+        },
+        ..ListenConfig::default()
+    };
+    let (addr, roots, mut players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, config))
+    };
+    let traffic = players.traffic();
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let mut client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let id = std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut client)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    let spawn = state_packet(10.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(spawn.clone());
+        position_of(t, id) == Some([10.0, 5.0, 30.0])
+    }));
+    let jump = state_packet(5000.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(jump.clone());
+        position_of(t, id) == Some([5000.0, 5.0, 30.0])
+    }));
+    assert!(traffic.refused_teleport.load(Ordering::Relaxed) >= 1);
+    assert_eq!(traffic.corrections.load(Ordering::Relaxed), 0);
+    // A walk from the new place is a normal move.
+    let refused = traffic.refused_teleport.load(Ordering::Relaxed);
+    let step = state_packet(5002.0);
+    assert!(tick_until(&mut tick_loop, |t| {
+        let _ = client.send_datagram(step.clone());
+        position_of(t, id) == Some([5002.0, 5.0, 30.0])
+    }));
+    assert_eq!(traffic.refused_teleport.load(Ordering::Relaxed), refused);
+}
+
 /// Entities the server spawns (ADR 0006): a vehicle reaches a nearby client's snapshot with its kind, model and
 /// block, and leaves it when despawned. Players and positions off the map are not spawned.
 #[test]
@@ -831,6 +930,101 @@ fn only_the_owner_moves_a_vehicle_and_damages_it_by_the_rule() {
     assert_eq!(car_at(&players).map(|(_, e)| e), Some(engine));
 }
 
+/// With `report_only`, a spawn and an owner's state that break the movement rules are counted and applied, so a
+/// wrong limit in a first session does not freeze the cars clients drive. Ownership is still checked.
+#[test]
+fn report_only_applies_owned_and_spawned_states_and_counts_them() {
+    use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+    use sawgrass_protocol::game::OwnedState;
+    use sawgrass_protocol::ped::PedBlock;
+    use sawgrass_protocol::vehicle::VehicleBlock;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let config = ListenConfig {
+        movement: MovementRules {
+            report_only: true,
+            ..MovementRules::default()
+        },
+        ..ListenConfig::default()
+    };
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, config))
+    };
+    let traffic = players.traffic();
+    let players = Arc::new(Mutex::new(players));
+    let at = |x: f32, speed: f32| ClientState {
+        position: Position::from_metres([x, 5.0, 30.0]).expect("position"),
+        velocity: Velocity::from_metres_per_second([speed, 0.0, 0.0]).expect("velocity"),
+        rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+    };
+    let info =
+        Info::with_fields(EntityKind::Vehicle, AssetId(3), &VehicleBlock::INTACT.to_fields()).expect("info");
+    // Faster than the limit: spawned anyway, and counted.
+    let car = players
+        .lock()
+        .expect("players")
+        .spawn(info, at(30.0, 200.0))
+        .expect("spawned");
+    assert_eq!(traffic.reported_spawns.load(Ordering::Relaxed), 1);
+
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let mut a = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("a connects");
+    std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut a)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    let send = |epoch: u8, car_state: ClientState| {
+        let owned = OwnedState::new(car, epoch, car_state, &VehicleBlock::INTACT.to_fields()).expect("owned");
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::ClientState,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        at(10.0, 0.0)
+            .encode_with_owned(&PedBlock::default(), &[owned], &mut packet)
+            .expect("state");
+        a.send_datagram(Bytes::from(packet)).expect("send");
+    };
+    let car_x = |players: &Mutex<net::Players>| {
+        players
+            .lock()
+            .expect("players")
+            .spawned(car)
+            .map(|(_, s)| s.position.to_metres()[0])
+    };
+    send(0, at(30.0, 0.0));
+    assert!(tick_until(&mut tick_loop, |_| {
+        players
+            .lock()
+            .expect("players")
+            .owner(car)
+            .is_some_and(|(o, e)| o.is_some() && e == 1)
+    }));
+    // A jump the movement checks refuse is applied and counted; a stale epoch is still dropped.
+    send(1, at(-135.0, 0.0));
+    assert!(tick_until(&mut tick_loop, |_| car_x(&players) == Some(-135.0)));
+    assert!(traffic.refused_owned_movement.load(Ordering::Relaxed) >= 1);
+    send(0, at(-130.0, 0.0));
+    assert!(wait_for(&traffic.refused_owned_stale, 1, || {
+        tick_loop.run_tick();
+    }));
+    assert_eq!(car_x(&players), Some(-135.0));
+}
+
 /// SRV-19: a player that does not own a vehicle cannot move it, and when the owner leaves at speed, the next owner's
 /// first state is checked from the last accepted one, so carrying on at the same speed is not refused.
 #[test]
@@ -924,4 +1118,48 @@ fn a_hand_off_at_speed_is_not_refused() {
     send(&b, 5.0, &[car_state(3, 34.0)]);
     assert!(tick_until(&mut tick_loop, |_| car_x(&players) == Some(34.0)));
     assert_eq!(traffic.refused_owned_movement.load(Ordering::Relaxed), 0);
+}
+
+/// NET-20, ADR 0006 section 5: shots have their own budget, so a burst of shots does not use up the other events'
+/// and is dropped beyond its own, without closing the connection.
+#[test]
+fn shots_are_limited_apart_from_other_events() {
+    use sawgrass_protocol::combat::Shot;
+    use sawgrass_protocol::entity::AssetId;
+    use sawgrass_protocol::game::ClientEvent;
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (mut client, traffic, _players) = limited(&runtime, Limits::default());
+    let packet = |event: ClientEvent| {
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::Event,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        event.encode(&mut packet);
+        packet
+    };
+    let from = Position::from_metres([1.0, 2.0, 3.0]).expect("position");
+    let shot = packet(ClientEvent::Shot(Box::new(Shot::new(1, AssetId(9), from))));
+    let other = packet(ClientEvent::RequestStats);
+    // 30 shots against a burst of 20, and 30 other events against a burst of 40.
+    for _ in 0..30 {
+        runtime.block_on(client.send_event(&shot)).expect("send");
+        runtime.block_on(client.send_event(&other)).expect("send");
+    }
+    let limits = Limits::default();
+    assert!(wait_for(&traffic.shots_received, limits.shot_burst as u64, || ()));
+    assert!(wait_for(&traffic.dropped_events, 1, || ()));
+    std::thread::sleep(Duration::from_millis(100));
+    let (shots, dropped) = (
+        traffic.shots_received.load(Ordering::Relaxed),
+        traffic.dropped_events.load(Ordering::Relaxed),
+    );
+    // Only shots were dropped: the other events stayed within their own burst.
+    assert_eq!(shots + dropped, 30, "{shots} shots, {dropped} dropped");
+    assert!(shots < 30);
+    assert_eq!(traffic.closed_floods.load(Ordering::Relaxed), 0);
 }

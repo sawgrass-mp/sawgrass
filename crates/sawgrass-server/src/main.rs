@@ -6,8 +6,10 @@
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
 //!                 [--max-players N] [--max-per-address N] [--max-handshakes N] [--tick-threads N]
-//!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]
-//!                 [--vehicles N] [--vehicle-area M]
+//!                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]]
+//!                 [--resources DIR [--script-budget-ms N]] [--vehicles N] [--vehicle-area M]
+//!                 [--map-min X,Y] [--map-size M] [--height MIN,MAX] [--max-speed M/S] [--move-slack S]
+//!                 [--movement-report-only] [--list-players]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -27,12 +29,29 @@
 //! while the snapshot pool works, so gateway and tick threads together are one per core. Giving only one of the
 //! options gives the other the rest of the cores.
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
+//! - `--ledger DIR`: keep players' money in the RocksDB ledger in DIR, created if missing (DB-8). Every player
+//!   gets a wallet funded with `--start-cash` minor units (default 100000) from the server's treasury.
+//! - `--money-events`: let clients pay each other with a payment event, for money load tests. Do not use it on a
+//!   public server: resources will move money through the scripting API.
 //! - `--vehicles N`: spawn N parked vehicles at start, spread over a square centred on the origin, for load tests
 //!   (default 0). Their model is `AssetId(1)`, a placeholder.
 //! - `--vehicle-area M`: the edge of that square, in metres (default 1500, the bots' crowded area).
 //! - `--resources DIR`: run every resource in `DIR` (a folder with a `resource.toml`) in the tick. A resource that
 //!   fails to load is reported and left out.
 //! - `--script-budget-ms N`: the time all resources together may take in one tick (default 8).
+//!
+//! Movement checks (task SRV-9), for the first sessions with the game, whose coordinates and speeds are not known
+//! yet. The defaults are wide on purpose; the interest grid covers the same square as the checks.
+//!
+//! - `--map-min X,Y`: the map's south-west corner, in metres (default -8192,-8192).
+//! - `--map-size M`: the map square's edge, in metres (default 16384; at most 409600).
+//! - `--height MIN,MAX`: the lowest and highest height allowed, in metres (default -500,3000).
+//! - `--max-speed M/S`: the fastest a player may move, on foot or in any vehicle (default 150).
+//! - `--move-slack S`: seconds of movement at the speed limit forgiven for jitter (default 0.5).
+//! - `--movement-report-only`: count a state that breaks a rule but apply it, and send no correction. For a first
+//!   session, to see which limits are wrong; not for public servers.
+//! - `--list-players`: after each five-second line, one line per connected player (at most 32): its id, address,
+//!   time connected, position and refused states. For playtests with a few players (task SRV-23).
 
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
@@ -45,10 +64,14 @@ use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::{ClientState, ServerStats};
 use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{Position, Rotation, Velocity};
+use sawgrass_server::interest::{MapBounds, Point};
 use sawgrass_server::limits::Limits;
+use sawgrass_server::money::Money;
+use sawgrass_server::movement::MovementRules;
 use sawgrass_server::net::{self, NetId};
 use sawgrass_server::scripts::{self, Scripts};
 use sawgrass_server::{TickConfig, TickLoop, cpu};
+use sawgrass_store::{Config as LedgerConfig, RocksStore, Writer};
 
 /// jemalloc for every allocation in the process (SRV-5; BOT-3 halved the crowd's tick p99 with it).
 #[cfg(unix)]
@@ -69,10 +92,24 @@ struct Args {
     max_handshakes: usize,
     tick_threads: Option<usize>,
     stats_to_clients: bool,
+    ledger: Option<PathBuf>,
+    start_cash: i64,
+    money_events: bool,
     vehicles: u32,
     vehicle_area: f32,
     resources: Option<PathBuf>,
     script_budget: Duration,
+    movement: MovementRules,
+    list_players: bool,
+}
+
+/// Parses `A,B` into two numbers.
+fn pair(name: &str, text: &str) -> Result<(f32, f32), String> {
+    let (a, b) = text
+        .split_once(',')
+        .ok_or_else(|| format!("{name}: expected two numbers as A,B"))?;
+    let number = |t: &str| t.trim().parse::<f32>().map_err(|e| format!("{name}: {e}"));
+    Ok((number(a)?, number(b)?))
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -88,10 +125,15 @@ fn parse_args() -> Result<Args, String> {
         max_handshakes: net::ListenConfig::default().limits.max_handshakes,
         tick_threads: None,
         stats_to_clients: false,
+        ledger: None,
+        start_cash: 100_000,
+        money_events: false,
         vehicles: 0,
         vehicle_area: 1500.0,
         resources: None,
         script_budget: scripts::DEFAULT_BUDGET,
+        movement: MovementRules::default(),
+        list_players: false,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -138,6 +180,13 @@ fn parse_args() -> Result<Args, String> {
                 args.tick_threads = Some(n.max(1));
             }
             "--stats-to-clients" => args.stats_to_clients = true,
+            "--ledger" => args.ledger = Some(PathBuf::from(value("--ledger")?)),
+            "--start-cash" => {
+                args.start_cash = value("--start-cash")?
+                    .parse()
+                    .map_err(|e| format!("--start-cash: {e}"))?;
+            }
+            "--money-events" => args.money_events = true,
             "--vehicles" => {
                 args.vehicles = value("--vehicles")?
                     .parse()
@@ -155,13 +204,87 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--script-budget-ms: {e}"))?;
                 args.script_budget = Duration::from_millis(ms);
             }
+            "--map-min" => {
+                let (x, y) = pair("--map-min", &value("--map-min")?)?;
+                args.movement.bounds.min = Point::new(x, y);
+            }
+            "--map-size" => {
+                args.movement.bounds.size = value("--map-size")?
+                    .parse()
+                    .map_err(|e| format!("--map-size: {e}"))?;
+            }
+            "--height" => args.movement.height = pair("--height", &value("--height")?)?,
+            "--max-speed" => {
+                args.movement.max_speed = value("--max-speed")?
+                    .parse()
+                    .map_err(|e| format!("--max-speed: {e}"))?;
+            }
+            "--move-slack" => {
+                args.movement.slack_seconds = value("--move-slack")?
+                    .parse()
+                    .map_err(|e| format!("--move-slack: {e}"))?;
+            }
+            "--movement-report-only" => args.movement.report_only = true,
+            "--list-players" => args.list_players = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
     if args.listen.is_some() && (args.cert.is_none() || args.key.is_none()) {
         return Err("--listen needs --cert and --key".to_owned());
     }
+    args.movement
+        .validate()
+        .map_err(|e| format!("movement rules: {e}"))?;
     Ok(args)
+}
+
+/// Most players `--list-players` prints a line for.
+const LISTED_PLAYERS: usize = 32;
+
+/// One line per player for `--list-players`, at most [`LISTED_PLAYERS`].
+fn describe_players(players: &[net::PlayerView]) -> String {
+    let mut out = String::new();
+    for p in players.iter().take(LISTED_PLAYERS) {
+        let at = p.position.map_or_else(
+            || "not placed yet".to_owned(),
+            |[x, y, z]| format!("at {x:.1}, {y:.1}, {z:.1} m"),
+        );
+        let r = p.refused;
+        out += &format!(
+            "  player {} from {} for {} s, {at}, refused {} bounds {} speed {} teleport\n",
+            p.id,
+            p.address,
+            p.connected.as_secs(),
+            r.bounds,
+            r.speed,
+            r.teleport
+        );
+    }
+    if players.len() > LISTED_PLAYERS {
+        out += &format!("  and {} more players\n", players.len() - LISTED_PLAYERS);
+    }
+    out
+}
+
+/// One line with the movement rules the server runs with.
+fn describe(rules: &MovementRules) -> String {
+    let MapBounds { min, size } = rules.bounds;
+    format!(
+        "movement: map x {} to {} m, y {} to {} m, height {} to {} m, at most {} m/s with {} s of slack, refusals {}",
+        min.x,
+        min.x + size,
+        min.y,
+        min.y + size,
+        rules.height.0,
+        rules.height.1,
+        rules.max_speed,
+        rules.slack_seconds,
+        if rules.report_only {
+            "counted and applied (report only)"
+        } else {
+            "enforced"
+        },
+    )
 }
 
 /// Spawns `count` parked vehicles at even spacing over a square of edge `area` centred on the origin, and returns
@@ -215,7 +338,11 @@ fn main() -> ExitCode {
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
                  [--net-threads N] [--max-players N] [--max-per-address N] [--max-handshakes N] \
                  [--tick-threads N] \
-                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]"
+                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]] \
+                 [--resources DIR [--script-budget-ms N]] \
+                 [--vehicles N] [--vehicle-area M] [--map-min X,Y] [--map-size M] [--height MIN,MAX] \
+                 [--max-speed M/S] [--move-slack S] [--movement-report-only] \
+                 [--list-players]"
             );
             return ExitCode::from(2);
         }
@@ -234,7 +361,37 @@ fn main() -> ExitCode {
     let mut runtime = None;
     let mut network = None;
     let mut shutdown = None;
+    let writer = match &args.ledger {
+        Some(dir) => {
+            match RocksStore::open(dir).and_then(|store| Writer::start(store, LedgerConfig::default())) {
+                Ok(writer) => Some(writer),
+                Err(e) => {
+                    eprintln!("sawgrass-server: ledger {}: {e}", dir.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
+    let money = match &writer {
+        Some(writer) => {
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            match Money::open(writer.handle(), args.start_cash, run) {
+                Ok(money) => Some(money),
+                Err(e) => {
+                    eprintln!("sawgrass-server: ledger: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
     let mut roster = None;
+    let mut player_list = None;
+    // Set on the report tick that asked for the list; the tick after it filled the list in.
+    let mut listing = false;
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let (threads, tick_threads) = split_cores(cores, args.net_threads, args.tick_threads);
@@ -257,7 +414,8 @@ fn main() -> ExitCode {
                     println!(
                         "listening on {listen} with {threads} gateway threads and {tick_threads} tick threads"
                     );
-                    net::listen(
+                    println!("{}", describe(&args.movement));
+                    net::listen_with_money(
                         gateway,
                         net::ListenConfig {
                             stats_to_clients: args.stats_to_clients,
@@ -268,8 +426,10 @@ fn main() -> ExitCode {
                                 max_handshakes: args.max_handshakes,
                                 ..Limits::default()
                             },
-                            ..net::ListenConfig::default()
+                            money_events: args.money_events,
+                            movement: args.movement,
                         },
+                        money.clone(),
                     )
                 }
                 Err(e) => {
@@ -286,6 +446,7 @@ fn main() -> ExitCode {
             println!("spawned {spawned} of {} vehicles", args.vehicles);
         }
         roster = Some(players.roster());
+        player_list = args.list_players.then(|| players.player_list());
         tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
         runtime = Some(rt);
     }
@@ -320,6 +481,10 @@ fn main() -> ExitCode {
         let tick = tick_loop.tick();
         if args.ticks.is_some_and(|limit| tick >= limit) {
             return ControlFlow::Break(());
+        }
+        if let Some(list) = player_list.as_ref().filter(|_| listing) {
+            listing = false;
+            print!("{}", describe_players(&list.take()));
         }
         if tick > 0 && tick % report_every == 0 {
             let stats = tick_loop.metrics().stats();
@@ -371,11 +536,13 @@ fn main() -> ExitCode {
                     count(&traffic.players_cut)
                 );
                 line += &format!(
-                    ", owned states refused {} stale {} movement {} far, owner events lost {}",
+                    ", owned states refused {} stale {} movement {} far, owner events lost {}, \
+                     spawns outside the movement rules {}",
                     count(&traffic.refused_owned_stale),
                     count(&traffic.refused_owned_movement),
                     count(&traffic.refused_owned_far),
-                    count(&traffic.lost_owner_events)
+                    count(&traffic.lost_owner_events),
+                    count(&traffic.reported_spawns)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);
@@ -383,10 +550,22 @@ fn main() -> ExitCode {
                 last.3 = sent;
                 last.4 = received;
             }
+            if let Some(money) = &money {
+                let stats = money.ledger().stats();
+                line += &format!(
+                    ", ledger {} operations in {} batches",
+                    stats.operations.load(Ordering::Relaxed),
+                    stats.batches.load(Ordering::Relaxed)
+                );
+            }
             if let Some(overrun) = tick_loop.take_worst_overrun() {
                 line += &format!(", worst overrun {overrun}");
             }
             println!("{line}");
+            if let Some(list) = &player_list {
+                list.request();
+                listing = true;
+            }
             last = (now.0, now.1, now.2, last.3, last.4);
         }
         ControlFlow::Continue(())
@@ -403,6 +582,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     drop(runtime);
+    drop(money);
+    if let Some(writer) = writer {
+        writer.stop();
+    }
     ExitCode::SUCCESS
 }
 

@@ -125,6 +125,23 @@ pub fn render(from: &Sample, to: &Sample, server: Option<&ServerStats>, ctx: &Co
         rate(to.sent_bytes, from.sent_bytes) / n / 1000.0,
     );
 
+    if to.payments_sent > from.payments_sent {
+        let answer = |q| {
+            Histogram::quantile(&from.payment_answer, &to.payment_answer, q)
+                .map_or_else(|| "n/a".to_owned(), |d| format!("<{:.2} ms", ms(d)))
+        };
+        let _ = writeln!(
+            out,
+            "money: {:.0} payments/s sent, {:.0}/s done, {} short of funds, {} refused otherwise; answer p50 {} p99 {}",
+            rate(to.payments_sent, from.payments_sent),
+            rate(to.payments_done, from.payments_done),
+            to.payments_short - from.payments_short,
+            to.payments_refused - from.payments_refused,
+            answer(0.5),
+            answer(0.99),
+        );
+    }
+
     let (verdict, cores, late_p99) = generator(from, to, ctx);
     let late_p50 = Histogram::quantile(&from.lateness, &to.lateness, 0.5);
     let fmt_late = |d: Option<Duration>| d.map_or_else(|| "n/a".to_owned(), |d| format!("<{:.2} ms", ms(d)));

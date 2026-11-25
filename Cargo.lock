@@ -1325,6 +1325,7 @@ dependencies = [
  "sawgrass-gateway",
  "sawgrass-protocol",
  "sawgrass-server",
+ "sawgrass-store",
  "tikv-jemallocator",
  "tokio",
 ]
@@ -1333,8 +1334,13 @@ dependencies = [
 name = "sawgrass-client-module"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "rcgen",
+ "sawgrass-gateway",
  "sawgrass-netcode",
  "sawgrass-protocol",
+ "sawgrass-server",
+ "tokio",
 ]
 
 [[package]]
@@ -1392,6 +1398,7 @@ dependencies = [
  "sawgrass-gateway",
  "sawgrass-protocol",
  "sawgrass-script",
+ "sawgrass-store",
  "tikv-jemallocator",
  "tokio",
 ]

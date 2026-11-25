@@ -4,16 +4,17 @@
 //! baseline it names from the ticks it decoded lately, and acknowledges the newest one in the tick field of its
 //! client states' headers, as a game client does.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use sawgrass_gateway::{Connector, Datagrams, RootCertStore, connect};
+use sawgrass_gateway::{Connector, Datagrams, EventSender, RootCertStore, connect};
 use sawgrass_protocol::EntityState;
 use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta};
-use sawgrass_protocol::game::{ClientEvent, ClientState, ServerEvent};
+use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent};
 use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -49,6 +50,11 @@ pub struct BotConfig {
     /// Sockets the bots share, bot `i` using socket `i % len`; empty gives every bot its own, as players have.
     /// Sharing saves the generator a receive loop per bot and leaves the server one connection per bot.
     pub sockets: Vec<Connector>,
+    /// How often each bot pays another, on average, if set (BOT-7). The server must run with a ledger and
+    /// `--money-events`.
+    pub pay_every: Option<Duration>,
+    /// The entity ids of the bots that joined, so a bot pays a real player.
+    pub payees: Arc<Mutex<Vec<u32>>>,
 }
 
 /// What one bot learned from the server, for tests.
@@ -116,14 +122,33 @@ pub async fn run(
     }
 
     let events_counters = counters.clone();
+    let payments = Arc::new(Mutex::new(HashMap::<u64, Instant>::new()));
+    let own = Arc::new(AtomicU32::new(u32::MAX));
+    let (answered, own_id, payees) = (payments.clone(), own.clone(), config.payees.clone());
     tokio::spawn(async move {
         let mut joined = joined;
         while let Ok((_, packet)) = event_receiver.recv().await {
             match ServerEvent::decode(&packet[PacketHeader::SIZE..]) {
                 Ok(ServerEvent::Joined { entity, tick_hz }) => {
+                    own_id.store(entity, Ordering::Relaxed);
+                    if let Ok(mut payees) = payees.lock() {
+                        payees.push(entity);
+                    }
                     if let Some(tx) = joined.take() {
                         let _ = tx.send(Joined { entity, tick_hz });
                     }
+                }
+                Ok(ServerEvent::Paid { key, result, .. }) => {
+                    let sent = answered.lock().ok().and_then(|mut p| p.remove(&key));
+                    if let Some(sent) = sent {
+                        events_counters.payment_answer.record(sent.elapsed());
+                    }
+                    let counter = match result {
+                        PayResult::Done => &events_counters.payments_done,
+                        PayResult::InsufficientFunds => &events_counters.payments_short,
+                        _ => &events_counters.payments_refused,
+                    };
+                    Counters::add(counter, 1);
                 }
                 Ok(ServerEvent::Stats(stats)) => {
                     if let Ok(mut slot) = events_counters.server.lock() {
@@ -131,10 +156,22 @@ pub async fn run(
                     }
                 }
                 // Bots simulate no vehicle until BOT-5, and an honest walker stays within the limits; a correction
-                // would show up in the server's counts.
-                Ok(ServerEvent::Ownership { .. } | ServerEvent::Corrected(_)) | Err(_) => {}
+                // would show up in the server's counts. Other events are not for bots.
+                Ok(_) | Err(_) => {}
             }
         }
+    });
+
+    let payer = config.pay_every.map(|every| {
+        tokio::spawn(pay(
+            event_sender,
+            every,
+            index,
+            own,
+            config.payees.clone(),
+            payments,
+            counters.clone(),
+        ))
     });
 
     let recorder = config.record.clone().filter(|r| r.records(index));
@@ -149,6 +186,9 @@ pub async fn run(
     let ended_early = send_states(&config, index, &datagrams, &ack, &counters, stop).await;
     datagrams.close();
     reader.abort();
+    if let Some(payer) = payer {
+        payer.abort();
+    }
     if ended_early {
         Counters::add(&counters.dropped, 1);
     }
@@ -195,6 +235,47 @@ async fn send_states(
         }
         Counters::add(&counters.sent_datagrams, 1);
         Counters::add(&counters.sent_bytes, len);
+    }
+}
+
+/// Pays a random other bot 1 to 100 units every `every` on average, the pause drawn between half and one and a
+/// half of it, until the connection ends. Answers arrive on the events task, which matches them by key.
+async fn pay(
+    mut sender: EventSender,
+    every: Duration,
+    index: u64,
+    own: Arc<AtomicU32>,
+    payees: Arc<Mutex<Vec<u32>>>,
+    payments: Arc<Mutex<HashMap<u64, Instant>>>,
+    counters: Arc<Counters>,
+) {
+    let mut rng = Rng::new(index.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x0070_6179);
+    // A random first pause, so bots that joined together do not pay together.
+    tokio::time::sleep(every.mul_f32(rng.range(0.0, 1.0))).await;
+    let mut key = 0u64;
+    loop {
+        let me = own.load(Ordering::Relaxed);
+        let to = payees.lock().ok().and_then(|p| {
+            if p.len() < 2 {
+                return None;
+            }
+            let pick = p[(rng.unit() * p.len() as f32) as usize % p.len()];
+            Some(pick).filter(|&to| to != me)
+        });
+        if let (Some(to), true) = (to, me != u32::MAX) {
+            key += 1;
+            let amount = 1 + (rng.unit() * 100.0) as u32;
+            let mut packet = header(PacketKind::Event, 0, 0);
+            ClientEvent::Pay { key, to, amount }.encode(&mut packet);
+            if let Ok(mut p) = payments.lock() {
+                p.insert(key, Instant::now());
+            }
+            if sender.send(&packet).await.is_err() {
+                return;
+            }
+            Counters::add(&counters.payments_sent, 1);
+        }
+        tokio::time::sleep(every.mul_f32(rng.range(0.5, 1.5))).await;
     }
 }
 

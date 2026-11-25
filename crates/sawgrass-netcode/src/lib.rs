@@ -1,6 +1,6 @@
 //! The network core of the Sawgrass client, independent of the game and of the runtime it runs on.
 //!
-//! Roadmap step 8 ("Sync in the game") starts with remote players interpolated between snapshots and the local
+//! Roadmap step 9 ("Sync in the game") starts with remote players interpolated between snapshots and the local
 //! player predicted and corrected from the server. Everything here is plain logic over the wire types of
 //! `sawgrass-protocol`: no game access, no I/O, no clock of its own. The caller passes the local time in seconds,
 //! so the same code runs in the game module, in the bots and in deterministic tests.
@@ -28,7 +28,7 @@ mod client;
 
 pub use client::{Client, ClientConfig};
 
-use sawgrass_protocol::game::ClientState;
+use sawgrass_protocol::game::{ClientState, OwnedState};
 use sawgrass_protocol::{EncodeError, EntityState, Position, Rotation, Velocity};
 
 /// An entity's position, velocity and rotation in game units: metres, metres per second and a unit quaternion
@@ -71,6 +71,13 @@ impl Pose {
             velocity: Velocity::from_metres_per_second(self.velocity)?,
             rotation: Rotation::from_quaternion(self.rotation)?,
         })
+    }
+
+    /// The quantized state of entity `id`, simulated by this client under ownership `epoch`, with its block
+    /// `fields` (a vehicle block for a vehicle, a ped block for an NPC). Fails for a value outside the wire ranges or
+    /// more than `MAX_FIELDS` fields.
+    pub fn to_owned_state(&self, id: u32, epoch: u8, fields: &[u32]) -> Result<OwnedState, EncodeError> {
+        OwnedState::new(id, epoch, self.to_client_state()?, fields)
     }
 }
 
