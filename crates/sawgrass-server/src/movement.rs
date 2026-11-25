@@ -23,7 +23,10 @@ use std::time::Instant;
 
 use sawgrass_protocol::game::ClientState;
 
-use crate::interest::MapBounds;
+use crate::interest::{DENSE_CELL_SIZE, MapBounds};
+
+/// Most cells the interest grid may have over [`MovementRules::bounds`] (the limit of `DenseGrid::new`).
+const MAX_GRID_CELLS: f64 = (1u64 << 26) as f64;
 
 /// The limits a client's movement is checked against.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,8 +39,11 @@ pub struct MovementRules {
     pub slack_seconds: f32,
     /// Lowest and highest height allowed, in metres.
     pub height: (f32, f32),
-    /// The map's ground area.
+    /// The map's ground area. The interest grid covers the same square.
     pub bounds: MapBounds,
+    /// Count a state that breaks a rule but apply it anyway, and send no correction: for a first session with the
+    /// game, to learn which limits are wrong without fighting them. Not for public servers.
+    pub report_only: bool,
 }
 
 impl MovementRules {
@@ -49,6 +55,47 @@ impl MovementRules {
         let inside = x >= min.x && x < min.x + size && y >= min.y && y < min.y + size;
         inside && z >= self.height.0 && z <= self.height.1
     }
+
+    /// Checks that the rules can be used: finite numbers, a positive speed limit and map size, a height range that
+    /// is not empty, and a map the interest grid can cover.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong, in words for the person who set it.
+    pub fn validate(&self) -> Result<(), String> {
+        let MapBounds { min, size } = self.bounds;
+        if !(min.x.is_finite() && min.y.is_finite()) {
+            return Err("the map's corner must be finite".into());
+        }
+        if !(size.is_finite() && size > 0.0) {
+            return Err(format!("the map size must be positive, not {size}"));
+        }
+        let cells = (f64::from(size) / f64::from(DENSE_CELL_SIZE)).ceil().powi(2);
+        if cells > MAX_GRID_CELLS {
+            return Err(format!(
+                "a {size} m map needs {cells} grid cells of {DENSE_CELL_SIZE} m; the most is {MAX_GRID_CELLS}"
+            ));
+        }
+        let (low, high) = self.height;
+        if !(low.is_finite() && high.is_finite() && low < high) {
+            return Err(format!(
+                "the height range must be finite and low below high, not {low}..{high}"
+            ));
+        }
+        if !(self.max_speed.is_finite() && self.max_speed > 0.0) {
+            return Err(format!(
+                "the speed limit must be positive, not {}",
+                self.max_speed
+            ));
+        }
+        if !(self.slack_seconds.is_finite() && self.slack_seconds >= 0.0) {
+            return Err(format!(
+                "the slack must be zero or more seconds, not {}",
+                self.slack_seconds
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for MovementRules {
@@ -58,6 +105,7 @@ impl Default for MovementRules {
             slack_seconds: 0.5,
             height: (-500.0, 3000.0),
             bounds: MapBounds::default(),
+            report_only: false,
         }
     }
 }
@@ -154,6 +202,13 @@ impl Movement {
         }
     }
 
+    /// Takes `state` as the last accepted one although it broke a rule ([`MovementRules::report_only`]), with the
+    /// full slack, as if the player had been placed there.
+    pub fn accept(&mut self, rules: &MovementRules, state: &ClientState, now: Instant) {
+        self.slack = Self::full_slack(rules);
+        self.last = Some((state.position.to_metres(), now));
+    }
+
     /// The allowance left after the move, or why it is refused.
     fn judge(&self, rules: &MovementRules, state: &ClientState, now: Instant) -> Result<f32, Violation> {
         if !rules.contains(state) {
@@ -190,6 +245,8 @@ mod tests {
 
     use sawgrass_protocol::{Position, Rotation, Velocity};
 
+    use crate::interest::Point;
+
     const DT: Duration = Duration::from_millis(50);
 
     fn at(p: [f32; 3], v: [f32; 3]) -> ClientState {
@@ -198,6 +255,79 @@ mod tests {
             velocity: Velocity::from_metres_per_second(v).expect("velocity"),
             rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
         }
+    }
+
+    #[test]
+    fn the_default_rules_are_valid_and_bad_ones_are_named() {
+        assert_eq!(MovementRules::default().validate(), Ok(()));
+        let bad = [
+            MovementRules {
+                max_speed: 0.0,
+                ..MovementRules::default()
+            },
+            MovementRules {
+                max_speed: f32::NAN,
+                ..MovementRules::default()
+            },
+            MovementRules {
+                slack_seconds: -1.0,
+                ..MovementRules::default()
+            },
+            MovementRules {
+                height: (10.0, 10.0),
+                ..MovementRules::default()
+            },
+            MovementRules {
+                bounds: MapBounds {
+                    size: 0.0,
+                    ..MapBounds::default()
+                },
+                ..MovementRules::default()
+            },
+            MovementRules {
+                bounds: MapBounds {
+                    size: 500_000.0,
+                    ..MapBounds::default()
+                },
+                ..MovementRules::default()
+            },
+            MovementRules {
+                bounds: MapBounds {
+                    min: Point::new(f32::INFINITY, 0.0),
+                    size: 100.0,
+                },
+                ..MovementRules::default()
+            },
+        ];
+        for rules in bad {
+            assert!(rules.validate().is_err(), "{rules:?}");
+        }
+        // The largest grid the server allows: 409,600 m at 50 m cells.
+        let largest = MovementRules {
+            bounds: MapBounds {
+                size: 409_600.0,
+                ..MapBounds::default()
+            },
+            ..MovementRules::default()
+        };
+        assert_eq!(largest.validate(), Ok(()));
+    }
+
+    #[test]
+    fn an_accepted_rule_breaker_is_the_new_starting_point() {
+        let rules = MovementRules::default();
+        let mut m = Movement::new();
+        let now = Instant::now();
+        m.check(&rules, &at([0.0, 0.0, 10.0], [0.0; 3]), now)
+            .expect("spawn");
+        let jump = at([5000.0, 0.0, 10.0], [0.0; 3]);
+        assert_eq!(m.check(&rules, &jump, now + DT), Err(Violation::Teleport));
+        m.accept(&rules, &jump, now + DT);
+        assert_eq!(
+            m.check(&rules, &at([5005.0, 0.0, 10.0], [0.0; 3]), now + 2 * DT),
+            Ok(())
+        );
+        assert_eq!(m.violations().teleport, 1);
     }
 
     #[test]

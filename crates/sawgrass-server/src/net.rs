@@ -55,7 +55,7 @@ use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
-use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
+use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
 use crate::movement::{Movement, MovementRules, Violation};
 use crate::owned::{DamageBudget, merge_npc, merge_vehicle};
@@ -345,7 +345,7 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
         players: Vec::new(),
         slots: Slots::new(),
         by_connection: std::collections::HashMap::new(),
-        grid: DenseGrid::default(),
+        grid: DenseGrid::new(config.movement.bounds, DENSE_CELL_SIZE),
         visibility: VisibilityConfig::default(),
         movement: config.movement,
         pool: (config.tick_threads > 1)
@@ -943,19 +943,24 @@ impl Players {
                     Violation::Teleport => &self.traffic.refused_teleport,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
-                // Nothing to send before the first accepted state: the player is not in the world yet.
-                let held = self.states.get(player.slot.index as usize).copied().flatten();
-                let due = player
-                    .corrected_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= CORRECTION_INTERVAL);
-                if let (Some(held), true) = (held, due) {
-                    player.corrected_at = Some(now);
-                    let packet = event_packet(&ServerEvent::Corrected(held), u64::from(tick));
-                    if player.events.try_send(packet).is_ok() {
-                        self.traffic.corrections.fetch_add(1, Ordering::Relaxed);
+                if rules.report_only {
+                    // Counted, then taken as if it had passed: no correction.
+                    player.movement.accept(rules, &state, now);
+                } else {
+                    // Nothing to send before the first accepted state: the player is not in the world yet.
+                    let held = self.states.get(player.slot.index as usize).copied().flatten();
+                    let due = player
+                        .corrected_at
+                        .is_none_or(|at| now.saturating_duration_since(at) >= CORRECTION_INTERVAL);
+                    if let (Some(held), true) = (held, due) {
+                        player.corrected_at = Some(now);
+                        let packet = event_packet(&ServerEvent::Corrected(held), u64::from(tick));
+                        if player.events.try_send(packet).is_ok() {
+                            self.traffic.corrections.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
             let id = player.slot.wire_id();
             match player.entity {
