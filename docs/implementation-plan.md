@@ -132,6 +132,7 @@ core decodes, so they land in this order.
 |---|---|---|
 | NET-15 | Entity kinds and model ids in added entities, and the `blocks` list in delta snapshots; `PROTOCOL_VERSION` 4 | ADR 0006 |
 | NET-16 | The ped block: motion, flags, weapon, aim, seat, action layers, health and armour | NET-15 |
+| SRV-18 | The server sends each entity's info and relays the players' ped blocks, keeping its own fields | NET-16 |
 | NET-17 | The vehicle block, and owned-entity states with their epoch in the client state | NET-15 |
 | SRV-13 | Vehicles, NPCs and objects as server entities that scripts and admin commands spawn and remove | NET-15 |
 | SRV-14 | Owners for vehicles and NPCs: the four rules, epochs, hand-off and the checks on owned states | SRV-13, NET-17 |
