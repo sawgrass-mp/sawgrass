@@ -90,7 +90,6 @@ fn deep_recursion_is_an_error() {
 fn sandbox_holds() {
     for body in [
         "io.open('x')",
-        "os.execute('true')",
         "require('x')",
         "loadstring('return 1')()",
         "getfenv(1).x = 1",
@@ -105,6 +104,13 @@ fn sandbox_holds() {
             "{body} was allowed"
         );
     }
+    // The `os` library holds only clocks and dates: nothing that starts a process or touches files.
+    let mut r = on_tick(
+        "for name in os do
+             assert(table.find({'clock', 'date', 'difftime', 'time'}, name), 'os.' .. name)
+         end",
+    );
+    assert_eq!(r.dispatch(TICK), Ok(()));
     // A script's own globals stay its own.
     let mut r = on_tick("x = 1 assert(x == 1)");
     assert_eq!(r.dispatch(TICK), Ok(()));
