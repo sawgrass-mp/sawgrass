@@ -445,11 +445,13 @@ fn main() -> ExitCode {
                     count(&traffic.players_cut)
                 );
                 line += &format!(
-                    ", owned states refused {} stale {} movement {} far, owner events lost {}",
+                    ", owned states refused {} stale {} movement {} far, owner events lost {}, \
+                     spawns outside the movement rules {}",
                     count(&traffic.refused_owned_stale),
                     count(&traffic.refused_owned_movement),
                     count(&traffic.refused_owned_far),
-                    count(&traffic.lost_owner_events)
+                    count(&traffic.lost_owner_events),
+                    count(&traffic.reported_spawns)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);
