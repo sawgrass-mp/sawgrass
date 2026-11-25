@@ -113,6 +113,7 @@ Gate: 4,096 bots with the bots on a second machine, as the
 | ID | Task |
 |---|---|
 | DB-5 | The single writer and its RocksDB store with group commit, behind the store trait (ADR 0003); bots that move money as load |
+| DB-8 | The writer in the server: a funded wallet for every player, and payments between players as a load-test event (protocol 6) |
 | DB-6 | WAL copy to a second machine before acknowledgement, and the restore procedure (ADR 0003) |
 | DB-7 | PostgreSQL archive fed from the operation records; `sawgrass-db`'s ledger becomes the archive's schema |
 | SCRIPT-3 | Luau runtime in the server: resources, events, deadlines and memory caps (ADR 0005) |

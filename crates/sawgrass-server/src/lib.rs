@@ -10,6 +10,7 @@ pub mod cpu;
 pub mod interest;
 pub mod limits;
 pub mod metrics;
+pub mod money;
 pub mod movement;
 pub mod net;
 pub mod slots;

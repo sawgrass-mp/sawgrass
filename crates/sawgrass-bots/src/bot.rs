@@ -129,7 +129,8 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
-                Err(_) => {}
+                // Bots do not pay each other yet (BOT-7).
+                Ok(ServerEvent::Paid { .. }) | Err(_) => {}
             }
         }
     });

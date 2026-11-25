@@ -13,6 +13,8 @@ hecs = { version = "0.11", default-features = false, features = ["std"] }
 bytes = "1"
 sawgrass-gateway = { path = "../sawgrass-gateway" }
 sawgrass-protocol = { path = "../sawgrass-protocol" }
+# Players' money through the single writer (ADR 0003, DB-8).
+sawgrass-store = { path = "../sawgrass-store" }
 # Players' snapshots built in parallel (SRV-4 chose players in parallel on rayon; SRV-7).
 rayon = "1"
 # The gateway runs on tokio (quinn's runtime) next to the tick thread.

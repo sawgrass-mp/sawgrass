@@ -1315,6 +1315,7 @@ dependencies = [
  "rcgen",
  "sawgrass-gateway",
  "sawgrass-protocol",
+ "sawgrass-store",
  "tikv-jemallocator",
  "tokio",
 ]

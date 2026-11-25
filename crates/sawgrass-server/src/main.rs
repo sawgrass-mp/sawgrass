@@ -6,7 +6,7 @@
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
 //!                 [--max-players N] [--max-per-address N] [--max-handshakes N] [--tick-threads N]
-//!                 [--stats-to-clients]
+//!                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -26,6 +26,10 @@
 //! while the snapshot pool works, so gateway and tick threads together are one per core. Giving only one of the
 //! options gives the other the rest of the cores.
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
+//! - `--ledger DIR`: keep players' money in the RocksDB ledger in DIR, created if missing (DB-8). Every player
+//!   gets a wallet funded with `--start-cash` minor units (default 100000) from the server's treasury.
+//! - `--money-events`: let clients pay each other with a payment event, for money load tests. Do not use it on a
+//!   public server: resources will move money through the scripting API.
 
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
@@ -36,8 +40,10 @@ use std::time::{Duration, Instant};
 
 use sawgrass_protocol::game::ServerStats;
 use sawgrass_server::limits::Limits;
+use sawgrass_server::money::Money;
 use sawgrass_server::net::{self, NetId};
 use sawgrass_server::{TickConfig, TickLoop, cpu};
+use sawgrass_store::{Config as LedgerConfig, RocksStore, Writer};
 
 /// jemalloc for every allocation in the process (SRV-5; BOT-3 halved the crowd's tick p99 with it).
 #[cfg(unix)]
@@ -58,6 +64,9 @@ struct Args {
     max_handshakes: usize,
     tick_threads: Option<usize>,
     stats_to_clients: bool,
+    ledger: Option<PathBuf>,
+    start_cash: i64,
+    money_events: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -73,6 +82,9 @@ fn parse_args() -> Result<Args, String> {
         max_handshakes: net::ListenConfig::default().limits.max_handshakes,
         tick_threads: None,
         stats_to_clients: false,
+        ledger: None,
+        start_cash: 100_000,
+        money_events: false,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(flag) = iter.next() {
@@ -119,6 +131,13 @@ fn parse_args() -> Result<Args, String> {
                 args.tick_threads = Some(n.max(1));
             }
             "--stats-to-clients" => args.stats_to_clients = true,
+            "--ledger" => args.ledger = Some(PathBuf::from(value("--ledger")?)),
+            "--start-cash" => {
+                args.start_cash = value("--start-cash")?
+                    .parse()
+                    .map_err(|e| format!("--start-cash: {e}"))?;
+            }
+            "--money-events" => args.money_events = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -147,7 +166,7 @@ fn main() -> ExitCode {
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
                  [--net-threads N] [--max-players N] [--max-per-address N] [--max-handshakes N] \
                  [--tick-threads N] \
-                 [--stats-to-clients]"
+                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]]"
             );
             return ExitCode::from(2);
         }
@@ -166,6 +185,33 @@ fn main() -> ExitCode {
     let mut runtime = None;
     let mut network = None;
     let mut shutdown = None;
+    let writer = match &args.ledger {
+        Some(dir) => {
+            match RocksStore::open(dir).and_then(|store| Writer::start(store, LedgerConfig::default())) {
+                Ok(writer) => Some(writer),
+                Err(e) => {
+                    eprintln!("sawgrass-server: ledger {}: {e}", dir.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
+    let money = match &writer {
+        Some(writer) => {
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            match Money::open(writer.handle(), args.start_cash, run) {
+                Ok(money) => Some(money),
+                Err(e) => {
+                    eprintln!("sawgrass-server: ledger: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let (threads, tick_threads) = split_cores(cores, args.net_threads, args.tick_threads);
@@ -188,7 +234,7 @@ fn main() -> ExitCode {
                     println!(
                         "listening on {listen} with {threads} gateway threads and {tick_threads} tick threads"
                     );
-                    net::listen(
+                    net::listen_with_money(
                         gateway,
                         net::ListenConfig {
                             stats_to_clients: args.stats_to_clients,
@@ -199,8 +245,10 @@ fn main() -> ExitCode {
                                 max_handshakes: args.max_handshakes,
                                 ..Limits::default()
                             },
+                            money_events: args.money_events,
                             ..net::ListenConfig::default()
                         },
+                        money.clone(),
                     )
                 }
                 Err(e) => {
@@ -284,6 +332,14 @@ fn main() -> ExitCode {
                 last.3 = sent;
                 last.4 = received;
             }
+            if let Some(money) = &money {
+                let stats = money.ledger().stats();
+                line += &format!(
+                    ", ledger {} operations in {} batches",
+                    stats.operations.load(Ordering::Relaxed),
+                    stats.batches.load(Ordering::Relaxed)
+                );
+            }
             if let Some(overrun) = tick_loop.take_worst_overrun() {
                 line += &format!(", worst overrun {overrun}");
             }
@@ -304,6 +360,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     drop(runtime);
+    drop(money);
+    if let Some(writer) = writer {
+        writer.stop();
+    }
     ExitCode::SUCCESS
 }
 

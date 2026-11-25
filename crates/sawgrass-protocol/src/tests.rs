@@ -396,6 +396,11 @@ mod game_payloads {
                 tick_hz: 20,
             },
             ServerEvent::Stats(stats),
+            ServerEvent::Paid {
+                key: u64::MAX,
+                result: PayResult::InsufficientFunds,
+                balance: -3,
+            },
         ] {
             let mut out = Vec::new();
             event.encode(&mut out);
@@ -411,5 +416,26 @@ mod game_payloads {
         assert_eq!(ClientEvent::decode(&[128, 0]), Err(DecodeError::TrailingBytes));
         assert_eq!(ServerEvent::decode(&out), Err(DecodeError::UnknownEvent(128)));
         assert_eq!(ClientEvent::decode(&[1]), Err(DecodeError::UnknownEvent(1)));
+
+        let pay = ClientEvent::Pay {
+            key: 1 << 40,
+            to: 9,
+            amount: u32::MAX,
+        };
+        let mut out = Vec::new();
+        pay.encode(&mut out);
+        assert_eq!(out.len(), 17);
+        assert_eq!(ClientEvent::decode(&out), Ok(pay));
+        assert_eq!(ClientEvent::decode(&out[..16]), Err(DecodeError::Truncated));
+        // A result code the format does not define.
+        let mut out = Vec::new();
+        ServerEvent::Paid {
+            key: 1,
+            result: PayResult::Done,
+            balance: 0,
+        }
+        .encode(&mut out);
+        out[9] = 6;
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::OutOfRange));
     }
 }
