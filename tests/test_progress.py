@@ -159,7 +159,7 @@ class Numbers(unittest.TestCase):
         plan = {"SRV-6": (1, "jemalloc"), "SRV-99": (9, "Later work")}
         steps = progress.steps_for(plan)
         names = [s["name"] for s in steps]
-        self.assertEqual(names[names.index("Roleplay base") + 1], "Plan phase 9")
+        self.assertEqual(names[names.index("Sync in the game") + 1], "Plan phase 9")
         self.assertEqual(steps[progress.collect([], {}, plan)[1]["step"]]["name"], "Plan phase 9")
 
 
@@ -197,7 +197,7 @@ class Marker(unittest.TestCase):
         self.assertEqual(tasks["NET-1"]["step"], 1)  # finished work stays in its step
         self.assertEqual(keys(list(tasks.values()), self.plan)[:3], ["done", "done", "current"])
         block = progress.render_markdown(list(tasks.values()), "o/r", self.plan)
-        self.assertIn("We are here: step 3 of 10", block)
+        self.assertIn("We are here: step 3 of 11", block)
         self.assertIn("🟢 [NET-14](https://github.com/o/r/issues/3).", block)
         self.assertIn("| Outside the plan |", block)
 
@@ -238,7 +238,7 @@ class Render(unittest.TestCase):
         block = progress.render_markdown(self.tasks, "o/r", {"NET-2": (1, "Connection")})
         self.assertTrue(block.startswith(progress.START) and block.endswith(progress.END))
         self.assertIn("[NET-1](https://github.com/o/r/issues/1): Packet \\| format", block)
-        self.assertIn("We are here: step 3 of 10, make the tick fit", block)
+        self.assertIn("We are here: step 3 of 11, make the tick fit", block)
         self.assertIn("0 of 1 done: 🟢 [NET-2](https://github.com/o/r/issues/2) |", block)
         self.assertEqual(block.count(progress.MARKER), 2)  # the sentence and the step's row
 

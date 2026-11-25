@@ -1,6 +1,6 @@
 //! The network core of the Sawgrass client, independent of the game and of the runtime it runs on.
 //!
-//! Roadmap step 8 ("Sync in the game") starts with remote players interpolated between snapshots and the local
+//! Roadmap step 9 ("Sync in the game") starts with remote players interpolated between snapshots and the local
 //! player predicted and corrected from the server. Everything here is plain logic over the wire types of
 //! `sawgrass-protocol`: no game access, no I/O, no clock of its own. The caller passes the local time in seconds,
 //! so the same code runs in the game module, in the bots and in deterministic tests.
