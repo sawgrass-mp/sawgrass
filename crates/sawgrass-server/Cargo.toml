@@ -18,6 +18,12 @@ rayon = "1"
 # The gateway runs on tokio (quinn's runtime) next to the tick thread.
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync"] }
 
+
+# jemalloc as the global allocator (SRV-5, confirmed on the bots by BOT-3). `unprefixed_malloc` makes it the
+# process's `malloc` too, so C code linked later (RocksDB) allocates through it as well. Unix only: jemalloc does not
+# build for MSVC targets, which keep the system allocator.
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
 [dev-dependencies]
 # Self-signed certificates for the network tests, as in the gateway's tests (which explain the `time` pin).
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }

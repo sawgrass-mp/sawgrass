@@ -11,11 +11,14 @@
 //!
 //! Each player's visible set and datagrams are built by its own [`View`], on a rayon pool of
 //! [`ListenConfig::tick_threads`] threads (task SRV-7). The tick thread does not hand datagrams to quinn itself
-//! (task NET-9): each view writes its datagrams into buffers it reuses once the gateway has sent them, and the
-//! tick passes all of them to one task on the gateway runtime in a single [`Batch`]. That task hands each datagram to its connection. So the tick
-//! wakes the gateway once per tick instead of once per datagram (BOT-3 measured 22% of the tick thread in those
-//! wake-ups) and allocates no buffer per datagram. At most [`OUTBOX_TICKS`] batches wait for the gateway; if it
-//! falls further behind, the tick's snapshots are dropped and counted rather than queued.
+//! (task NET-9): each view cuts its datagrams of a tick from one buffer sized to exactly those bytes, and the tick
+//! passes all of them to one task on the gateway runtime in a single [`Batch`]. That task hands each datagram to
+//! its connection. So the tick wakes the gateway once per tick instead of once per datagram (BOT-3 measured 22% of
+//! the tick thread in those wake-ups) and allocates once per player instead of once per datagram. A datagram keeps
+//! only its own player's buffer of that tick alive, so a client that stops acknowledging pins no more than the
+//! bytes quinn queues for it (the gateway's 64 KiB datagram send buffer), plus one allocation's overhead per queued
+//! tick. At most [`OUTBOX_TICKS`] batches wait for the gateway; if it falls further behind, the tick's snapshots
+//! are dropped and counted rather than queued.
 //!
 //! Every player takes a dense [`Slot`] when the tick thread sees it join (task IM-4). The slot indexes the
 //! per-player arrays here (players, wire states) and the ids in the grid and the visible sets; its

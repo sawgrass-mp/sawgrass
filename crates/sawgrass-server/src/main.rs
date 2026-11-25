@@ -30,6 +30,11 @@ use sawgrass_protocol::game::ServerStats;
 use sawgrass_server::net::{self, NetId};
 use sawgrass_server::{TickConfig, TickLoop, cpu};
 
+/// jemalloc for every allocation in the process (SRV-5; BOT-3 halved the crowd's tick p99 with it).
+#[cfg(unix)]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const REPORT_EVERY_SECS: u64 = 5;
 
 struct Args {

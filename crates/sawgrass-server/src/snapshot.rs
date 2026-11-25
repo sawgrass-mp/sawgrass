@@ -5,15 +5,11 @@
 //! builds every player's view in parallel (SRV-4, "players in parallel on hecs",
 //! `docs/research/tick-model`) and gets the same datagrams whatever the number of threads.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use sawgrass_protocol::game::{SNAPSHOT_MAX_ENTITIES, encode_snapshot};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
 
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityChanges, VisibilityConfig, VisibleSet};
-
-/// Bytes a view reserves at a time for its datagrams. Once the gateway has sent and dropped them, the next
-/// reservation takes the same memory back, so a player in a steady state allocates nothing per tick.
-pub const VIEW_CHUNK: usize = 8 * 1024;
 
 /// One player's visible set, snapshot sequence and output.
 #[derive(Debug, Default)]
@@ -22,8 +18,9 @@ pub struct View {
     sequence: u16,
     changes: VisibilityChanges,
     states: Vec<EntityState>,
+    /// This tick's datagrams back to back, and the length of each, before they are cut into their own buffer.
     packet: Vec<u8>,
-    arena: BytesMut,
+    lens: Vec<usize>,
     out: Vec<Bytes>,
 }
 
@@ -77,10 +74,12 @@ impl View {
                 .filter_map(|id| states.get(id.0 as usize).copied().flatten()),
         );
         let datagrams = self.states.len().div_ceil(SNAPSHOT_MAX_ENTITIES).max(1);
+        self.packet.clear();
+        self.lens.clear();
         for i in 0..datagrams {
             let start = i * SNAPSHOT_MAX_ENTITIES;
             let chunk = &self.states[start..(start + SNAPSHOT_MAX_ENTITIES).min(self.states.len())];
-            self.packet.clear();
+            let begin = self.packet.len();
             let header = PacketHeader {
                 kind: PacketKind::Snapshot,
                 sequence: self.sequence,
@@ -92,14 +91,22 @@ impl View {
             self.packet.extend_from_slice(&buf);
             self.sequence = self.sequence.wrapping_add(1);
             if encode_snapshot(chunk, &mut self.packet).is_err() {
+                self.packet.truncate(begin);
                 continue;
             }
-            if self.arena.capacity() < self.packet.len() {
-                self.arena.reserve(VIEW_CHUNK.max(self.packet.len()));
-            }
-            self.arena.extend_from_slice(&self.packet);
-            self.out.push(self.arena.split().freeze());
+            self.lens.push(self.packet.len() - begin);
         }
+        cut_datagrams(&self.packet, &self.lens, &mut self.out);
+    }
+}
+
+/// Copies `bytes`, datagrams back to back with the lengths in `lens`, into one buffer of exactly that size and
+/// appends each datagram, cut from it, to `out` in order. The datagrams share that buffer and nothing else, so a
+/// datagram quinn still holds for a slow client keeps only its own player's bytes of that tick alive (NET-9).
+fn cut_datagrams(bytes: &[u8], lens: &[usize], out: &mut Vec<Bytes>) {
+    let mut buffer = Bytes::copy_from_slice(bytes);
+    for &len in lens {
+        out.push(buffer.split_to(len));
     }
 }
 
@@ -153,6 +160,24 @@ mod tests {
             sent.extend(views.iter_mut().map(|v| v.out().collect::<Vec<_>>()));
         }
         sent
+    }
+
+    /// One player's datagrams of a tick come out in order, as one buffer of exactly their bytes: contiguous, with
+    /// nothing before or after them that a queued datagram could keep alive.
+    #[test]
+    fn a_players_datagrams_share_one_buffer_of_exactly_their_size() {
+        let bytes: Vec<u8> = (0..2500u32).map(|i| i as u8).collect();
+        let lens = [1100, 1100, 300];
+        let mut cut = Vec::new();
+        cut_datagrams(&bytes, &lens, &mut cut);
+        assert_eq!(cut.iter().map(Bytes::len).collect::<Vec<_>>(), lens);
+        assert_eq!(cut.concat(), bytes);
+        for pair in cut.windows(2) {
+            assert_eq!(pair[0].as_ptr().wrapping_add(pair[0].len()), pair[1].as_ptr());
+        }
+        let last = cut.pop().expect("last");
+        drop(cut);
+        assert_eq!(&last[..], &bytes[2200..]);
     }
 
     #[test]

@@ -77,8 +77,8 @@ async fn bots_move_on_the_server_and_see_each_other() {
         while std::time::Instant::now() < stop.into_std() {
             tick_loop.run_tick();
             track.push(tick_loop.world().query::<&NetId>().iter().count());
-            // The first bot's entity is number 1: the server numbers connections from 1.
-            if let Some(p) = position(&tick_loop, 1) {
+            // The bot in the first slot: its entity id is 0 (slot 0, generation 0, IM-4).
+            if let Some(p) = position(&tick_loop, 0) {
                 moves.push(p);
             }
             std::thread::sleep(Duration::from_millis(50));
