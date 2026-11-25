@@ -1,7 +1,8 @@
 //! The four parts together, behind the calls a game module (or a bot) makes.
 
-use sawgrass_protocol::game::ClientState;
-use sawgrass_protocol::{EntityState, PacketHeader, PacketKind};
+use sawgrass_protocol::game::{ClientState, OwnedState};
+use sawgrass_protocol::ped::PedBlock;
+use sawgrass_protocol::{EncodeError, EntityState, PacketHeader, PacketKind};
 
 use crate::Pose;
 use crate::clock::{ClockConfig, ServerClock};
@@ -128,20 +129,110 @@ impl Client {
             return None;
         }
         let state = pose.to_client_state().ok()?;
-        Some(self.packet(&state))
+        let mut out = self.header();
+        out.resize(PacketHeader::SIZE + ClientState::SIZE, 0);
+        // The buffer holds exactly a header and a state, so encoding cannot fail.
+        let _ = state.encode(&mut out[PacketHeader::SIZE..]);
+        Some(out)
     }
 
-    fn packet(&mut self, state: &ClientState) -> Vec<u8> {
-        let mut out = vec![0; PacketHeader::SIZE + ClientState::SIZE];
+    /// As [`Client::outgoing`], with the local player's ped block and the states of the entities this client
+    /// simulates (vehicles, NPCs; ADR 0006), all in one datagram. `Ok(None)` when no state is due. Fails for a pose
+    /// outside the wire ranges, more than [`MAX_OWNED`](sawgrass_protocol::game::MAX_OWNED) entities, or a payload too large for one datagram; the
+    /// send slot is then spent, so the next frame does not retry at once.
+    pub fn outgoing_with(
+        &mut self,
+        now: f64,
+        pose: &Pose,
+        ped: &PedBlock,
+        owned: &[OwnedState],
+    ) -> Result<Option<Vec<u8>>, EncodeError> {
+        if !self.local.due(now) {
+            return Ok(None);
+        }
+        let state = pose.to_client_state()?;
+        let mut out = self.header();
+        state.encode_with_owned(ped, owned, &mut out)?;
+        Ok(Some(out))
+    }
+
+    /// A client state header with the next sequence number and the acknowledgement.
+    fn header(&mut self) -> Vec<u8> {
+        let mut out = vec![0; PacketHeader::SIZE];
         let header = PacketHeader {
             kind: PacketKind::ClientState,
             sequence: self.sequence,
             tick: self.receiver.ack(),
         };
         self.sequence = self.sequence.wrapping_add(1);
-        // The buffer holds exactly a header and a state, so neither encoding can fail.
+        // The buffer is exactly one header long, so encoding cannot fail.
         let _ = header.encode(&mut out);
-        let _ = state.encode(&mut out[PacketHeader::SIZE..]);
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sawgrass_protocol::game::MAX_OWNED;
+
+    use super::*;
+
+    fn client() -> Client {
+        Client::new(3, 20, ClientConfig::default())
+    }
+
+    #[test]
+    fn owned_states_go_out_in_the_players_datagram() {
+        let mut client = client();
+        let me = Pose::at([10.0, 20.0, 30.0]);
+        let car = Pose {
+            velocity: [12.0, 0.0, 0.0],
+            ..Pose::at([14.0, 20.0, 30.0])
+        };
+        let owned = [car.to_owned_state(0x0002_0009, 4, &[7, 0, 1]).expect("owned")];
+        let ped = PedBlock::default();
+        let packet = client
+            .outgoing_with(0.0, &me, &ped, &owned)
+            .expect("encodes")
+            .expect("due");
+        let (header, body) = PacketHeader::decode(&packet).expect("header");
+        assert_eq!(header.kind, PacketKind::ClientState);
+        assert_eq!(header.tick, 0);
+        let mut decoded = Vec::new();
+        let (state, decoded_ped) = ClientState::decode_with_owned(body, &mut decoded).expect("decodes");
+        assert_eq!(state, me.to_client_state().expect("state"));
+        assert_eq!(decoded_ped, Some(ped));
+        assert_eq!(decoded, owned);
+        assert_eq!(decoded[0].epoch, 4);
+        assert_eq!(decoded[0].fields(), &[7, 0, 1]);
+
+        // Paced like `outgoing`, with the sequence going on from the last datagram.
+        assert_eq!(client.outgoing_with(0.01, &me, &ped, &owned), Ok(None));
+        let next = client.outgoing(0.06, &me).expect("due");
+        assert_eq!(PacketHeader::decode(&next).expect("header").0.sequence, 1);
+    }
+
+    #[test]
+    fn too_many_owned_entities_are_refused() {
+        let mut client = client();
+        let me = Pose::at([0.0, 0.0, 30.0]);
+        let one = me.to_owned_state(1, 0, &[]).expect("owned");
+        let owned = vec![one; MAX_OWNED + 1];
+        assert_eq!(
+            client.outgoing_with(0.0, &me, &PedBlock::default(), &owned),
+            Err(EncodeError::OutOfRange)
+        );
+        // The slot is spent: nothing again until the next send period.
+        assert_eq!(
+            client.outgoing_with(0.01, &me, &PedBlock::default(), &[]),
+            Ok(None)
+        );
+        let none: [OwnedState; 0] = [];
+        assert!(
+            client
+                .outgoing_with(0.06, &me, &PedBlock::default(), &none)
+                .expect("encodes")
+                .is_some()
+        );
     }
 }
