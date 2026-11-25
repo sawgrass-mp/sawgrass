@@ -1,8 +1,11 @@
 //! Clients connect through the in-process gateway: the server places each one in its world where the client
 //! says it is, and sends each a snapshot with the other. A flood of states costs one slot, not a queue, and
-//! connections beyond the player cap are refused. A client that teleports stays where it was.
+//! connections beyond the player cap are refused. Each connection is held to its rates: states beyond them are
+//! dropped, a sustained flood or an undecodable event closes the connection, and one address gets only so many
+//! connections. A client that teleports stays where it was.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use sawgrass_gateway::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -12,6 +15,7 @@ use sawgrass_protocol::game::{ClientState, ServerEvent};
 use sawgrass_protocol::{
     EntityState, PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity,
 };
+use sawgrass_server::limits::Limits;
 use sawgrass_server::net::{self, ListenConfig, NetId, PlayerState};
 use sawgrass_server::{TickConfig, TickLoop};
 
@@ -257,6 +261,213 @@ fn connections_beyond_the_cap_are_refused() {
         let second = connect(addr, "localhost", roots, PROTOCOL_VERSION).await;
         assert!(second.is_err(), "second player admitted");
     });
+}
+
+/// Starts a server held to `limits` and connects one client to it, returning the client, the server's counters
+/// and the server, which must be kept alive.
+fn limited(
+    runtime: &tokio::runtime::Runtime,
+    limits: Limits,
+) -> (Session, std::sync::Arc<net::Traffic>, net::Players) {
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        let config = ListenConfig {
+            limits,
+            ..ListenConfig::default()
+        };
+        (addr, roots, net::listen(gateway, config))
+    };
+    let client = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connect");
+    let traffic = players.traffic();
+    (client, traffic, players)
+}
+
+/// Waits up to two seconds for `counter` to reach `at_least`, calling `meanwhile` every millisecond.
+fn wait_for(counter: &AtomicU64, at_least: u64, mut meanwhile: impl FnMut()) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if counter.load(Ordering::Relaxed) >= at_least {
+            return true;
+        }
+        meanwhile();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+#[test]
+fn states_beyond_the_rate_are_dropped_and_counted() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (client, traffic, _players) = limited(&runtime, Limits::default());
+    // 200 at once against a burst of 30: loopback may lose a few, but well over a hundred are dropped.
+    for i in 0..200u32 {
+        let _ = client.send_datagram(state_packet(i as f32));
+    }
+    assert!(
+        wait_for(&traffic.dropped_states, 100, || ()),
+        "dropped {:?}",
+        traffic.dropped_states
+    );
+    // Dropping is all: one burst does not close the connection.
+    assert_eq!(traffic.closed_floods.load(Ordering::Relaxed), 0);
+    assert!(client.send_datagram(state_packet(1.0)).is_ok());
+}
+
+#[test]
+fn a_sustained_flood_of_states_closes_the_connection() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let limits = Limits {
+        window: Duration::from_millis(50),
+        ..Limits::default()
+    };
+    let (client, traffic, _players) = limited(&runtime, limits);
+    // Ten states a millisecond is far above twice 60 a second in every window.
+    let closed = wait_for(&traffic.closed_floods, 1, || {
+        for _ in 0..10 {
+            let _ = client.send_datagram(state_packet(1.0));
+        }
+    });
+    assert!(closed, "not closed");
+    let gone = runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(2), client.recv_datagram()).await });
+    assert!(matches!(gone, Ok(Err(_))), "{gone:?}");
+}
+
+#[test]
+fn an_undecodable_event_closes_the_connection() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (mut client, traffic, _players) = limited(&runtime, Limits::default());
+    let mut packet = vec![0; PacketHeader::SIZE];
+    let header = PacketHeader {
+        kind: PacketKind::Event,
+        sequence: 0,
+        tick: 0,
+    };
+    header.encode(&mut packet).expect("header");
+    packet.extend_from_slice(&[0xEE, 1, 2, 3]);
+    runtime.block_on(client.send_event(&packet)).expect("send");
+    assert!(wait_for(&traffic.closed_bad_events, 1, || ()), "not closed");
+    let gone = runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(2), client.recv_datagram()).await });
+    assert!(matches!(gone, Ok(Err(_))), "{gone:?}");
+}
+
+#[test]
+fn connections_beyond_the_per_address_cap_are_refused() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        let config = ListenConfig {
+            limits: Limits {
+                max_per_address: 2,
+                ..Limits::default()
+            },
+            ..ListenConfig::default()
+        };
+        (addr, roots, net::listen(gateway, config))
+    };
+    let traffic = players.traffic();
+    runtime.block_on(async {
+        let first = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        let second = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        assert!(first.is_ok() && second.is_ok(), "{first:?} {second:?}");
+        let third = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        assert!(third.is_err(), "third connection from one address admitted");
+        assert_eq!(traffic.refused_per_address.load(Ordering::Relaxed), 1);
+        // A connection that ends gives its place back.
+        let first = first.expect("first");
+        first.close();
+        drop(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let again = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+            if again.is_ok() {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "place not given back");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    drop(players);
+}
+
+/// Forwards every datagram it receives to `server` and nothing back, like a sender with a forged source address:
+/// it never hears the server's answer. Returns its address and a flag that stops it.
+fn one_way_relay(
+    server: std::net::SocketAddr,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("relay");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .expect("timeout");
+    let addr = socket.local_addr().expect("addr");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        while !stopped.load(Ordering::Relaxed) {
+            if let Ok((len, from)) = socket.recv_from(&mut buf)
+                && from != server
+            {
+                let _ = socket.send_to(&buf[..len], server);
+            }
+        }
+    });
+    (addr, stop)
+}
+
+#[test]
+fn spoofed_attempts_take_no_place_and_a_real_client_still_connects() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    // One handshake and one connection per address: a single attempt that kept its place would shut out the client.
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        let config = ListenConfig {
+            limits: Limits {
+                max_handshakes: 1,
+                max_per_address: 1,
+                ..Limits::default()
+            },
+            ..ListenConfig::default()
+        };
+        (addr, roots, net::listen(gateway, config))
+    };
+    let traffic = players.traffic();
+    let (relay, stop) = one_way_relay(addr);
+    runtime.block_on(async {
+        // Ten attempts from 127.0.0.1 that never hear back: each Initial gets a Retry that goes nowhere.
+        let spoofed: Vec<_> = (0..10)
+            .map(|_| tokio::spawn(connect(relay, "localhost", roots.clone(), PROTOCOL_VERSION)))
+            .collect();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while traffic.retried_handshakes.load(Ordering::Relaxed) < 10 {
+            assert!(tokio::time::Instant::now() < deadline, "attempts not retried");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A real client from the same address proves it and gets both places.
+        let real = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        assert!(real.is_ok(), "{real:?}");
+        assert_eq!(traffic.refused_handshakes.load(Ordering::Relaxed), 0);
+        assert_eq!(traffic.refused_per_address.load(Ordering::Relaxed), 0);
+        // A second validated client from that address is beyond the per-address cap.
+        let second = connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION).await;
+        assert!(second.is_err(), "second connection from one address admitted");
+        for attempt in spoofed {
+            attempt.abort();
+        }
+    });
+    stop.store(true, Ordering::Relaxed);
 }
 
 #[test]

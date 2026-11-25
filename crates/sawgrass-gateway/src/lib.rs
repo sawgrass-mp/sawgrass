@@ -244,6 +244,29 @@ impl Incoming {
         self.0.refuse();
     }
 
+    /// The address the connection attempt came from.
+    #[must_use]
+    pub fn remote_address(&self) -> SocketAddr {
+        self.0.remote_address()
+    }
+
+    /// Whether QUIC has proven the peer receives packets at [`Incoming::remote_address`], so it is not spoofed.
+    #[must_use]
+    pub fn address_validated(&self) -> bool {
+        self.0.remote_address_validated()
+    }
+
+    /// Asks the peer to prove its address with a QUIC Retry before any handshake work is done. The peer comes back
+    /// as a new [`Incoming`] whose address is validated. Refuses instead if this attempt was already a retry.
+    pub fn retry(self) {
+        if self.0.may_retry() {
+            // Only fails when a retry is not allowed, which may_retry ruled out.
+            let _ = self.0.retry();
+        } else {
+            self.0.refuse();
+        }
+    }
+
     /// Completes the QUIC and Sawgrass handshakes, refusing an incompatible client version.
     pub async fn handshake(self) -> Result<Session, Error> {
         let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {

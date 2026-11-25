@@ -5,7 +5,8 @@
 //!
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
-//!                 [--max-players N] [--tick-threads N] [--stats-to-clients]
+//!                 [--max-players N] [--max-per-address N] [--tick-threads N]
+//!                 [--stats-to-clients]
 //! ```
 //!
 //! - `--tick-hz N`: ticks per second, 1 to 1000 (default 20).
@@ -15,6 +16,8 @@
 //!   `sawgrass-bots gen-cert` writes a self-signed pair for tests.
 //! - `--net-threads N`: threads for the gateway runtime (default: a quarter of the cores, at least 1).
 //! - `--max-players N`: refuse connections beyond N (default 4096).
+//! - `--max-per-address N`: refuse connections beyond N from one IP address (default 16); load tests that run
+//!   every bot from one machine raise it.
 //! - `--tick-threads N`: threads that build players' snapshots in parallel during a tick (default: the cores the
 //!   gateway does not get; 1 builds them on the tick thread).
 //!
@@ -31,6 +34,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use sawgrass_protocol::game::ServerStats;
+use sawgrass_server::limits::Limits;
 use sawgrass_server::net::{self, NetId};
 use sawgrass_server::{TickConfig, TickLoop, cpu};
 
@@ -49,6 +53,7 @@ struct Args {
     key: Option<PathBuf>,
     net_threads: Option<usize>,
     max_players: usize,
+    max_per_address: usize,
     tick_threads: Option<usize>,
     stats_to_clients: bool,
 }
@@ -62,6 +67,7 @@ fn parse_args() -> Result<Args, String> {
         key: None,
         net_threads: None,
         max_players: net::ListenConfig::default().max_players,
+        max_per_address: net::ListenConfig::default().limits.max_per_address,
         tick_threads: None,
         stats_to_clients: false,
     };
@@ -92,6 +98,11 @@ fn parse_args() -> Result<Args, String> {
                 args.max_players = value("--max-players")?
                     .parse()
                     .map_err(|e| format!("--max-players: {e}"))?;
+            }
+            "--max-per-address" => {
+                args.max_per_address = value("--max-per-address")?
+                    .parse()
+                    .map_err(|e| format!("--max-per-address: {e}"))?;
             }
             "--tick-threads" => {
                 let n: usize = value("--tick-threads")?
@@ -126,7 +137,8 @@ fn main() -> ExitCode {
             eprintln!("sawgrass-server: {err}");
             eprintln!(
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
-                 [--net-threads N] [--max-players N] [--tick-threads N] [--stats-to-clients]"
+                 [--net-threads N] [--max-players N] [--max-per-address N] [--tick-threads N] \
+                 [--stats-to-clients]"
             );
             return ExitCode::from(2);
         }
@@ -173,6 +185,10 @@ fn main() -> ExitCode {
                             stats_to_clients: args.stats_to_clients,
                             max_players: args.max_players,
                             tick_threads,
+                            limits: Limits {
+                                max_per_address: args.max_per_address,
+                                ..Limits::default()
+                            },
                             ..net::ListenConfig::default()
                         },
                     )
@@ -239,6 +255,18 @@ fn main() -> ExitCode {
                     traffic.refused_bounds.load(Ordering::Relaxed),
                     traffic.refused_speed.load(Ordering::Relaxed),
                     traffic.refused_teleport.load(Ordering::Relaxed)
+                );
+                let count = |counter: &std::sync::atomic::AtomicU64| counter.load(Ordering::Relaxed);
+                line += &format!(
+                    ", limits: dropped {} states {} events, closed {} floods {} bad events, \
+                     handshakes retried {} refused {}, refused per address {}",
+                    count(&traffic.dropped_states),
+                    count(&traffic.dropped_events),
+                    count(&traffic.closed_floods),
+                    count(&traffic.closed_bad_events),
+                    count(&traffic.retried_handshakes),
+                    count(&traffic.refused_handshakes),
+                    count(&traffic.refused_per_address)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);

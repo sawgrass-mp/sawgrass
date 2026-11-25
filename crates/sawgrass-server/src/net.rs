@@ -35,10 +35,12 @@
 //! sent, applied as is. Validating movement (speed limits, teleports) belongs to the authority work and is not
 //! done here.
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bytes::Bytes;
 use hecs::{Entity, World};
@@ -50,6 +52,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
 use crate::interest::{DenseGrid, EntityId, Point, VisibilityConfig};
+use crate::limits::{Admit, Bucket, Limits};
 use crate::movement::{Movement, MovementRules, Violation};
 use crate::slots::{Slot, Slots};
 use crate::snapshot::{History, View};
@@ -109,6 +112,8 @@ pub struct ListenConfig {
     pub max_players: usize,
     /// Threads that build players' snapshots in parallel. 1 builds them on the tick thread.
     pub tick_threads: usize,
+    /// Rates, handshakes and connections per address each connection is held to.
+    pub limits: Limits,
     /// What a client's movement is checked against.
     pub movement: MovementRules,
 }
@@ -120,6 +125,7 @@ impl Default for ListenConfig {
             stats_to_clients: false,
             max_players: 4096,
             tick_threads: 1,
+            limits: Limits::default(),
             movement: MovementRules::default(),
         }
     }
@@ -136,6 +142,20 @@ pub struct Traffic {
     pub send_errors: AtomicU64,
     /// Ticks whose snapshots were dropped because the gateway had not sent the previous [`OUTBOX_TICKS`] yet.
     pub dropped_ticks: AtomicU64,
+    /// Client datagrams dropped undecoded because the connection sent more than its rate.
+    pub dropped_states: AtomicU64,
+    /// Client events dropped because the connection sent more than its rate.
+    pub dropped_events: AtomicU64,
+    /// Connections closed for a sustained flood of datagrams or events.
+    pub closed_floods: AtomicU64,
+    /// Connections closed for an event that is not a known [`ClientEvent`].
+    pub closed_bad_events: AtomicU64,
+    /// Connection attempts from an address QUIC had not validated yet, answered with a Retry.
+    pub retried_handshakes: AtomicU64,
+    /// Connection attempts refused because too many handshakes were in progress.
+    pub refused_handshakes: AtomicU64,
+    /// Connection attempts refused because their address had too many connections.
+    pub refused_per_address: AtomicU64,
     /// Client states refused by [`Movement::check`], all players together: outside the map.
     pub refused_bounds: AtomicU64,
     /// Client states refused for a velocity above the speed limit.
@@ -144,12 +164,65 @@ pub struct Traffic {
     pub refused_teleport: AtomicU64,
 }
 
+/// The address a connection counts against: an IPv4 address, or the /64 network of an IPv6 one, since one IPv6 host
+/// usually holds a whole /64.
+fn address_group(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6) & !((1u128 << 64) - 1);
+            IpAddr::V6(bits.into())
+        }
+        v4 => v4,
+    }
+}
+
+/// Connections, handshakes included, by address group ([`address_group`]).
+type PerAddress = Arc<Mutex<HashMap<IpAddr, usize>>>;
+
+/// One connection counted against its address; dropping it takes the count back.
+struct AddressGuard {
+    counts: PerAddress,
+    ip: IpAddr,
+}
+
+impl AddressGuard {
+    /// Counts a connection from `ip`, or returns `None` if the address already has `max`.
+    fn take(counts: &PerAddress, ip: IpAddr, max: usize) -> Option<Self> {
+        let mut map = counts.lock().ok()?;
+        let count = map.entry(ip).or_insert(0);
+        if *count >= max {
+            return None;
+        }
+        *count += 1;
+        Some(Self {
+            counts: counts.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for AddressGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.counts.lock()
+            && let Some(count) = map.get_mut(&self.ip)
+        {
+            *count -= 1;
+            if *count == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
+}
+
 /// Starts accepting players on `gateway`, on the current tokio runtime, and returns the tick-side half.
 pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
     let (inbound_tx, inbound_rx) = mpsc::channel();
     let traffic = Arc::new(Traffic::default());
     let next_id = AtomicU32::new(1);
     let active = Arc::new(AtomicUsize::new(0));
+    let handshakes = Arc::new(AtomicUsize::new(0));
+    let per_address: PerAddress = Arc::default();
+    let limits = config.limits;
     let accept_traffic = traffic.clone();
     let (outbox, recycle) = spawn_sender(traffic.clone());
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -166,19 +239,42 @@ pub fn listen(gateway: Gateway, config: ListenConfig) -> Players {
             let Some(incoming) = incoming else {
                 break;
             };
+            if !incoming.address_validated() {
+                // Every unproven address gets a Retry first, a stateless packet, so a spoofed attempt takes no
+                // place below; a real client comes back as a validated attempt one round trip later.
+                accept_traffic.retried_handshakes.fetch_add(1, Ordering::Relaxed);
+                incoming.retry();
+                continue;
+            }
             if active.load(Ordering::Relaxed) >= config.max_players {
                 incoming.refuse();
                 continue;
             }
+            if handshakes.load(Ordering::Relaxed) >= limits.max_handshakes {
+                accept_traffic.refused_handshakes.fetch_add(1, Ordering::Relaxed);
+                incoming.refuse();
+                continue;
+            }
+            let ip = address_group(incoming.remote_address().ip());
+            let Some(guard) = AddressGuard::take(&per_address, ip, limits.max_per_address) else {
+                accept_traffic.refused_per_address.fetch_add(1, Ordering::Relaxed);
+                incoming.refuse();
+                continue;
+            };
             active.fetch_add(1, Ordering::Relaxed);
+            handshakes.fetch_add(1, Ordering::Relaxed);
             let inbound = inbound_tx.clone();
             let traffic = accept_traffic.clone();
             let active = active.clone();
+            let handshakes = handshakes.clone();
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
-                if let Ok(session) = incoming.handshake().await {
-                    serve(session, id, inbound, traffic, config.stats_to_clients).await;
+                let session = incoming.handshake().await;
+                handshakes.fetch_sub(1, Ordering::Relaxed);
+                if let Ok(session) = session {
+                    serve(session, id, inbound, traffic, config.stats_to_clients, limits).await;
                 }
+                drop(guard);
                 active.fetch_sub(1, Ordering::Relaxed);
             });
         }
@@ -245,6 +341,7 @@ async fn serve(
     inbound: mpsc::Sender<Inbound>,
     traffic: Arc<Traffic>,
     stats_to_clients: bool,
+    limits: Limits,
 ) {
     let (datagrams, mut event_sender, mut event_receiver) = session.split();
     let (events_tx, mut events_rx) = tokio_mpsc::channel::<Vec<u8>>(EVENT_QUEUE);
@@ -266,19 +363,53 @@ async fn serve(
         }
     });
     let events_inbox = inbox.clone();
+    let events_traffic = traffic.clone();
+    let events_connection = datagrams.clone();
     tokio::spawn(async move {
+        let mut bucket = Bucket::for_events(&limits, Instant::now());
         while let Ok((_, packet)) = event_receiver.recv().await {
-            if stats_to_clients
-                && ClientEvent::decode(&packet[PacketHeader::SIZE..]) == Ok(ClientEvent::RequestStats)
-            {
-                events_inbox.wants_stats.store(true, Ordering::Relaxed);
+            match bucket.admit(Instant::now()) {
+                Admit::Pass => {}
+                Admit::Drop => {
+                    events_traffic.dropped_events.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                Admit::Close => {
+                    events_traffic.closed_floods.fetch_add(1, Ordering::Relaxed);
+                    events_connection.close();
+                    break;
+                }
+            }
+            match ClientEvent::decode(&packet[PacketHeader::SIZE..]) {
+                Ok(ClientEvent::RequestStats) if stats_to_clients => {
+                    events_inbox.wants_stats.store(true, Ordering::Relaxed);
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    // No valid client sends one, so whatever sent it is not a client to keep.
+                    events_traffic.closed_bad_events.fetch_add(1, Ordering::Relaxed);
+                    events_connection.close();
+                    break;
+                }
             }
         }
     });
+    let mut bucket = Bucket::for_states(&limits, Instant::now());
     while let Ok((header, packet)) = datagrams.recv().await {
         traffic
             .received_bytes
             .fetch_add(packet.len() as u64, Ordering::Relaxed);
+        match bucket.admit(Instant::now()) {
+            Admit::Pass => {}
+            Admit::Drop => {
+                traffic.dropped_states.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            Admit::Close => {
+                traffic.closed_floods.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
         if header.kind != PacketKind::ClientState {
             continue;
         }
@@ -578,4 +709,22 @@ pub fn bind_gateway(
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_counts_per_64_and_ipv4_per_address() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().expect("v6");
+        let b: IpAddr = "2001:db8:1:2:ffff::9".parse().expect("v6");
+        let other: IpAddr = "2001:db8:1:3::1".parse().expect("v6");
+        assert_eq!(address_group(a), address_group(b));
+        assert_ne!(address_group(a), address_group(other));
+        let v4: IpAddr = "192.0.2.7".parse().expect("v4");
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().expect("mapped");
+        assert_eq!(address_group(v4), v4);
+        assert_eq!(address_group(mapped), v4);
+    }
 }
