@@ -551,6 +551,26 @@ mod game_payloads {
     }
 
     #[test]
+    fn seat_requests_round_trip_and_reject_bad_lengths() {
+        let enter = || ClientEvent::EnterSeat {
+            vehicle: 0x0102_0304,
+            seat: 2,
+        };
+        for event in [enter(), ClientEvent::LeaveSeat] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(ClientEvent::decode(&out), Ok(event));
+            let mut longer = out.clone();
+            longer.push(0);
+            assert_eq!(ClientEvent::decode(&longer), Err(DecodeError::TrailingBytes));
+        }
+        let mut out = Vec::new();
+        enter().encode(&mut out);
+        assert_eq!(out, [130, 4, 3, 2, 1, 2]);
+        assert_eq!(ClientEvent::decode(&out[..5]), Err(DecodeError::Truncated));
+    }
+
+    #[test]
     fn a_shot_round_trips_with_up_to_sixteen_hits_and_rejects_more() {
         use crate::combat::{Hit, MAX_HITS, Shot, Zone};
         use crate::entity::AssetId;

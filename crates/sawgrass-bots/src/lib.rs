@@ -11,6 +11,7 @@ pub mod bot;
 pub mod cpu;
 pub mod misbehave;
 pub mod record;
+pub mod replay;
 pub mod report;
 pub mod stats;
 pub mod walker;
