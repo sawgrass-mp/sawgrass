@@ -6,8 +6,8 @@
 //! ```text
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
 //!                 [--max-players N] [--max-per-address N] [--max-handshakes N] [--tick-threads N]
-//!                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]]
-//!                 [--vehicles N] [--vehicle-area M]
+//!                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]]
+//!                 [--resources DIR [--script-budget-ms N]] [--vehicles N] [--vehicle-area M]
 //!                 [--map-min X,Y] [--map-size M] [--height MIN,MAX] [--max-speed M/S] [--move-slack S]
 //!                 [--movement-report-only] [--record FILE]
 //! ```
@@ -29,6 +29,10 @@
 //! while the snapshot pool works, so gateway and tick threads together are one per core. Giving only one of the
 //! options gives the other the rest of the cores.
 //! - `--stats-to-clients`: answer clients' stats requests, for load tests. Do not use it on a public server.
+//! - `--ledger DIR`: keep players' money in the RocksDB ledger in DIR, created if missing (DB-8). Every player
+//!   gets a wallet funded with `--start-cash` minor units (default 100000) from the server's treasury.
+//! - `--money-events`: let clients pay each other with a payment event, for money load tests. Do not use it on a
+//!   public server: resources will move money through the scripting API.
 //! - `--vehicles N`: spawn N parked vehicles at start, spread over a square centred on the origin, for load tests
 //!   (default 0). Their model is `AssetId(1)`, a placeholder.
 //! - `--vehicle-area M`: the edge of that square, in metres (default 1500, the bots' crowded area).
@@ -63,10 +67,12 @@ use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{Position, Rotation, Velocity};
 use sawgrass_server::interest::{MapBounds, Point};
 use sawgrass_server::limits::Limits;
+use sawgrass_server::money::Money;
 use sawgrass_server::movement::MovementRules;
 use sawgrass_server::net::{self, NetId};
 use sawgrass_server::scripts::{self, Scripts};
 use sawgrass_server::{TickConfig, TickLoop, cpu};
+use sawgrass_store::{Config as LedgerConfig, RocksStore, Writer};
 
 /// jemalloc for every allocation in the process (SRV-5; BOT-3 halved the crowd's tick p99 with it).
 #[cfg(unix)]
@@ -87,6 +93,9 @@ struct Args {
     max_handshakes: usize,
     tick_threads: Option<usize>,
     stats_to_clients: bool,
+    ledger: Option<PathBuf>,
+    start_cash: i64,
+    money_events: bool,
     vehicles: u32,
     vehicle_area: f32,
     resources: Option<PathBuf>,
@@ -117,6 +126,9 @@ fn parse_args() -> Result<Args, String> {
         max_handshakes: net::ListenConfig::default().limits.max_handshakes,
         tick_threads: None,
         stats_to_clients: false,
+        ledger: None,
+        start_cash: 100_000,
+        money_events: false,
         vehicles: 0,
         vehicle_area: 1500.0,
         resources: None,
@@ -169,6 +181,13 @@ fn parse_args() -> Result<Args, String> {
                 args.tick_threads = Some(n.max(1));
             }
             "--stats-to-clients" => args.stats_to_clients = true,
+            "--ledger" => args.ledger = Some(PathBuf::from(value("--ledger")?)),
+            "--start-cash" => {
+                args.start_cash = value("--start-cash")?
+                    .parse()
+                    .map_err(|e| format!("--start-cash: {e}"))?;
+            }
+            "--money-events" => args.money_events = true,
             "--vehicles" => {
                 args.vehicles = value("--vehicles")?
                     .parse()
@@ -292,7 +311,8 @@ fn main() -> ExitCode {
                 "usage: sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] \
                  [--net-threads N] [--max-players N] [--max-per-address N] [--max-handshakes N] \
                  [--tick-threads N] \
-                 [--stats-to-clients] [--resources DIR [--script-budget-ms N]] \
+                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]] \
+                 [--resources DIR [--script-budget-ms N]] \
                  [--vehicles N] [--vehicle-area M] [--map-min X,Y] [--map-size M] [--height MIN,MAX] \
                  [--max-speed M/S] [--move-slack S] [--movement-report-only] [--record FILE]"
             );
@@ -313,6 +333,33 @@ fn main() -> ExitCode {
     let mut runtime = None;
     let mut network = None;
     let mut shutdown = None;
+    let writer = match &args.ledger {
+        Some(dir) => {
+            match RocksStore::open(dir).and_then(|store| Writer::start(store, LedgerConfig::default())) {
+                Ok(writer) => Some(writer),
+                Err(e) => {
+                    eprintln!("sawgrass-server: ledger {}: {e}", dir.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
+    let money = match &writer {
+        Some(writer) => {
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            match Money::open(writer.handle(), args.start_cash, run) {
+                Ok(money) => Some(money),
+                Err(e) => {
+                    eprintln!("sawgrass-server: ledger: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
     let mut roster = None;
     let mut recorder = None;
     if let (Some(listen), Some(cert), Some(key)) = (args.listen, &args.cert, &args.key) {
@@ -350,7 +397,7 @@ fn main() -> ExitCode {
                         "listening on {listen} with {threads} gateway threads and {tick_threads} tick threads"
                     );
                     println!("{}", describe(&args.movement));
-                    net::listen_recorded(
+                    net::listen_full(
                         gateway,
                         net::ListenConfig {
                             stats_to_clients: args.stats_to_clients,
@@ -361,8 +408,10 @@ fn main() -> ExitCode {
                                 max_handshakes: args.max_handshakes,
                                 ..Limits::default()
                             },
+                            money_events: args.money_events,
                             movement: args.movement,
                         },
+                        money.clone(),
                         recorder.clone(),
                     )
                 }
@@ -465,11 +514,13 @@ fn main() -> ExitCode {
                     count(&traffic.players_cut)
                 );
                 line += &format!(
-                    ", owned states refused {} stale {} movement {} far, owner events lost {}",
+                    ", owned states refused {} stale {} movement {} far, owner events lost {}, \
+                     spawns outside the movement rules {}",
                     count(&traffic.refused_owned_stale),
                     count(&traffic.refused_owned_movement),
                     count(&traffic.refused_owned_far),
-                    count(&traffic.lost_owner_events)
+                    count(&traffic.lost_owner_events),
+                    count(&traffic.reported_spawns)
                 );
                 if let Ok(mut slot) = slot.lock() {
                     *slot = Some(report);
@@ -479,6 +530,14 @@ fn main() -> ExitCode {
             }
             if let Some(r) = &recorder {
                 line += &format!(", recording {} written {} dropped", r.written(), r.dropped());
+            }
+            if let Some(money) = &money {
+                let stats = money.ledger().stats();
+                line += &format!(
+                    ", ledger {} operations in {} batches",
+                    stats.operations.load(Ordering::Relaxed),
+                    stats.batches.load(Ordering::Relaxed)
+                );
             }
             if let Some(overrun) = tick_loop.take_worst_overrun() {
                 line += &format!(", worst overrun {overrun}");
@@ -510,6 +569,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     drop(runtime);
+    drop(money);
+    if let Some(writer) = writer {
+        writer.stop();
+    }
     ExitCode::SUCCESS
 }
 

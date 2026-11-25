@@ -3,18 +3,24 @@
 Stages 0–2 do not need the game and run in parallel with the runtimes' work. Stage 3 starts when VIctory or XCL,
 whichever comes first, runs the game to a world with a controllable character (ADR 0004).
 
+Roleplay gameplay (characters, money, inventory, property, jobs) waits for the first two-client session: two
+players on two PCs who join one server and see each other move. Until then the work is what that session and the
+gameplay after it stand on: the server, the protocol, storage, the script runtime and the client's network core.
+
 1. **Stage 0: repository foundation.** Workspace, rules, CI, claim bot, first tasks. Done by maintainers before
    the repository opens to the swarm.
 2. **Stage 1: server without the game.** Protocol, gateway, simulation, interest management, bots, web map.
    Gates: 1000 bots on one machine, then 4096.
-3. **Stage 2: roleplay base.** Roleplay state in server memory, stored in RocksDB, with a PostgreSQL archive
-   (ADR 0003), scripting runtime in Luau (ADR 0005), base resources (characters, money, inventory, jobs), admin tools. Everything
-   tested with bots.
+3. **Stage 2: roleplay foundations.** Roleplay state in server memory, stored in RocksDB, with a PostgreSQL archive
+   (ADR 0003), the scripting runtime in Luau (ADR 0005), wallets in the server, the voice relay. No gameplay yet;
+   everything tested with bots.
 4. **Stage 3: client in the game.** A runtime adapter for the first runtime that gets there (VIctory or XCL), a
    module-loading API proposed upstream, hooks, sync of players, vehicles and damage, in-game UI. The other
    runtime's adapter follows. Runtime-independent client code (sync and prediction over the fake `GameApi`) can
-   start earlier. Two steps below: [the client module](#7-client-module-in-the-game) and
-   [sync in the game](#8-sync-in-the-game).
+   start earlier. Then the base resources (characters, money, inventory, property, jobs) and admin tools, written
+   against the public scripting API once two clients see each other. Three steps below:
+   [the client module](#7-client-module-in-the-game), [the roleplay base](#8-roleplay-base) and
+   [sync in the game](#9-sync-in-the-game).
 5. **Stage 4: launcher and releases.** Signing, auto-update, server list.
 6. **Stage 5: scale.** Real players, zones only if measurements call for them.
 
@@ -23,10 +29,10 @@ The order in which the measured choices move into the server, with task IDs and 
 
 ## Steps in detail
 
-The README's progress bar shows these ten steps in order. Each one lists its work, what it depends on, its risks
+The README's progress bar shows these eleven steps in order. Each one lists its work, what it depends on, its risks
 and its difficulty. Difficulty estimates risk and unknowns, not size: 🟢 easy, 🟡 medium, 🟠 hard, 🔴 very hard.
 "Before the game" says whether a piece of work can be built and tested on the bots and the fake `GameApi` now, or
-only once the game runs on PC. Steps 3 to 6 have task IDs in [implementation-plan.md](implementation-plan.md); the
+only once the game runs on PC. Steps 3 to 6 and 9 have task IDs in [implementation-plan.md](implementation-plan.md); the
 later steps get theirs when they are planned.
 
 ### 1. Foundation
@@ -67,11 +73,12 @@ overload policy that sheds load instead of falling behind, and bots that misbeha
 - Depends on: step 4 for the final message formats.
 - Risks: abuse cases nobody thought of; the bots only find what they are told to try.
 
-### 6. Roleplay base
+### 6. Roleplay foundations
 
 🟠 Hard. Stage 2, plan phase 4. The single writer with RocksDB and group commit, its WAL copied to a second machine
-before a change is acknowledged, the PostgreSQL archive, the Luau runtime with deadlines and memory caps, the voice
-relay. Then the base resources: characters, money, inventory, property, jobs, and admin tools.
+before a change is acknowledged, the PostgreSQL archive, the Luau runtime with deadlines and memory caps, players'
+wallets in the server, the voice relay. No roleplay gameplay: the resources that use all this are
+[step 8](#8-roleplay-base).
 
 - Depends on: step 3's gate, so the tick has room for the work this step adds.
 - Risks: money created or lost on a crash or a failover; a script that hangs or exhausts the server; a scripting
@@ -94,13 +101,34 @@ a young runtime, and every game or runtime update can move what the module relie
 | XCL adapter, after the licence question in ADR 0004 is settled | No |
 
 - Depends on: VIctory or XCL running the game to a world with a controllable character; the upstream loading API.
+- Gate: the first two-client session. Two players on two PCs join one server, see each other walk and run, and
+  leave; the server's logs and counts show no refused state from either.
+
+What the server needs for that session, so it is ready when the game runs:
+
+| Need | Why |
+|---|---|
+| Map bounds, spawn point and movement limits as server settings, with today's values as defaults | The game's coordinates and speeds are not known; a wrong bound or limit refuses every real state |
+| A recording of each connection's client states and events, replayable through the bots | The first real movement tunes interpolation, correction and the movement checks, and turns a bug into a test |
+| A guide to run a server for a playtest: certificate, address, port, firewall, the flags to use | The first session is run by people who did not write the server |
+| A live view of who is connected, where and what was refused | Shows at once whether two clients reached each other and why not |
+
+### 8. Roleplay base
+
+🟡 Medium. Stage 3, starts after step 7's gate. Characters, money, inventory, property, jobs, and admin tools as
+resources in `resources/`, over the public scripting API and the foundations of step 6. They are built once two
+clients see each other, so they are tested in the game and not only on the bots.
+
+- Depends on: step 6; step 7's gate.
+- Risks: a scripting API that is hard to change once resources depend on it; money that a resource can create.
 - Risks: every game patch can move functions, so finding them must be automated and checked per build; a runtime
   that changes faster than the adapter; the licence question for XCL. Nothing here works around protection or keys:
   the module only runs inside a runtime the player already uses.
 
-### 8. Sync in the game
+### 9. Sync in the game
 
-🔴 Very hard. Stage 3, waits for the game. Making many players look right in one world, on physics and animation the
+🔴 Very hard. Stage 3. The server side and the client's network core are plan phase 5 and are built now; the rest
+waits for the game. Making many players look right in one world, on physics and animation the
 server does not own ([architecture.md, Authority](architecture.md#authority)).
 
 | Work | Before the game |
@@ -118,7 +146,7 @@ server does not own ([architecture.md, Authority](architecture.md#authority)).
   hand-off at speed; cheating, since the client is open source and nothing on it can be trusted.
 - Gate: players see each other move, drive and fight in one world, at the planned rate and budget.
 
-### 9. Launcher and releases
+### 10. Launcher and releases
 
 🟡 Medium. Stage 4. A launcher (Rust and Tauri) that detects the player's runtime, checks its build against that
 runtime's hash manifest, installs the signed client module, keeps it updated, lists servers and downloads their
@@ -128,13 +156,13 @@ resources; a release process with signing keys outside the repository.
 - Risks: a security boundary on every player's machine, so signing and updates must not become a way to ship
   someone else's code. It never downloads the game or a runtime's converted data.
 
-### 10. Scale
+### 11. Scale
 
 🔴 Very hard. Stage 5. Real players on public servers. Gateways in their own processes if the 4,096 gate shows them as
 the limit; zones with entity hand-off only if measurements call for them; operations, monitoring, moderation and
 admin tools.
 
-- Depends on: steps 8 and 9.
+- Depends on: steps 9 and 10.
 - Risks: real players behave unlike bots; zones are the most error-prone step of the architecture
   ([Scaling path](architecture.md#scaling-path)).
 
