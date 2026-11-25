@@ -298,7 +298,8 @@ impl ServerStats {
 /// Event codes. The values are part of the wire format.
 const JOINED: u8 = 1;
 const STATS: u8 = 2;
-const OWNERSHIP: u8 = 3;
+// 3 is taken by DB-8 (#162).
+const OWNERSHIP: u8 = 4;
 const REQUEST_STATS: u8 = 128;
 
 /// An event from the server.
