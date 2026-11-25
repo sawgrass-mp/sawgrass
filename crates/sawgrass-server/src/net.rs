@@ -49,7 +49,7 @@ use sawgrass_gateway::{Datagrams, Gateway, Session};
 use sawgrass_protocol::combat::{Shot, Zone};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
 use sawgrass_protocol::game::OwnedState;
-use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, ServerEvent, ServerStats};
+use sawgrass_protocol::game::{ClientEvent, ClientState, PayResult, SeatAnswer, ServerEvent, ServerStats};
 use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::recording::RecordKind;
 use sawgrass_protocol::vehicle::VehicleBlock;
@@ -104,6 +104,19 @@ const MAX_OWNER_RETRIES: usize = 4096;
 /// Most world state events one player is sent in a tick while it is being sent the whole state: room is left in
 /// its event queue for the others.
 const WORLD_EVENTS_PER_TICK: usize = 16;
+/// The wire answer for the result of a request to enter a seat.
+fn seat_answer(result: Result<(), Refusal>) -> SeatAnswer {
+    match result {
+        Ok(()) => SeatAnswer::Granted,
+        Err(Refusal::NotAVehicle) => SeatAnswer::NotAVehicle,
+        Err(Refusal::NoSuchSeat) => SeatAnswer::NoSuchSeat,
+        Err(Refusal::Taken) => SeatAnswer::Taken,
+        Err(Refusal::Locked) => SeatAnswer::Locked,
+        Err(Refusal::CannotReach) => SeatAnswer::CannotReach,
+        Err(Refusal::AlreadySeated) => SeatAnswer::AlreadySeated,
+    }
+}
+
 /// Metres between two positions.
 fn distance(a: Position, b: Position) -> f32 {
     let ([ax, ay, az], [bx, by, bz]) = (a.to_metres(), b.to_metres());
@@ -270,6 +283,8 @@ pub struct Traffic {
     pub corrections: AtomicU64,
     /// World state changes that found a player's event queue full; that player is sent the whole state again.
     pub lost_world_events: AtomicU64,
+    /// Seat answers ([`ServerEvent::Seat`]) that found the player's event queue full (NET-21).
+    pub lost_seat_answers: AtomicU64,
     /// Requests to enter a seat that the server granted (SRV-15).
     pub seats_granted: AtomicU64,
     /// Requests to enter a seat that the server refused, for any [`Refusal`].
@@ -946,8 +961,9 @@ impl Players {
             return false;
         }
         self.spawned[index] = false;
-        for player in self.seats.vacate(slot.index) {
+        for (player, seat) in self.seats.vacate(slot.index) {
             self.unseated(player);
+            self.tell_seat(player, id, seat, SeatAnswer::Left);
         }
         if let Some(change) = self.ownership.untrack(slot.index) {
             // Its state is gone, so the owner is told here, with the id, rather than with the tick's changes.
@@ -1198,14 +1214,41 @@ impl Players {
 
     /// Takes the player in slot `player` out of its seat, if it sits in one, and starts its movement checks from
     /// where the vehicle is, so its first state outside is checked from there.
-    fn leave_seat(&mut self, player: u32) {
+    /// Tells the player it left (NET-21); returns whether it sat anywhere.
+    fn leave_seat(&mut self, player: u32) -> bool {
         let Some((vehicle, seat)) = self.seats.leave(player) else {
-            return;
+            return false;
         };
         if seat == 0 {
             self.ownership.set_driver(vehicle, None);
         }
         self.unseated(player);
+        let id = self
+            .states
+            .get(vehicle as usize)
+            .copied()
+            .flatten()
+            .map_or(0, |s| s.id);
+        self.tell_seat(player, id, seat, SeatAnswer::Left);
+        true
+    }
+
+    /// Sends the player in slot `player` a [`ServerEvent::Seat`]; one that finds its queue full is counted.
+    fn tell_seat(&self, player: u32, vehicle: u32, seat: u8, answer: SeatAnswer) {
+        let Some(Some(p)) = self.players.get(player as usize) else {
+            return;
+        };
+        let event = ServerEvent::Seat {
+            vehicle,
+            seat,
+            answer,
+        };
+        if p.events
+            .try_send(event_packet(&event, u64::from(self.tick)))
+            .is_err()
+        {
+            self.traffic.lost_seat_answers.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// What follows a player's leaving its seat, however it left.
@@ -1492,13 +1535,19 @@ impl Players {
                     };
                     match request {
                         Some((vehicle, seat)) => {
-                            let counter = match self.enter_seat(slot.index, vehicle, seat) {
+                            let result = self.enter_seat(slot.index, vehicle, seat);
+                            let counter = match result {
                                 Ok(()) => &self.traffic.seats_granted,
                                 Err(_) => &self.traffic.seats_refused,
                             };
                             counter.fetch_add(1, Ordering::Relaxed);
+                            self.tell_seat(slot.index, vehicle, seat, seat_answer(result));
                         }
-                        None => self.leave_seat(slot.index),
+                        None => {
+                            if !self.leave_seat(slot.index) {
+                                self.tell_seat(slot.index, 0, 0, SeatAnswer::NotSeated);
+                            }
+                        }
                     }
                 }
                 Inbound::Leave { id } => {
