@@ -637,12 +637,18 @@ mod tests {
         payload.extend_from_slice(&[0xff; 9]);
         payload.extend_from_slice(&[0x01, 0, 0, 0]);
         let mut out = Vec::new();
-        assert_eq!(decode_delta(&payload, 2, Some(b), &mut out), Err(DecodeError::OutOfRange));
+        assert_eq!(
+            decode_delta(&payload, 2, Some(b), &mut out),
+            Err(DecodeError::OutOfRange)
+        );
         // A tenth varint byte above 1 is refused too, rather than losing its bits.
         let mut payload = vec![1, 2, 1, 0];
         payload.extend_from_slice(&[0xff; 9]);
         payload.extend_from_slice(&[0x02, 0, 0, 0]);
-        assert_eq!(decode_delta(&payload, 2, Some(b), &mut out), Err(DecodeError::OutOfRange));
+        assert_eq!(
+            decode_delta(&payload, 2, Some(b), &mut out),
+            Err(DecodeError::OutOfRange)
+        );
     }
 
     #[test]
@@ -651,7 +657,9 @@ mod tests {
         let far = |id: u32, sign: f32| EntityState {
             id,
             position: Position::from_cm([8_388_607 * sign as i32; 3]).expect("position"),
-            velocity: Velocity { cm_per_s: [i16::MAX * sign as i16; 3] },
+            velocity: Velocity {
+                cm_per_s: [i16::MAX * sign as i16; 3],
+            },
             rotation: Rotation::from_quaternion([0.5, -0.5, 0.5, 0.5]).expect("rotation"),
         };
         let n = MAX_ENTITIES as u32;
