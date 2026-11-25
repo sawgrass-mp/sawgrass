@@ -7,7 +7,11 @@
 //! ```text
 //! build = victory/1.0.0/0123abcd
 //! 17 = 0x1234      # asset id = the game's value for it, decimal or 0x hex
+//! ped = 0x2000      # the ped model for a ped the server names no model for (asset id 0)
 //! ```
+//!
+//! Players carry no model in the protocol yet (`AssetId::NONE`), so the `ped` line is what the first milestone, two
+//! players who see each other, needs.
 
 use std::collections::HashMap;
 
@@ -23,6 +27,7 @@ pub struct AssetTable {
     pub build: String,
     to_game: HashMap<AssetId, GameAsset>,
     from_game: HashMap<GameAsset, AssetId>,
+    default_ped: Option<GameAsset>,
 }
 
 fn number(text: &str) -> Option<u64> {
@@ -37,6 +42,7 @@ impl AssetTable {
         let mut build = None;
         let mut to_game = HashMap::new();
         let mut from_game = HashMap::new();
+        let mut default_ped = None;
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             let content = raw.split('#').next().unwrap_or("").trim();
@@ -50,6 +56,11 @@ impl AssetTable {
             let (key, value) = (key.trim(), value.trim());
             if key == "build" {
                 build = Some(value.to_owned());
+                continue;
+            }
+            if key == "ped" {
+                let asset = number(value).ok_or_else(|| syntax(format!("bad game value `{value}`")))?;
+                default_ped = Some(GameAsset(asset));
                 continue;
             }
             let id = key
@@ -73,6 +84,7 @@ impl AssetTable {
             build: build.ok_or(TableError::MissingBuild)?,
             to_game,
             from_game,
+            default_ped,
         })
     }
 
@@ -82,6 +94,11 @@ impl AssetTable {
 
     pub fn game_asset(&self, id: AssetId) -> Option<GameAsset> {
         self.to_game.get(&id).copied()
+    }
+
+    /// The ped model for a ped the server names no model for, from the table's `ped` line.
+    pub fn default_ped(&self) -> Option<GameAsset> {
+        self.default_ped
     }
 
     /// The protocol id of an asset the game used by itself, if the server knows it.
@@ -102,6 +119,9 @@ mod tests {
         assert_eq!(table.game_asset(AssetId(17)), Some(GameAsset(0x1F)));
         assert_eq!(table.asset_id(GameAsset(42)), Some(AssetId(18)));
         assert_eq!(table.game_asset(AssetId(19)), None);
+        assert_eq!(table.default_ped(), None);
+        let with_ped = AssetTable::parse("build = x\nped = 0x2000\n").expect("valid");
+        assert_eq!(with_ped.default_ped(), Some(GameAsset(0x2000)));
         let build = |digest: &str| GameBuild {
             runtime: RuntimeKind::Victory,
             title_version: "1.0.0".into(),

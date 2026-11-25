@@ -11,6 +11,7 @@ use sawgrass_client_module::table::FunctionTable;
 use sawgrass_netcode::{Client, ClientConfig};
 use sawgrass_protocol::delta::{DeltaEncoder, fragments};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
+use sawgrass_protocol::game::ServerEvent;
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position, Rotation, Velocity};
 
 const BUILD_KEY: &str = "victory/1.0.0/00ff";
@@ -276,4 +277,82 @@ fn the_inbox_keeps_only_the_newest_datagrams() {
     let kept = inbox.take();
     assert_eq!(kept.len(), MAX_QUEUED);
     assert_eq!(kept[0], 10u32.to_le_bytes().to_vec(), "the oldest were dropped");
+}
+
+#[test]
+fn a_joining_link_waits_for_the_join_and_takes_corrections() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::joining(ClientConfig::default());
+    let (inbox, events) = (link.inbox(), link.events());
+    let mut encoder = DeltaEncoder::default();
+    let mut frame_at =
+        |frame: u32, module: &mut Module<FakeRuntime>, game: &mut FakeGame, link: &mut NetLink| {
+            if frame % 3 == 0 {
+                let tick = frame / 3;
+                for d in snapshot(
+                    &mut encoder,
+                    tick,
+                    &[state(1, tick as f32 * 0.5), state(LOCAL, 0.0)],
+                ) {
+                    inbox.push(d);
+                }
+            }
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        };
+
+    // Snapshots before the join are dropped: nothing is shown, nothing is sent.
+    for frame in 0..30 {
+        frame_at(frame, &mut module, &mut game, &mut link);
+    }
+    assert!(link.client().is_none());
+    assert!(module.entities().is_empty());
+    assert!(link.outbox().take().is_empty());
+
+    events.push(ServerEvent::Joined {
+        entity: LOCAL,
+        tick_hz: TICK_HZ,
+    });
+    for frame in 30..90 {
+        frame_at(frame, &mut module, &mut game, &mut link);
+    }
+    assert_eq!(link.client().map(|c| c.entity()), Some(LOCAL));
+    let car = module.entities().handle(1).expect("shown after the join");
+
+    // A correction far from where the game has the local player snaps it there.
+    let held = state(LOCAL, 200.0);
+    events.push(ServerEvent::Corrected(held));
+    frame_at(90, &mut module, &mut game, &mut link);
+    let local = game.entities[&me].2.position;
+    assert!(
+        (local[0] - 200.0).abs() < 0.05,
+        "local player snapped to the server's position, at {local:?}"
+    );
+
+    // A correction for an entity this client does not own is dropped (Corrected carries no epoch)...
+    let before = game.entities[&car].2;
+    events.push(ServerEvent::Corrected(state(1, -500.0)));
+    frame_at(91, &mut module, &mut game, &mut link);
+    assert!(
+        game.entities[&car].2.position[0] > -400.0,
+        "not moved to {before:?}'s correction"
+    );
+
+    // ...and taken for one it owns.
+    link.set_ownership(1, 3, true);
+    events.push(ServerEvent::Corrected(state(1, -500.0)));
+    frame_at(92, &mut module, &mut game, &mut link);
+    assert!(
+        (game.entities[&car].2.position[0] + 500.0).abs() < 0.05,
+        "owned entity moved back by the server"
+    );
 }

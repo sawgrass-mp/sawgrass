@@ -50,7 +50,8 @@ So the work is split in two:
 | | Side | State |
 |---|---|---|
 | 🟢 | **Server, protocol, storage, scripting** | Being built now. Everything is tested and load-tested with headless bots that speak the real protocol, no game needed. |
-| ⏸️ | **Client module and launcher** | Waiting. Work starts when the game runs on PC through VIctory or XCL with a controllable character. |
+| 🟡 | **Client module** | Everything that does not need the game is built and tested on a fake game: the runtime boundary, per-build function and asset tables, hooks, the network core and the module's own connection. Two modules on fake games already see each other through the real server. The VIctory adapter, the real `GameApi` and the tables for a game build wait for the game ([crate README](crates/sawgrass-client-module/README.md)). |
+| ⏸️ | **Launcher** | Waiting for the client module to run in the game. |
 
 ## Progress
 
