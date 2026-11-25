@@ -8,7 +8,7 @@ use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sawgrass_server::{Clock, TickConfig, TickLoop};
+use sawgrass_server::{BETWEEN, Clock, TickConfig, TickLoop};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Position([f32; 3]);
@@ -112,7 +112,9 @@ fn keeps_rate_with_4096_moving_entities() {
     tick_loop.add_system("work", move |_, _| work.advance(interval / 10));
 
     let ticks = 50;
-    tick_loop.run_with_clock(&mut clock, stop_after(ticks));
+    tick_loop
+        .run_with_clock(&mut clock, stop_after(ticks))
+        .expect("no panic");
     assert_eq!(clock.elapsed(), interval * 50);
 
     let stats = tick_loop.metrics().stats();
@@ -138,7 +140,9 @@ fn slow_tick_is_counted_and_not_made_up_in_a_burst() {
         }
     });
 
-    tick_loop.run_with_clock(&mut clock, stop_after(10));
+    tick_loop
+        .run_with_clock(&mut clock, stop_after(10))
+        .expect("no panic");
     // Without catch-up: 4 intervals for the stall, then 9 more ticks at the normal rate.
     assert_eq!(clock.elapsed(), interval * 13);
     let starts = starts.lock().expect("log lock").clone();
@@ -159,11 +163,13 @@ fn between_hook_time_counts_in_the_tick() {
 
     let hook = clock.clone();
     let mut stop = stop_after(10);
-    tick_loop.run_with_clock(&mut clock, |l| {
-        // Applying input before the tick takes 60% of the interval.
-        hook.advance(interval * 3 / 5);
-        stop(l)
-    });
+    tick_loop
+        .run_with_clock(&mut clock, |l| {
+            // Applying input before the tick takes 60% of the interval.
+            hook.advance(interval * 3 / 5);
+            stop(l)
+        })
+        .expect("no panic");
 
     let stats = tick_loop.metrics().stats();
     assert_eq!(stats.p99, interval * 11 / 10, "{stats}");
@@ -177,7 +183,7 @@ fn real_clock_sleeps_between_ticks() {
     let interval = tick_loop.config().interval();
     let ticks = 50;
     let start = Instant::now();
-    tick_loop.run(stop_after(ticks));
+    tick_loop.run(stop_after(ticks)).expect("no panic");
     let elapsed = start.elapsed();
 
     let expected = interval * 50;
@@ -193,4 +199,75 @@ fn real_clock_sleeps_between_ticks() {
     );
     assert_eq!(tick_loop.metrics().ticks(), ticks);
     assert_moved_one_second(&mut tick_loop);
+}
+
+#[test]
+fn an_overrun_is_kept_with_the_phase_that_took_the_time() {
+    let mut tick_loop = TickLoop::new(TickConfig::new(50).expect("valid rate"));
+    let interval = tick_loop.config().interval();
+    let mut clock = SimClock::new();
+    let (fast, slow) = (clock.clone(), clock.clone());
+    tick_loop.add_system("input", move |_, _| fast.advance(interval / 10));
+    // Tick 3 stalls in "snapshots" for three intervals, tick 6 for two.
+    tick_loop.add_system("snapshots", move |_, info| match info.tick {
+        3 => slow.advance(interval * 3),
+        6 => slow.advance(interval * 2),
+        _ => {}
+    });
+    let hook = clock.clone();
+    let mut stop = stop_after(10);
+    tick_loop
+        .run_with_clock(&mut clock, |l| {
+            hook.advance(interval / 20);
+            stop(l)
+        })
+        .expect("no panic");
+
+    let overrun = tick_loop.take_worst_overrun().expect("an overrun");
+    assert_eq!(overrun.tick, 3);
+    assert_eq!(overrun.duration, interval * 3 + interval / 10 + interval / 20);
+    assert_eq!(
+        overrun.phases,
+        vec![
+            (BETWEEN, interval / 20),
+            ("input", interval / 10),
+            ("snapshots", interval * 3)
+        ]
+    );
+    assert_eq!(overrun.slowest(), Some(("snapshots", interval * 3)));
+    assert!(
+        overrun
+            .to_string()
+            .starts_with("tick 3 took 63.000 ms: between 1.000, input 2.000, snapshots 60.000"),
+        "{overrun}"
+    );
+    // Taken: the next report starts empty.
+    assert_eq!(tick_loop.take_worst_overrun(), None);
+}
+
+#[test]
+fn a_panicking_system_stops_the_loop_before_anything_else_runs() {
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let mut clock = SimClock::new();
+    let after = Arc::new(Mutex::new(Vec::new()));
+    let log = after.clone();
+    tick_loop.add_system("physics", |_, info| {
+        assert!(info.tick != 2, "contact solver diverged");
+    });
+    tick_loop.add_system("snapshots", move |_, info| {
+        log.lock().expect("log").push(info.tick)
+    });
+    let mut hooks = 0;
+    let result = tick_loop.run_with_clock(&mut clock, |_| {
+        hooks += 1;
+        ControlFlow::Continue(())
+    });
+
+    let panic = result.expect_err("stopped by the panic");
+    assert_eq!((panic.system, panic.tick), ("physics", 2));
+    assert!(panic.message.contains("contact solver diverged"), "{panic}");
+    // The systems after it did not run in that tick, and no tick ran after it.
+    assert_eq!(*after.lock().expect("log"), vec![0, 1]);
+    assert_eq!(hooks, 3);
+    assert_eq!(tick_loop.metrics().ticks(), 2);
 }
