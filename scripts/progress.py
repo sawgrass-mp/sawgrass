@@ -57,34 +57,63 @@ ICON = {"done": "✅", "in review": "🔍", "in progress": "🛠️", "ready": "
 # step whose `state` is `done` is closed: a task outside the plan that is not done yet never reopens it, it goes to
 # the "outside the plan" line instead, so it cannot move the marker back. The `covers` and `gate` texts of the plan's
 # phases are copied from docs/implementation-plan.md and are edited together with it.
+# `difficulty` (easy, medium, hard, very hard) is the maintainers' estimate of a step's risk and unknowns, not of its
+# size, and `why` says in one line what makes it so.
 STEPS = (
-    {"name": "Foundation", "short": "Foundation", "stage": 0, "state": "done",
+    {"name": "Foundation", "short": "Foundation", "stage": 0, "state": "done", "difficulty": "easy",
+     "why": "Known tools, no game and no server code",
      "covers": "Workspace, rules, CI, claim bot, review agent"},
-    {"name": "Prototype and measurements", "short": "Prototype", "stage": 1, "state": "done",
+    {"name": "Prototype and measurements", "short": "Prototype", "stage": 1, "state": "done", "difficulty": "medium",
+     "why": "A first server and many benchmarks, but each one small and without the game",
      "areas": ("NET", "SRV", "IM", "BOT", "DB", "SCRIPT"),
      "covers": "First server, protocol and load-test bots; the storage, transport, serialization, compression, "
                "visibility, scripting, voice, tick and allocator comparisons, checked on the real server"},
-    {"name": "Make the tick fit", "short": "Tick fits", "stage": 1, "phase": 1,
+    {"name": "Make the tick fit", "short": "Tick fits", "stage": 1, "phase": 1, "difficulty": "hard",
+     "why": "Rebuilds the core of the tick: entity slots, the visibility index and parallel work that must stay "
+            "deterministic",
      "covers": "jemalloc, one hand-off of datagrams per tick, dense entity slots, dense grid with bitset visible "
                "sets, per-player work in parallel",
      "gate": "3,000 bots in the 1.5 km square on one machine, no dropped bots, tick p99 under 35 ms (70% of "
              "the 20 Hz interval)"},
-    {"name": "Fewer bytes, then 30 Hz", "short": "30 Hz", "stage": 1, "phase": 2,
+    {"name": "Fewer bytes, then 30 Hz", "short": "30 Hz", "stage": 1, "phase": 2, "difficulty": "medium",
+     "why": "The formats are chosen and measured; delta snapshots against acknowledgements need care, the rest is "
+            "plumbing",
      "covers": "postcard payloads, delta snapshots, visible sets cut to a byte budget, 30 Hz by default",
      "gate": "4,096 bots from a second machine: the roadmap's stage 1 gate"},
     {"name": "Reliability of the realtime core", "short": "Reliability", "stage": 1, "phase": 3,
+     "difficulty": "medium", "why": "Well-known techniques; the work is covering every abuse case and testing it "
+                                   "with hostile bots",
      "covers": "Movement validation, per-connection limits, overload policy, misbehaving bots as a load test"},
-    {"name": "Roleplay base", "short": "Roleplay", "stage": 2, "phase": 4, "areas": ("RP",),
-     "covers": "One writer with RocksDB, WAL copy to a second machine, PostgreSQL archive, Luau runtime, voice "
-               "relay, then characters, money, inventory and jobs"},
-    {"name": "Client in the game", "short": "Client", "stage": 3, "areas": ("CLIENT",), "state": "waiting",
-     "covers": "Runtime adapter, hooks, sync of players, vehicles and damage, in-game UI",
-     "gate": "Starts when the game runs on PC through VIctory or XCL"},
-    {"name": "Launcher and releases", "short": "Launcher", "stage": 4, "areas": ("LAUNCH",),
-     "covers": "Signing, auto-update, server list"},
-    {"name": "Scale", "short": "Scale", "stage": 5,
-     "covers": "Real players; zones only if measurements call for them"},
+    {"name": "Roleplay base", "short": "Roleplay", "stage": 2, "phase": 4, "areas": ("RP",), "difficulty": "hard",
+     "why": "Money must never be lost: a durable single writer with a replicated log, plus a sandboxed script "
+            "runtime",
+     "covers": "One writer with RocksDB, WAL copy to a second machine, PostgreSQL archive, Luau runtime with "
+               "deadlines and memory caps, voice relay, then characters, money, inventory, jobs and admin tools"},
+    {"name": "Client module in the game", "short": "In game", "stage": 3, "areas": ("CLIENT",), "state": "waiting",
+     "difficulty": "very hard",
+     "why": "The hardest part: an undocumented game on a young runtime, functions found by pattern per runtime "
+            "and game version, everything can change with a game or runtime update",
+     "covers": "Runtime adapter for the first of VIctory or XCL to reach a world, module loading (an API proposed "
+               "upstream), hooks, the real GameApi, the second runtime's adapter later",
+     "gate": "Starts when the game runs on PC through VIctory or XCL with a controllable character"},
+    {"name": "Sync in the game", "short": "Sync", "stage": 3, "state": "waiting", "difficulty": "very hard",
+     "why": "Game physics and animation the server does not own: prediction, interpolation and damage must look "
+            "right at 4096 players",
+     "covers": "Sync of players, vehicles and damage with prediction and interpolation, in-game UI and chat, "
+               "client scripts, voice in the game; runtime-independent parts can start earlier over the fake GameApi",
+     "gate": "Players see each other move, drive and fight in one world"},
+    {"name": "Launcher and releases", "short": "Launcher", "stage": 4, "areas": ("LAUNCH",), "difficulty": "medium",
+     "why": "Known technology (Tauri, signing, updates), but a security boundary on every player's machine",
+     "covers": "Detects the runtime and checks its build, installs the signed client module, auto-update, "
+               "server list, downloads server resources, release process"},
+    {"name": "Scale", "short": "Scale", "stage": 5, "difficulty": "very hard",
+     "why": "Real players behave unlike bots; zones with hand-off are the most error-prone step of the "
+            "architecture",
+     "covers": "Real players on public servers, gateways in their own processes if the gateway limits, zones with "
+               "entity hand-off only if measurements call for them, operations and moderation"},
 )
+DIFFICULTY = {"easy": ("🟢", "Easy", "#7cf000"), "medium": ("🟡", "Medium", "#f5d547"),
+              "hard": ("🟠", "Hard", "#ff9f43"), "very hard": ("🔴", "Very hard", "#ff5c5c")}
 STAGE_NAMES = {0: "repository foundation", 1: "server without the game", 2: "roleplay base",
                3: "client in the game", 4: "launcher and releases", 5: "scale"}
 TRACK = {"name": "Tooling and docs", "areas": ("OPS", "DOC")}
@@ -318,6 +347,13 @@ def where_in_roadmap(step):
     return text + (f"; plan phase {step['phase']}" if "phase" in step else "")
 
 
+def difficulty_cell(step):
+    if "difficulty" not in step:
+        return "—"
+    icon, name, _ = DIFFICULTY[step["difficulty"]]
+    return f"{icon} **{name}**<br><sub>{step['why']}</sub>"
+
+
 def task_link(t, repo):
     return f"[{t['id']}](https://github.com/{repo}/issues/{t['issue']})" if t["issue"] else t["id"]
 
@@ -334,10 +370,12 @@ def render_markdown(tasks, repo, plan=None):
         "",
         f"**{MARKER} We are here: step {n + 1} of {len(rows)}, {step['name'].lower()}** "
         f"({where_in_roadmap(step)}): {text}. "
-        "A step is done when its last task is merged, so the marker follows `main`, not the plans.",
+        "A step is done when its last task is merged, so the marker follows `main`, not the plans. "
+        "Difficulty is the maintainers' estimate of risk and unknowns, not of size: the hardest part starts with "
+        "the client in the game.",
         "",
-        "| | Step | What it covers | Gate | Tasks |",
-        "|---|---|---|---|---|",
+        "| | Step | What it covers | Gate | Difficulty | Tasks |",
+        "|---|---|---|---|---|---|",
     ]
     icons = {"done": "✅", "current": MARKER, "waiting": "⏸️", "todo": "⚪"}
     for i, (s, own, _, text, key) in enumerate(rows):
@@ -346,7 +384,7 @@ def render_markdown(tasks, repo, plan=None):
             detail += ": " + " · ".join(f"{ICON[t['status']]} {task_link(t, repo)}" for t in own)
         name = f"**{i + 1}. {s['name']}**"
         lines.append(f"| {icons[key]} | {name}<br><sub>{stage_label(s)}</sub> | {s['covers']} | "
-                     f"{s.get('gate', '—')} | {detail} |")
+                     f"{s.get('gate', '—')} | {difficulty_cell(s)} | {detail} |")
     track = [t for t in tasks if t["step"] is None and track_of(t) == TRACK["name"]]
     outside = [t for t in tasks if t["step"] is None and track_of(t) == OUTSIDE]
     lines += [
@@ -399,7 +437,7 @@ def render_svg(tasks, plan=None):
     inner = width - 2 * left
     seg = (inner - gap * (len(rows) - 1)) / len(rows)
     bar_y, bar_h = 132, 18
-    height = 252
+    height = 270
 
     def x_of(i):
         return left + i * (seg + gap)
@@ -413,10 +451,10 @@ def render_svg(tasks, plan=None):
         "</defs>",
         "<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}"
         ".h{font-size:22px;font-weight:700;fill:#e8fff4}.s{font-size:14px;fill:#8fb3a6}"
-        ".l{font-size:13px;font-weight:600;fill:#c9e6db}.c{font-size:13px;font-weight:700;fill:#a6ff4d}"
+        ".l{font-size:12px;font-weight:600;fill:#c9e6db}.c{font-size:12px;font-weight:700;fill:#a6ff4d}"
         ".n{font-size:11px;fill:#7d9a90}.w{font-size:11px;fill:#5fe3f0}"
         ".m{font-size:11px;font-weight:700;fill:#060a08;letter-spacing:1px}"
-        ".b{font-size:12px;fill:#8fb3a6}</style>",
+        ".b{font-size:12px;fill:#8fb3a6}.d{font-size:11px;font-weight:600}</style>",
         f'<rect width="{width}" height="{height}" rx="16" fill="#060a08"/>',
         f'<rect x="1" y="1" width="{width - 2}" height="{height - 2}" rx="15" fill="none" stroke="#1d3b2f"/>',
         f'<text x="{left}" y="44" class="h">We are here: {escape(step["name"])}</text>',
@@ -448,8 +486,12 @@ def render_svg(tasks, plan=None):
         small = {"waiting for the game": "waiting"}.get(text, text)
         out.append(f'<text x="{cx:.1f}" y="{bar_y + 54}" class="{"w" if key == "waiting" else "n"}" '
                    f'text-anchor="middle">{escape(small)}</text>')
+        if "difficulty" in s:
+            _, name, colour = DIFFICULTY[s["difficulty"]]
+            out.append(f'<text x="{cx:.1f}" y="{bar_y + 70}" class="d" fill="{colour}" text-anchor="middle">'
+                       f'{escape(name.lower())}</text>')
     # Brackets for the roadmap stages: one per run of steps with the same stage.
-    y = bar_y + 72
+    y = bar_y + 90
     i = 0
     while i < len(rows):
         j = i
