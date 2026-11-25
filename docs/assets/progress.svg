@@ -15,7 +15,7 @@
 <rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
 <text x="138.2" y="170" class="l" text-anchor="middle">2. Prototype</text>
-<text x="138.2" y="186" class="n" text-anchor="middle">33 of 33 done</text>
+<text x="138.2" y="186" class="n" text-anchor="middle">35 of 35 done</text>
 <text x="138.2" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
 <rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
@@ -37,9 +37,9 @@
 <text x="364.5" y="186" class="n" text-anchor="middle">4 of 4 done</text>
 <text x="364.5" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
 <rect x="405.3" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
-<rect x="405.3" y="132" width="27.8" height="18" rx="5" fill="url(#g)"/>
+<rect x="405.3" y="132" width="34.7" height="18" rx="5" fill="url(#g)"/>
 <text x="440.0" y="170" class="l" text-anchor="middle">6. Infra</text>
-<text x="440.0" y="186" class="n" text-anchor="middle">2 of 5 done</text>
+<text x="440.0" y="186" class="n" text-anchor="middle">3 of 6 done</text>
 <text x="440.0" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
 <rect x="481.2" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
 <text x="515.5" y="170" class="l" text-anchor="middle">7. In game</text>
