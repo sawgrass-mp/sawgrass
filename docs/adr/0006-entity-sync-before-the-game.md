@@ -47,9 +47,10 @@ The protocol never names a game asset. Models, animation clips, ped tasks, weapo
 - The server compares `AssetId`s but never interprets them. Lists of what is allowed (which models a player may
   spawn, which weapon a character holds, a weapon's damage and fire rate) come from resources and server
   configuration, written by server owners, never from game files in this repository.
-- Appearance (a vehicle's colours and mods, a ped's clothes and face) is an opaque byte string of at most 64 bytes
-  per entity, in a layout the client module defines once the game is known. The server stores and relays it; scripts
-  set it.
+- Appearance (a vehicle's colours and mods, a ped's clothes, tattoos and face) is an opaque byte string of at most
+  256 bytes per entity (a placeholder, revisited when the game's appearance data is known), in a layout the client
+  module defines. It is sent whole when an entity is added and when it changes, which is rare, never per tick. The
+  server stores and relays it; scripts set it.
 
 ### 3. Peds and animation: intent, not clips
 
@@ -121,8 +122,11 @@ events to the owner.
 
 A ped's health and armour live on the server. A client cannot heal and cannot change another ped's health.
 
-- The shooter's client sends a **hit report**: target, weapon, body zone (head, torso, arm, leg, other), the hit
-  point, the shooter's position and the snapshot tick the shooter saw the target at.
+- The shooter's client sends **hit reports**: target, weapon, body zone (head, torso, arm, leg, other), the hit
+  point, the shooter's position and the snapshot tick the shooter saw the target at. The hits of one client tick go
+  in one event (up to 16, so a shotgun's pellets are one event), and combat events have their own rate limit, sized
+  from the fastest weapon's fire rate, separate from NET-12's general event limit, so firing a fast weapon never
+  closes the connection. The per-weapon fire-rate check is what bounds the hits.
 - The server accepts it only if: the shooter is alive and holds that weapon; the weapon's fire rate allows another
   shot; the target is in the same routing bucket and in the shooter's visible set; the distance is within the
   weapon's range; the reported tick is at most the rewind limit old (placeholder 250 ms); and the target's position
@@ -152,9 +156,10 @@ blocks:   count, then per entity: id gap, length, block mask, fields  new list
 ```
 
 The `blocks` list carries the entities whose block fields changed against the baseline, ascending by id, each field
-as a varint or a difference from the baseline as the kinematics are. Appearance changes go in it too. A client that
-does not know a block field yet skips the rest of the entry by its length, so a later version can add fields at the end of a block
-without breaking older clients inside the 4.x series. `MAX_ENTITIES` is derived again from the new worst-case
+as a varint or a difference from the baseline as the kinematics are. Appearance changes go in it too. The length
+bounds each entry, so a decoder rejects a malformed entry without reading past it, and a later version that adds
+fields at the end of a block needs only a small decoder change. It does not make versions compatible: until the
+first release a client and a server speak only the identical `PROTOCOL_VERSION` (`is_compatible`). `MAX_ENTITIES` is derived again from the new worst-case
 entity size.
 
 From the client, the state datagram carries its own kinematics and ped block, then a count and that many owned
