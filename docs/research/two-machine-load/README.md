@@ -125,4 +125,5 @@ Build `sawgrass-server` and `sawgrass-bots` in release mode on both machines, th
 [Bots and server on separate machines](../../../crates/sawgrass-bots/README.md#bots-and-server-on-separate-machines).
 Use the commands under [Machines and method](#machines-and-method) with the counts in the tables. Pin the server and
 machine A's bots to separate cores with `taskset`, and give machine B's bots a different `--seed`. The full logs of
-all three series are kept outside the repository; the tables above copy their "whole load phase" reports.
+all three series are kept outside the repository; the tables above copy their "whole load phase" reports. `python3 -I chart.py`
+in this folder draws the README's picture (`docs/assets/load.svg`) from the counted runs.
