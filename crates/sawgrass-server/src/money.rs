@@ -1,7 +1,13 @@
 //! Players' money in the ledger's single writer (task DB-8, ADR 0003).
 //!
 //! With a ledger, every player who connects gets a character wallet. The wallet is funded with a starting amount from
-//! the server's system wallet, so money only moves between wallets and every balance sums to zero. A client pays
+//! the server's system wallet once the player has a place in the world, so a join the server refuses moves no
+//! money, and every balance sums to zero.
+//!
+//! A wallet belongs to one connection (`player/{run}/{connection}`), not to a person: reconnecting opens a new one
+//! with a fresh starting amount, and the old one stays in the ledger unused. That is what load tests need. Wallets
+//! per character come with persistent character identities in the roleplay base (roadmap step 8); until then
+//! `--ledger` is for load tests, not for keeping players' money. A client pays
 //! another player with [`ClientEvent::Pay`](sawgrass_protocol::game::ClientEvent::Pay). That is the load-test path
 //! for money until resources move it through the scripting API, so the server takes the event only when started
 //! for it (`--money-events`).
@@ -53,7 +59,7 @@ impl Money {
         }))
     }
 
-    /// Opens connection `connection`'s wallet and funds it, once both are on disk.
+    /// Opens connection `connection`'s wallet, once it is on disk. It holds nothing until [`Money::register`].
     pub(crate) async fn open_wallet(&self, connection: u32) -> Result<WalletId, Error> {
         let opened = submit(
             &self.ledger,
@@ -62,25 +68,10 @@ impl Money {
                 kind: Kind::Character,
             },
         );
-        let wallet = match opened.await? {
-            Outcome::Opened { wallet, .. } => wallet,
-            Outcome::Transferred { .. } => {
-                return Err(Error::Corrupt("wallet key names a transfer".to_owned()));
-            }
-        };
-        if self.start_cash > 0 {
-            submit(
-                &self.ledger,
-                Operation::Transfer {
-                    key: format!("start/{}/{connection}", self.run),
-                    from: self.treasury,
-                    to: wallet,
-                    amount: self.start_cash,
-                },
-            )
-            .await?;
+        match opened.await? {
+            Outcome::Opened { wallet, .. } => Ok(wallet),
+            Outcome::Transferred { .. } => Err(Error::Corrupt("wallet key names a transfer".to_owned())),
         }
-        Ok(wallet)
     }
 
     /// Pays `amount` from `from` to the player with entity id `to`, once per client `key`, and returns the result
@@ -112,8 +103,22 @@ impl Money {
         (result, after.await.unwrap_or(0))
     }
 
-    /// Records that entity `wire` pays and is paid through `wallet`.
-    pub(crate) fn register(&self, wire: u32, wallet: WalletId) {
+    /// Records that entity `wire`, connection `connection`'s player, pays and is paid through `wallet`, and funds
+    /// the wallet with the starting amount. Called on the tick thread once the player has a slot; it does not wait
+    /// for the disk. The funding is submitted before the player hears it joined, so the writer applies it before
+    /// any payment the player makes. A failed funding means the writer has stopped, and every payment fails too.
+    pub(crate) fn register(&self, wire: u32, connection: u32, wallet: WalletId) {
+        if self.start_cash > 0 {
+            self.ledger.submit_then(
+                Operation::Transfer {
+                    key: format!("start/{}/{connection}", self.run),
+                    from: self.treasury,
+                    to: wallet,
+                    amount: self.start_cash,
+                },
+                |_| {},
+            );
+        }
         if let Ok(mut payees) = self.payees.write() {
             payees.insert(wire, wallet);
         }
@@ -165,4 +170,34 @@ fn balance(ledger: &Handle, wallet: WalletId) -> impl Future<Output = Result<i64
         let _ = tx.send(answer);
     });
     async move { rx.await.unwrap_or(Err(Error::Stopped)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sawgrass_store::{Config, RocksStore, Writer};
+
+    #[test]
+    fn a_wallet_is_funded_only_once_its_player_has_joined() {
+        let dir = std::env::temp_dir().join(format!("sawgrass-money-fund-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let writer =
+            Writer::start(RocksStore::open(&dir).expect("store"), Config::default()).expect("writer");
+        let money = Money::open(writer.handle(), 1_000, 7).expect("money");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let refused = runtime.block_on(money.open_wallet(1)).expect("open");
+        let joined = runtime.block_on(money.open_wallet(2)).expect("open");
+        // Connection 1 never got a slot: the tick never registers it. Connection 2 did, and registers twice (a
+        // repeated join message), which funds it once.
+        money.register(5, 2, joined);
+        money.register(5, 2, joined);
+        assert_eq!(money.balance(refused), Ok(0));
+        assert_eq!(money.balance(joined), Ok(1_000));
+        assert_eq!(money.balance(money.treasury), Ok(-1_000));
+        drop(money);
+        writer.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
