@@ -1544,8 +1544,9 @@ fn a_checked_hit_damages_and_kills() {
         .encode(&mut packet)
         .expect("header");
         ClientEvent::Shot(Box::new(shot)).encode(&mut packet);
-        runtime.block_on(a.send_event(&packet)).expect("send");
+        // Counted before sending: the server may count the shot before `send_event` returns.
         let seen = traffic.shots_received.load(Ordering::Relaxed) + 1;
+        runtime.block_on(a.send_event(&packet)).expect("send");
         assert!(wait_for(&traffic.shots_received, seen, || {
             tick_loop.run_tick();
         }));
