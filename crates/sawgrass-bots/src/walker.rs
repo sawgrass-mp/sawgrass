@@ -83,6 +83,8 @@ pub struct Walker {
     pause: f32,
     velocity: [f32; 2],
     yaw: f32,
+    /// Every leg at driving speed while set: the walker is a vehicle's driver (BOT-9).
+    driving: bool,
 }
 
 impl Walker {
@@ -109,6 +111,7 @@ impl Walker {
             pause: 0.0,
             velocity: [0.0; 2],
             yaw: 0.0,
+            driving: false,
         };
         walker.position = walker.waypoint();
         walker.next_leg();
@@ -141,6 +144,9 @@ impl Walker {
             }
             pick -= share;
         }
+        if self.driving {
+            self.speed = GAITS[2].0;
+        }
         self.pause = self.rng.range(0.0, MAX_PAUSE);
     }
 
@@ -163,6 +169,32 @@ impl Walker {
         self.position[0] += dx / distance * travel;
         self.position[1] += dy / distance * travel;
         self.yaw = dy.atan2(dx);
+    }
+
+    /// Heads straight for `target` at `speed`, then pauses there until told otherwise (BOT-5: walking to a
+    /// vehicle).
+    pub fn go_to(&mut self, target: [f32; 2], speed: f32) {
+        self.target = target;
+        self.speed = speed;
+        self.pause = f32::INFINITY;
+    }
+
+    /// Drives: this leg and every one after it at driving speed, until [`Walker::walk_on`] or
+    /// [`Walker::stop_driving`] (BOT-5, BOT-9: a bot that took the driver's seat).
+    pub fn drive(&mut self) {
+        self.driving = true;
+        self.next_leg();
+    }
+
+    /// Stops driving; the current leg goes on at its speed.
+    pub fn stop_driving(&mut self) {
+        self.driving = false;
+    }
+
+    /// Ends whatever the walker was doing, driving included, and picks a new leg, as after a pause.
+    pub fn walk_on(&mut self) {
+        self.driving = false;
+        self.next_leg();
     }
 
     /// Position in metres.
@@ -201,6 +233,29 @@ mod tests {
         }
         assert_eq!(a.position(), b.position());
         assert_ne!(a.position(), c.position());
+    }
+
+    #[test]
+    fn a_driving_walker_drives_every_leg_until_it_stops() {
+        let mut walker = Walker::new(Area::default(), 5);
+        walker.drive();
+        let speed = |w: &Walker| w.velocity()[0].hypot(w.velocity()[1]);
+        let mut moving = 0;
+        for _ in 0..20 * 600 {
+            walker.step(0.05);
+            if speed(&walker) > 0.0 {
+                moving += 1;
+                assert!((speed(&walker) - 18.0).abs() < 1e-3, "{}", speed(&walker));
+            }
+        }
+        assert!(moving > 1000, "{moving}");
+        walker.walk_on();
+        let mut slower = false;
+        for _ in 0..20 * 600 {
+            walker.step(0.05);
+            slower |= speed(&walker) > 0.0 && speed(&walker) < 10.0;
+        }
+        assert!(slower);
     }
 
     #[test]

@@ -58,6 +58,30 @@ async fn joined(session: &mut Session) -> u32 {
     }
 }
 
+/// The next `n` seat answers `session` is sent (NET-21), as (vehicle, seat, answer), skipping other events.
+fn seat_answers(
+    runtime: &tokio::runtime::Runtime,
+    session: &mut Session,
+    n: usize,
+) -> Vec<(u32, u8, sawgrass_protocol::game::SeatAnswer)> {
+    let mut answers = Vec::new();
+    while answers.len() < n {
+        let (_, packet) = runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(2), session.recv_event()).await })
+            .expect("a seat answer in time")
+            .expect("event");
+        if let Ok(ServerEvent::Seat {
+            vehicle,
+            seat,
+            answer,
+        }) = ServerEvent::decode(&packet[PacketHeader::SIZE..])
+        {
+            answers.push((vehicle, seat, answer));
+        }
+    }
+    answers
+}
+
 /// Runs a tick every 10 ms on the test's thread until `done` holds or two seconds pass.
 fn tick_until(tick_loop: &mut TickLoop, mut done: impl FnMut(&TickLoop) -> bool) -> bool {
     for _ in 0..200 {
@@ -515,11 +539,19 @@ fn a_teleport_is_refused_and_counted() {
     };
     assert!(tick_until(&mut tick_loop, refused));
     // The client is told where the server holds it, once for a burst of refusals well under the correction
-    // interval.
-    let (_, packet) = runtime
-        .block_on(async { tokio::time::timeout(Duration::from_secs(2), client.recv_event()).await })
-        .expect("a correction in time")
-        .expect("event");
+    // interval. The world state it was sent on joining (SRV-17) comes first.
+    let packet = runtime.block_on(async {
+        loop {
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(2), client.recv_event())
+                .await
+                .expect("a correction in time")
+                .expect("event");
+            match ServerEvent::decode(&packet[PacketHeader::SIZE..]) {
+                Ok(ServerEvent::Environment(_) | ServerEvent::Door(_)) => {}
+                _ => break packet,
+            }
+        }
+    });
     match ServerEvent::decode(&packet[PacketHeader::SIZE..]) {
         Ok(ServerEvent::Corrected(state)) => {
             assert_eq!(state.id, id);
@@ -1120,6 +1152,99 @@ fn a_hand_off_at_speed_is_not_refused() {
     assert_eq!(traffic.refused_owned_movement.load(Ordering::Relaxed), 0);
 }
 
+/// SRV-17, ADR 0006 section 7: a joining player is sent the clock, the weather and every door, paced over ticks,
+/// then each change.
+#[test]
+fn a_joining_player_gets_the_world_state_then_its_changes() {
+    use sawgrass_protocol::entity::AssetId;
+    use sawgrass_protocol::world::Door;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let players = Arc::new(Mutex::new(players));
+    // More doors than one tick sends, and more than the event queue holds.
+    let doors = 100u32;
+    {
+        let mut p = players.lock().expect("players");
+        p.set_weather(AssetId(3), AssetId(3), 0);
+        for id in 1..=doors {
+            p.set_door(Door {
+                id: AssetId(id),
+                locked: id % 2 == 0,
+                open: 0,
+            });
+        }
+    }
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let mut a = runtime
+        .block_on(connect(addr, "localhost", roots, PROTOCOL_VERSION))
+        .expect("connects");
+    std::thread::scope(|scope| {
+        let id = scope.spawn(|| runtime.block_on(joined(&mut a)));
+        tick_until(&mut tick_loop, |_| id.is_finished());
+        id.join().expect("joined")
+    });
+    let mut read_until = |tick_loop: &mut TickLoop, done: &(dyn Fn(&[ServerEvent]) -> bool + Sync)| {
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                runtime.block_on(async {
+                    let mut seen = Vec::new();
+                    while !done(&seen) {
+                        let (_, packet) = a.recv_event().await.expect("event");
+                        if let Ok(event) = ServerEvent::decode(&packet[PacketHeader::SIZE..]) {
+                            seen.push(event);
+                        }
+                    }
+                    seen
+                })
+            });
+            tick_until(tick_loop, |_| reader.is_finished());
+            reader.join().expect("reader")
+        })
+    };
+    let count_doors =
+        |seen: &[ServerEvent]| seen.iter().filter(|e| matches!(e, ServerEvent::Door(_))).count();
+    let seen = read_until(&mut tick_loop, &|seen| count_doors(seen) == doors as usize);
+    // Each door once, in the order they were registered.
+    let ids: Vec<u32> = seen
+        .iter()
+        .filter_map(|e| match e {
+            ServerEvent::Door(d) => Some(d.id.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, (1..=doors).collect::<Vec<_>>());
+    let environment = seen.iter().find_map(|e| match e {
+        ServerEvent::Environment(env) => Some(*env),
+        _ => None,
+    });
+    assert_eq!(environment.map(|e| (e.weather, e.rate)), Some((AssetId(3), 200)));
+    assert!(seen.contains(&ServerEvent::Door(Door {
+        id: AssetId(100),
+        locked: true,
+        open: 0,
+    })));
+    // Then a change reaches it by itself.
+    let opened = Door {
+        id: AssetId(7),
+        locked: false,
+        open: 255,
+    };
+    players.lock().expect("players").set_door(opened);
+    let seen = read_until(&mut tick_loop, &|seen| seen.contains(&ServerEvent::Door(opened)));
+    assert!(!seen.is_empty());
+}
+
 /// NET-20, ADR 0006 section 5: shots have their own budget, so a burst of shots does not use up the other events'
 /// and is dropped beyond its own, without closing the connection.
 #[test]
@@ -1309,6 +1434,32 @@ fn a_player_enters_drives_and_leaves_a_vehicle() {
     }));
     assert_eq!(traffic.seats_granted.load(Ordering::Relaxed), granted);
     assert_eq!(lock(&players).seat_of(me), None);
+    // NET-21: leaving from no seat is answered too; a car that is removed takes its passenger out.
+    ask(&mut a, ClientEvent::LeaveSeat);
+    assert!(lock(&players).set_locked(car, false));
+    ask(
+        &mut a,
+        ClientEvent::EnterSeat {
+            vehicle: car,
+            seat: 1,
+        },
+    );
+    assert!(tick_until(&mut tick_loop, |_| lock(&players).seat_of(me) == Some((car, 1))));
+    assert!(lock(&players).despawn(car));
+    // Every request was answered, in order, with what the server did and why.
+    use sawgrass_protocol::game::SeatAnswer;
+    assert_eq!(
+        seat_answers(&runtime, &mut a, 7),
+        [
+            (far_car, 0, SeatAnswer::CannotReach),
+            (car, 0, SeatAnswer::Granted),
+            (car, 0, SeatAnswer::Left),
+            (car, 1, SeatAnswer::Locked),
+            (0, 0, SeatAnswer::NotSeated),
+            (car, 1, SeatAnswer::Granted),
+            (car, 1, SeatAnswer::Left),
+        ]
+    );
 }
 
 /// SRV-16, ADR 0006 section 5: the server applies a hit only from a live shooter holding the weapon, at the fire
@@ -1443,8 +1594,9 @@ fn a_checked_hit_damages_and_kills() {
         .encode(&mut packet)
         .expect("header");
         ClientEvent::Shot(Box::new(shot)).encode(&mut packet);
-        runtime.block_on(a.send_event(&packet)).expect("send");
+        // Counted before sending: the server may count the shot before `send_event` returns.
         let seen = traffic.shots_received.load(Ordering::Relaxed) + 1;
+        runtime.block_on(a.send_event(&packet)).expect("send");
         assert!(wait_for(&traffic.shots_received, seen, || {
             tick_loop.run_tick();
         }));
@@ -1474,6 +1626,12 @@ fn a_checked_hit_damages_and_kills() {
         (0, Motion::Dead)
     );
     assert_eq!(lock(&players).seat_of(id_b), None);
+    // NET-21: B is told it got the seat, and that it left it when it died.
+    use sawgrass_protocol::game::SeatAnswer;
+    assert_eq!(
+        seat_answers(&runtime, &mut b, 2),
+        [(car, 0, SeatAnswer::Granted), (car, 0, SeatAnswer::Left)]
+    );
     send(&b, 20.0, AssetId::NONE);
     for _ in 0..3 {
         tick_loop.run_tick();

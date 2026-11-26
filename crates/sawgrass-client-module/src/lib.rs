@@ -12,6 +12,7 @@
 //! - [`assets`] and [`entity_pool`]: protocol asset ids to game assets per build, server ids to game entities.
 //! - [`module`]: start, frame and stop, and [`module::NetCore`], where the network core plugs in.
 //! - [`link`]: [`link::NetLink`], the [`module::NetCore`] over the network core in `sawgrass-netcode`.
+//! - [`world_state`]: the server's clock, weather and doors, applied to the game.
 //! - [`connection`]: the module's own connection to a server, on its own thread.
 //! - [`fake`]: a runtime over a made-up code image, so all of the above is tested without the game.
 
@@ -27,3 +28,4 @@ pub mod pattern;
 pub mod runtime;
 pub mod table;
 pub mod victory;
+pub mod world_state;
