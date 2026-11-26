@@ -52,8 +52,9 @@ see each other in the game.
 
 ## Running under VIctory
 
-Build the module (`cargo build --release -p sawgrass-client-module` on Windows gives `sawgrass_client_module.dll`)
-and start the game with three variables set:
+Build the module (`cargo build --release -p sawgrass-client-module` on Windows gives `sawgrass_client_module.dll`;
+the Windows build is not checked by CI yet, and the first run in the game is still to come) and start the game with
+three variables set:
 
 - `VICTORY_MODS`: the path of that DLL, for VIctory's mod loader.
 - `SAWGRASS_FUNCTION_TABLE` and `SAWGRASS_ASSET_TABLE`: the paths of the two tables on this machine.

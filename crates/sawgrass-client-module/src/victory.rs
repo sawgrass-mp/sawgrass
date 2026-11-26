@@ -56,7 +56,8 @@ pub mod abi {
         /// `size_of::<Host>()` of the host that filled this in.
         pub size: u32,
         pub title_base: u64,
-        /// `SizeOfImage`: the title's code is readable in place for this many bytes.
+        /// `SizeOfImage`: the whole mapped image, headers, code and data (where `local_player` lives), readable in
+        /// place for this many bytes.
         pub title_size: u64,
         /// BLAKE3 of the original executable.
         pub title_hash: [u8; 32],
@@ -68,6 +69,10 @@ pub mod abi {
         pub unhook: unsafe extern "C" fn(handle: i64) -> i32,
         pub on_frame: unsafe extern "C" fn(callback: FrameFn, user: *mut c_void) -> i32,
     }
+
+    // The layout of ABI 1 on 64-bit Windows, the loader's only target: drift from the loader's struct shows here.
+    #[cfg(target_pointer_width = "64")]
+    const _: () = assert!(std::mem::size_of::<Host>() == 96);
 
     /// The name of a status code the host returns (negated, for `hook`).
     pub fn status_name(code: i64) -> &'static str {

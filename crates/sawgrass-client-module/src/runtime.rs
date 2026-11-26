@@ -52,7 +52,8 @@ impl GameBuild {
     }
 }
 
-/// The title's executable code as the runtime has it mapped.
+/// The title's image as the runtime has it mapped: its code, and the data around it that table entries such as
+/// `local_player` may name.
 #[derive(Debug, Clone, Copy)]
 pub struct CodeImage<'a> {
     /// Address of `bytes[0]` in the game process.
