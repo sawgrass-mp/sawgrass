@@ -20,7 +20,7 @@ use sawgrass_protocol::{EntityState, Position};
 
 use crate::entity_pool::NetId;
 use crate::game::{EntityKind, Pose};
-use crate::module::{CoreEvent, NetCore, ShotReport, World};
+use crate::module::{CoreEvent, NetCore, ShotReport, World, WorldError};
 use crate::world_state::WorldState;
 
 /// Datagrams kept at most in a [`Datagrams`] queue. While frames stop (a loading screen, a pause) the connection
@@ -176,6 +176,9 @@ pub struct NetLink {
     owned_states: Vec<OwnedState>,
     /// Spawns, moves and removals the world refused, for diagnostics.
     pub world_errors: u64,
+    /// Spawns and moves skipped because the table does not locate `ped_spawn` or `entity_set_pose` yet. They are
+    /// retried every frame, so this grows per remote entity per frame and is kept apart from `world_errors`.
+    pub not_located: u64,
     /// Seat requests from the game not sent because an earlier one still waited for its answer, for diagnostics.
     pub seat_requests_held: u64,
 }
@@ -214,6 +217,7 @@ impl NetLink {
             seat_request: None,
             owned_states: Vec::new(),
             world_errors: 0,
+            not_located: 0,
             seat_requests_held: 0,
         }
     }
@@ -405,8 +409,12 @@ impl NetLink {
         &self.world_state
     }
 
-    fn count<T, E>(&mut self, result: Result<T, E>) -> Option<T> {
-        result.map_err(|_| self.world_errors += 1).ok()
+    /// Counts a refusal: in [`NetLink::not_located`] when the table lacks the game function, else in
+    /// [`NetLink::world_errors`].
+    fn count<T>(&mut self, result: Result<T, WorldError>) -> Option<T> {
+        result
+            .map_err(|error| tally(&error, &mut self.world_errors, &mut self.not_located))
+            .ok()
     }
 
     fn show_remote(&mut self, dt: f32, world: &mut World<'_>) {
@@ -477,11 +485,15 @@ impl NetLink {
             return;
         };
         if let Some(offset) = client.frame(dt) {
-            for (p, o) in local.position.iter_mut().zip(offset) {
+            let mut corrected = local;
+            for (p, o) in corrected.position.iter_mut().zip(offset) {
                 *p += o;
             }
-            if world.set_local_player_pose(local).is_err() {
-                self.world_errors += 1;
+            // Only a correction the game applied is sent: without `entity_set_pose` the player stays where it is,
+            // and sending the corrected pose would show the server a gap it would correct again.
+            match world.set_local_player_pose(corrected) {
+                Ok(()) => local = corrected,
+                Err(error) => tally(&error, &mut self.world_errors, &mut self.not_located),
             }
         }
         // Measured after the correction offset, so a correction shows as velocity for its frames; corrections are
@@ -514,6 +526,14 @@ impl NetLink {
         {
             self.outbox.push(datagram);
         }
+    }
+}
+
+/// Adds a refusal to the right counter (see [`NetLink::not_located`]).
+fn tally(error: &WorldError, world_errors: &mut u64, not_located: &mut u64) {
+    match error {
+        WorldError::NoPedSpawn | WorldError::NoSetPose => *not_located += 1,
+        _ => *world_errors += 1,
     }
 }
 

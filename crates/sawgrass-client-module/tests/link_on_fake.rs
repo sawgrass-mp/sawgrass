@@ -8,7 +8,7 @@ use sawgrass_client_module::game::{
 };
 use sawgrass_client_module::hooks::GameEvent;
 use sawgrass_client_module::link::{MAX_QUEUED, NetLink, SEAT_REQUEST_TIMEOUT};
-use sawgrass_client_module::module::{Module, all_functions};
+use sawgrass_client_module::module::{ENTITY_SET_POSE, Module, PED_SPAWN, all_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::FunctionTable;
 use sawgrass_netcode::{Client, ClientConfig};
@@ -25,12 +25,18 @@ const TICK_HZ: u16 = 20;
 const FRAME_HZ: f32 = 60.0;
 
 fn module() -> Module<FakeRuntime> {
+    module_without(&[])
+}
+
+/// A module whose table lacks `absent`.
+fn module_without(absent: &[&str]) -> Module<FakeRuntime> {
     let build = GameBuild {
         runtime: RuntimeKind::Victory,
         title_version: "1.0.0".into(),
         image_digest: "00ff".into(),
     };
-    let names = all_functions();
+    let mut names = all_functions();
+    names.retain(|name| !absent.contains(name));
     let mut image = vec![0u8; 0x10 * names.len()];
     let mut table = format!("build = {BUILD_KEY}\n");
     for (i, name) in names.iter().enumerate() {
@@ -833,4 +839,59 @@ fn one_seat_request_waits_for_the_server_at_a_time() {
     hooks.push(request);
     frames(1, &mut module, &mut game, &mut link);
     assert_eq!(sent.take(), vec![enter]);
+}
+
+#[test]
+fn without_spawn_and_set_pose_nothing_is_counted_as_an_error_and_corrections_are_not_sent() {
+    let mut module = module_without(&[PED_SPAWN, ENTITY_SET_POSE]);
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 0.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    let (inbox, events) = (link.inbox(), link.events());
+    let mut encoder = DeltaEncoder::default();
+    let mut tick = 0;
+    let mut frames = |n: u32, module: &mut Module<FakeRuntime>, game: &mut FakeGame, link: &mut NetLink| {
+        for _ in 0..n {
+            let mut player = state(7, 5.0);
+            player.velocity = Velocity::from_metres_per_second([0.0; 3]).expect("velocity");
+            let mut local = state(LOCAL, 0.0);
+            local.velocity = player.velocity;
+            for d in snapshot(&mut encoder, tick, &[player, local]) {
+                inbox.push(d);
+            }
+            tick += 1;
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        }
+    };
+
+    // A remote player cannot be shown yet: its spawn is retried every frame and counted apart.
+    frames(30, &mut module, &mut game, &mut link);
+    assert!(module.entities().handle(7).is_none());
+    assert_eq!(link.world_errors, 0);
+    assert!(link.not_located > 0);
+
+    // A small correction cannot be applied, so it is not sent either: the state stays where the game has the
+    // player, and the server is not shown a gap it would correct again.
+    events.push(ServerEvent::Corrected(state(LOCAL, 1.0)));
+    link.outbox().take();
+    frames(30, &mut module, &mut game, &mut link);
+    let sent = link.outbox().take();
+    assert!(!sent.is_empty());
+    for datagram in sent {
+        let mut owned = Vec::new();
+        let (state, _) =
+            ClientState::decode_with_owned(&datagram[PacketHeader::SIZE..], &mut owned).expect("decodes");
+        let x = state.position.to_metres()[0];
+        assert!(x.abs() < 0.02, "sent the uncorrected pose, at x = {x}");
+    }
+    assert_eq!(game.entities[&me].2.position[0], 0.0);
+    assert_eq!(link.world_errors, 0);
 }
