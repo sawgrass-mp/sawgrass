@@ -96,7 +96,7 @@ and 24.4 ms with no overrun and no dropped bot. For reference, 3,000 bots on the
 |---|---|---|---|
 | NET-11 | Delta snapshots against the last acknowledged one; client states carry the acknowledgement | Snapshot bytes cut by about 76% on the bots' traffic, one datagram per snapshot (NET-8) | IM-4 |
 | IM-6 | Rank the visible set and cut it to the per-player byte budget (issue #18) | Bounds per-player work and bytes in any crowd | IM-5 |
-| SRV-8 | 30 Hz by default | The rate SRV-4 planned for | SRV-7, NET-11 |
+| SRV-8 | 30 Hz ready, 20 Hz kept by default: at 2,700 players 30 Hz gave p99 15 to 16 ms and every snapshot with a gateway thread per core; 4,096 at 30 Hz could not be measured on the two machines (#228) | The rate SRV-4 planned for, behind `--tick-hz 30` | SRV-7, NET-11 |
 
 NET-10 (postcard for every payload) was dropped (#223): NET-11's delta payload already writes postcard's varints,
 and what stays hand-written, the client state and rare events, would shrink by about 3%.

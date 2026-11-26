@@ -75,12 +75,12 @@ So the work is split in three, in this order:
 | ⚪ | [**10. Launcher and releases**](docs/roadmap.md#10-launcher-and-releases)<br><sub>Stage 4</sub> | Detects the runtime and checks its build, installs the signed client module, auto-update, server list, downloads server resources, release process | — | 🟡 **Medium**<br><sub>Known technology (Tauri, signing, updates), but a security boundary on every player's machine</sub> | not started |
 | ⚪ | [**11. Scale**](docs/roadmap.md#11-scale)<br><sub>Stage 5</sub> | Real players on public servers, gateways in their own processes if the gateway limits, zones with entity hand-off only if measurements call for them, operations and moderation | — | 🔴 **Very hard**<br><sub>Real players behave unlike bots; zones with hand-off are the most error-prone step of the architecture</sub> | not started |
 
-Tooling and docs run alongside every step: 23 of 30 tasks done.
+Tooling and docs run alongside every step: 23 of 31 tasks done.
 
-Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: 🔍 [NET-22](https://github.com/sawgrass-mp/sawgrass/issues/243) · ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🔍 [SRV-25](https://github.com/sawgrass-mp/sawgrass/issues/242) · 🟢 [BOT-10](https://github.com/sawgrass-mp/sawgrass/issues/244) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
+Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: 🔍 [NET-22](https://github.com/sawgrass-mp/sawgrass/issues/243) · ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🔍 [SRV-25](https://github.com/sawgrass-mp/sawgrass/issues/242) · 🛠️ [BOT-10](https://github.com/sawgrass-mp/sawgrass/issues/244) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
 
 <details>
-<summary><b>All tasks</b>: 106 done, 3 in review, 4 in progress, 3 ready, 7 planned</summary>
+<summary><b>All tasks</b>: 106 done, 3 in review, 6 in progress, 2 ready, 7 planned</summary>
 
 | | Task | Step | Size | Status |
 |---|---|---|---|---|
@@ -175,7 +175,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | 🔍 | [NET-22](https://github.com/sawgrass-mp/sawgrass/issues/243): Check hits at the client's render time, between two snapshot ticks | Outside the plan | M | in review |
 | ⚪ | [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122): Show movement refusals per player for admins | Outside the plan | M | planned |
 | 🔍 | [SRV-25](https://github.com/sawgrass-mp/sawgrass/issues/242): Stamp the environment with the tick its whole minute began | Outside the plan | M | in review |
-| 🟢 | [BOT-10](https://github.com/sawgrass-mp/sawgrass/issues/244): Shooters that aim where a client draws the targets | Outside the plan | M | ready |
+| 🛠️ | [BOT-10](https://github.com/sawgrass-mp/sawgrass/issues/244): Shooters that aim where a client draws the targets | Outside the plan | M | in progress |
 | 🛠️ | [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157): Turn off a resource that keeps overrunning | Outside the plan | M | in progress |
 | ⚪ | [OPS-1](https://github.com/sawgrass-mp/sawgrass/issues/9): Benchmark regression gate | Tooling and docs | M | planned |
 | ⚪ | [OPS-2](https://github.com/sawgrass-mp/sawgrass/issues/10): Markdown link check | Tooling and docs | S | planned |
@@ -207,6 +207,7 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [DOC-16](https://github.com/sawgrass-mp/sawgrass/issues/222): Record DB\-8's change to the store writer, and ask scopes to list every crate | Tooling and docs | M | done |
 | ✅ | [DOC-17](https://github.com/sawgrass-mp/sawgrass/issues/233): Regenerate the README progress and pictures on current main | Tooling and docs | M | done |
 | 🔍 | [DOC-18](https://github.com/sawgrass-mp/sawgrass/issues/247): Steps that need the game are not done from their tasks alone | Tooling and docs | M | in review |
+| 🛠️ | [DOC-19](https://github.com/sawgrass-mp/sawgrass/issues/250): Record NET\-22's render\-time hit check and 500 ms rewind in ADR 0006 | Tooling and docs | M | in progress |
 
 </details>
 
