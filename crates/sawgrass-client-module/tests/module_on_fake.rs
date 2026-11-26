@@ -7,8 +7,8 @@ use sawgrass_client_module::game::{
 };
 use sawgrass_client_module::hooks::{EventSink, GameEvent, HookPoint};
 use sawgrass_client_module::module::{
-    CoreEvent, Module, NetCore, REQUIRED_FUNCTIONS, StartError, World, WorldError, all_functions,
-    optional_functions,
+    CoreEvent, ENTITY_SET_POSE, Module, NetCore, PED_SPAWN, REQUIRED_FUNCTIONS, StartError, World,
+    WorldError, all_functions, optional_functions,
 };
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::{FunctionTable, LookupError, ResolveError};
@@ -176,10 +176,11 @@ fn functions_only(names: &[&str]) -> FunctionTable {
 }
 
 #[test]
-fn starts_with_the_four_required_functions_and_switches_the_rest_off() {
-    let mut module =
-        Module::start(runtime(), &functions_only(&REQUIRED_FUNCTIONS), assets(BUILD_KEY)).expect("started");
-    // Only the frame is hooked; the other three are the real game interface's to call.
+fn starts_with_the_required_functions_and_switches_the_rest_off() {
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.push(ENTITY_SET_POSE);
+    let mut module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    // Only the frame is hooked; the others are the real game interface's to call.
     let hooked: Vec<_> = module
         .runtime()
         .hooks
@@ -189,7 +190,7 @@ fn starts_with_the_four_required_functions_and_switches_the_rest_off() {
     assert_eq!(hooked, vec!["frame"]);
     assert!(module.is_hooked(HookPoint::Frame));
     assert!(!module.is_hooked(HookPoint::PedCreate));
-    for name in REQUIRED_FUNCTIONS {
+    for name in &names {
         assert!(module.functions().address(name).is_some(), "{name}");
     }
     let missing: Vec<_> = module
@@ -197,7 +198,9 @@ fn starts_with_the_four_required_functions_and_switches_the_rest_off() {
         .iter()
         .map(|(n, _)| n.as_str())
         .collect();
-    assert_eq!(missing, optional_functions());
+    let mut optional = optional_functions();
+    optional.retain(|name| *name != ENTITY_SET_POSE);
+    assert_eq!(missing, optional);
     assert!(
         module
             .missing_functions()
@@ -229,16 +232,13 @@ fn some_switches_located_turn_only_those_systems_off() {
 
 #[test]
 fn a_missing_required_function_stops_the_start() {
-    let table = functions_only(&["frame", "local_player", "ped_spawn"]);
+    let table = functions_only(&["frame", "ped_spawn", "entity_set_pose"]);
     let Err((StartError::Functions(ResolveError::Functions(failed)), rt)) =
         Module::start(runtime(), &table, assets(BUILD_KEY))
     else {
         panic!("the start needs every required function");
     };
-    assert_eq!(
-        failed,
-        vec![("entity_set_pose".to_owned(), LookupError::NotInTable)]
-    );
+    assert_eq!(failed, vec![("local_player".to_owned(), LookupError::NotInTable)]);
     assert!(rt.hooks.is_empty());
 }
 
@@ -456,4 +456,51 @@ fn a_late_event_about_a_reused_handle_does_not_reach_the_new_entity() {
         "the removal of entity 1 is not reported as a loss of entity 2"
     );
     assert_eq!(module.ambient_removed, 0);
+}
+
+/// Tries to show a remote ped and a vehicle, and to move the vehicle, on its first frame.
+#[derive(Default)]
+struct SpawnTry {
+    results: Vec<Result<(), WorldError>>,
+}
+
+impl NetCore for SpawnTry {
+    fn on_event(&mut self, _event: &CoreEvent) {}
+
+    fn on_frame(&mut self, _dt: f32, world: &mut World<'_>) {
+        if self.results.is_empty() {
+            self.results
+                .push(world.spawn(1, EntityKind::Ped, AssetId(5), pose(1.0)));
+            self.results
+                .push(world.spawn(2, EntityKind::Vehicle, AssetId(5), pose(2.0)));
+            self.results.push(world.set_pose(2, pose(3.0)));
+        }
+    }
+}
+
+#[test]
+fn with_only_the_required_functions_the_module_starts_and_shows_and_moves_nothing() {
+    let mut module =
+        Module::start(runtime(), &functions_only(&REQUIRED_FUNCTIONS), assets(BUILD_KEY)).expect("started");
+    assert!(!module.shows_remote_peds());
+    assert!(!module.moves_entities());
+    for name in [PED_SPAWN, ENTITY_SET_POSE] {
+        assert!(
+            module.missing_functions().iter().any(|(n, _)| n == name),
+            "{name}"
+        );
+    }
+    let mut core = SpawnTry::default();
+    module
+        .frame(1.0 / 60.0, &mut FakeGame::default(), &mut core)
+        .expect("frame");
+    assert_eq!(
+        core.results,
+        vec![Err(WorldError::NoPedSpawn), Ok(()), Err(WorldError::NoSetPose)]
+    );
+
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.extend([PED_SPAWN, ENTITY_SET_POSE]);
+    let module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    assert!(module.shows_remote_peds() && module.moves_entities());
 }
