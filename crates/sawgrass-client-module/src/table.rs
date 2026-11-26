@@ -8,13 +8,19 @@
 //! build = victory/1.0.0/0123abcd
 //! ped_create = 0A ?? 0C 0D
 //! vehicle_create = 1A 1B ?? ?? ?? ?? ; offset=2 ; rel32=1,5
+//! local_player = @0x2A41F80
 //! ```
+//!
+//! An entry is a byte pattern, or `@` and an offset from the image base found with a debugger. An offset holds only
+//! for the exact build the table names, which the `build` line already guarantees; a pattern usually survives a
+//! small patch and is the better entry once it is known. An entry may name data (where the local player's ped is
+//! kept) as well as a function.
 //!
 //! `offset=N` moves the result N bytes from the start of the match (N may be negative). `rel32=D,E` then follows a
 //! relative reference: it reads the little-endian `i32` at D bytes past that point and adds it to the address E bytes
 //! past it, as a `call rel32` does with D = 1, E = 5.
 //!
-//! [`FunctionTable::resolve`] scans the code image for every function the module requires, every time the module
+//! [`FunctionTable::resolve`] scans the code image for every function the module uses, every time the module
 //! starts. A game patch or a runtime update changes the build, the table no longer matches, and the module refuses
 //! to start until a table for the new build exists; scanning again with the old table would risk hooking the wrong
 //! code.
@@ -25,9 +31,18 @@ use std::fmt;
 use crate::pattern::{Pattern, PatternError, ScanError};
 use crate::runtime::{CodeImage, GameBuild};
 
+/// How an entry is found in the image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Locator {
+    /// Scanned for; it must match exactly once.
+    Pattern(Pattern),
+    /// At this offset from the image base.
+    Offset(u64),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    pub pattern: Pattern,
+    pub locator: Locator,
     pub offset: i64,
     /// `(displacement offset, instruction end)` of a relative reference to follow.
     pub rel32: Option<(u32, u32)>,
@@ -96,11 +111,13 @@ impl fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-/// Addresses of the required functions, valid only for the build they were found in.
+/// Addresses of the functions located, valid only for the build they were found in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFunctions {
     pub build: GameBuild,
     pub addresses: BTreeMap<String, u64>,
+    /// Optional functions that were not located, and why. What they serve is switched off.
+    pub missing: Vec<(String, LookupError)>,
 }
 
 impl ResolvedFunctions {
@@ -112,6 +129,16 @@ impl ResolvedFunctions {
     pub fn is_for(&self, build: &GameBuild) -> bool {
         self.build == *build
     }
+}
+
+/// A hexadecimal offset, with or without `0x`.
+fn parse_offset(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    u64::from_str_radix(digits, 16).ok()
 }
 
 fn parse_modifier(entry: &mut Entry, text: &str) -> Result<(), String> {
@@ -171,10 +198,18 @@ impl FunctionTable {
                 )));
             }
             let mut parts = rest.split(';');
-            let pattern = Pattern::parse(parts.next().unwrap_or(""))
-                .map_err(|error| TableError::Pattern { line, error })?;
+            let first = parts.next().unwrap_or("").trim();
+            let locator =
+                match first.strip_prefix('@') {
+                    Some(offset) => Locator::Offset(parse_offset(offset).ok_or_else(|| {
+                        syntax(format!("bad offset `{offset}` (hexadecimal, as `@0x1A2B`)"))
+                    })?),
+                    None => Locator::Pattern(
+                        Pattern::parse(first).map_err(|error| TableError::Pattern { line, error })?,
+                    ),
+                };
             let mut entry = Entry {
-                pattern,
+                locator,
                 offset: 0,
                 rel32: None,
             };
@@ -194,12 +229,14 @@ impl FunctionTable {
         })
     }
 
-    /// Locates every function in `required` in `image`, for the running `build`.
+    /// Locates every function in `required` and `optional` in `image`, for the running `build`. Any required one
+    /// missing is an error; optional ones missing are listed in [`ResolvedFunctions::missing`].
     pub fn resolve(
         &self,
         build: &GameBuild,
         image: CodeImage<'_>,
         required: &[&str],
+        optional: &[&str],
     ) -> Result<ResolvedFunctions, ResolveError> {
         let running = build.key();
         if self.build != running {
@@ -209,23 +246,26 @@ impl FunctionTable {
             });
         }
         let mut addresses = BTreeMap::new();
-        let mut failed = Vec::new();
-        for &name in required {
-            let located = match self.entries.get(name) {
-                None => Err(LookupError::NotInTable),
-                Some(entry) => locate(entry, image.bytes),
-            };
-            match located {
-                Ok(offset) => {
-                    addresses.insert(name.to_owned(), image.base + offset as u64);
+        let (mut failed, mut missing) = (Vec::new(), Vec::new());
+        for (names, failures) in [(required, &mut failed), (optional, &mut missing)] {
+            for &name in names {
+                let located = match self.entries.get(name) {
+                    None => Err(LookupError::NotInTable),
+                    Some(entry) => locate(entry, image.bytes),
+                };
+                match located {
+                    Ok(offset) => {
+                        addresses.insert(name.to_owned(), image.base + offset as u64);
+                    }
+                    Err(error) => failures.push((name.to_owned(), error)),
                 }
-                Err(error) => failed.push((name.to_owned(), error)),
             }
         }
         if failed.is_empty() {
             Ok(ResolvedFunctions {
                 build: build.clone(),
                 addresses,
+                missing,
             })
         } else {
             Err(ResolveError::Functions(failed))
@@ -235,7 +275,10 @@ impl FunctionTable {
 
 /// The offset of one function inside `bytes`.
 fn locate(entry: &Entry, bytes: &[u8]) -> Result<usize, LookupError> {
-    let found = entry.pattern.find_unique(bytes).map_err(LookupError::Scan)?;
+    let found = match &entry.locator {
+        Locator::Pattern(pattern) => pattern.find_unique(bytes).map_err(LookupError::Scan)?,
+        Locator::Offset(offset) => usize::try_from(*offset).map_err(|_| LookupError::OutOfImage)?,
+    };
     let at = i64::try_from(found)
         .ok()
         .and_then(|f| f.checked_add(entry.offset));
@@ -301,6 +344,7 @@ call_target = B1 ?? ?? ?? ?? B2 ; rel32=1,5
                 bytes: &bytes,
             },
             required,
+            &[],
         )
     }
 
@@ -326,6 +370,7 @@ call_target = B1 ?? ?? ?? ?? B2 ; rel32=1,5
                 bytes: &bytes,
             },
             &["marker"],
+            &[],
         );
         assert_eq!(
             error,
@@ -362,6 +407,45 @@ call_target = B1 ?? ?? ?? ?? B2 ; rel32=1,5
         assert_eq!(failed["before"], LookupError::OutOfImage);
         assert_eq!(failed["far"], LookupError::OutOfImage);
         assert_eq!(failed["absent"], LookupError::NotInTable);
+    }
+
+    #[test]
+    fn offsets_locate_entries_and_optional_misses_are_listed() {
+        let text = format!("{TABLE}player = @0x30\nnear_end = @3F ; offset=-1\nfar = @0x1000\n");
+        let table = FunctionTable::parse(&text).expect("valid table");
+        let bytes = image();
+        let image = CodeImage {
+            base: 0x1000,
+            bytes: &bytes,
+        };
+        let resolved = table
+            .resolve(
+                &build("feed"),
+                image,
+                &["marker", "player"],
+                &["near_end", "far", "absent"],
+            )
+            .expect("the required entries resolve");
+        assert_eq!(resolved.address("player"), Some(0x1030));
+        assert_eq!(resolved.address("near_end"), Some(0x103E));
+        let missing: BTreeMap<_, _> = resolved.missing.into_iter().collect();
+        assert_eq!(missing.len(), 2);
+        assert_eq!(missing["far"], LookupError::OutOfImage);
+        assert_eq!(missing["absent"], LookupError::NotInTable);
+
+        // A required entry missing still stops the start, whatever the optional ones do.
+        let error = table.resolve(&build("feed"), image, &["absent"], &["marker"]);
+        assert_eq!(
+            error,
+            Err(ResolveError::Functions(vec![(
+                "absent".into(),
+                LookupError::NotInTable
+            )]))
+        );
+        assert!(matches!(
+            FunctionTable::parse("build = x\nplayer = @0xZZ"),
+            Err(TableError::Syntax { line: 2, .. })
+        ));
     }
 
     #[test]
