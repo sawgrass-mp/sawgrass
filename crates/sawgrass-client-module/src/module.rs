@@ -386,6 +386,12 @@ impl<R: Runtime> Module<R> {
         &self.runtime
     }
 
+    /// The runtime, for an adapter that installs its own hooks during the start, such as the hook that runs the
+    /// frame on VIctory's script thread.
+    pub fn runtime_mut(&mut self) -> &mut R {
+        &mut self.runtime
+    }
+
     pub fn functions(&self) -> &ResolvedFunctions {
         &self.functions
     }
