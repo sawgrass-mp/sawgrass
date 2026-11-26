@@ -170,11 +170,19 @@ pub struct NetLink {
     seat: Option<(NetId, u8)>,
     /// The server's last answer about the local player's seat, with the vehicle and seat it was about.
     seat_answer: Option<(NetId, u8, SeatAnswer)>,
+    /// When the seat request still waiting for the server's answer was sent, in local time. Only one is in flight.
+    seat_request: Option<f64>,
     /// The owned states built for this frame's datagram, kept to reuse the allocation.
     owned_states: Vec<OwnedState>,
     /// Spawns, moves and removals the world refused, for diagnostics.
     pub world_errors: u64,
+    /// Seat requests from the game not sent because an earlier one still waited for its answer, for diagnostics.
+    pub seat_requests_held: u64,
 }
+
+/// How long a seat request waits for the server's answer before the next one may go. The server answers every
+/// request it takes, so this only matters when its event budget dropped the request.
+pub const SEAT_REQUEST_TIMEOUT: f64 = 2.0;
 
 impl NetLink {
     /// A link that waits for the server's `Joined` event, which [`NetLink::events`] delivers.
@@ -203,8 +211,10 @@ impl NetLink {
             owned: BTreeMap::new(),
             seat: None,
             seat_answer: None,
+            seat_request: None,
             owned_states: Vec::new(),
             world_errors: 0,
+            seat_requests_held: 0,
         }
     }
 
@@ -285,6 +295,7 @@ impl NetLink {
         self.owned.clear();
         self.seat = None;
         self.seat_answer = None;
+        self.seat_request = None;
         self.samples.clear();
         self.last_local = None;
         self.client = Some(Client::new(entity, tick_hz, self.config));
@@ -315,6 +326,10 @@ impl NetLink {
     /// order on the reliable stream, so the last one is the server's current view.
     fn seat_answered(&mut self, vehicle: NetId, seat: u8, answer: SeatAnswer, world: &mut World<'_>) {
         self.seat_answer = Some((vehicle, seat, answer));
+        // Every answer but these two is the answer to an `EnterSeat`, so the next request may go.
+        if !matches!(answer, SeatAnswer::Left | SeatAnswer::NotSeated) {
+            self.seat_request = None;
+        }
         match answer {
             SeatAnswer::Granted => {
                 self.seat = Some((vehicle, seat));
@@ -510,12 +525,21 @@ impl NetCore for NetLink {
                 self.shown.remove(id);
             }
             CoreEvent::Shot(report) => self.report_shot(report),
+            // One request is in flight at a time: the game may call its entry function every frame while the player
+            // holds the key, and a request per frame would overrun the server's event budget and close the
+            // connection. Requests are held until the server answers, or the answer is overdue.
             CoreEvent::EnterSeat { vehicle, seat } => {
                 if self.client.is_some() {
-                    self.client_events.push(ClientEvent::EnterSeat {
-                        vehicle: *vehicle,
-                        seat: *seat,
-                    });
+                    match self.seat_request {
+                        Some(sent) if self.now - sent < SEAT_REQUEST_TIMEOUT => self.seat_requests_held += 1,
+                        _ => {
+                            self.seat_request = Some(self.now);
+                            self.client_events.push(ClientEvent::EnterSeat {
+                                vehicle: *vehicle,
+                                seat: *seat,
+                            });
+                        }
+                    }
                 }
             }
             // Only a seat the server knows of is left: when the module took the player out on the server's word,
