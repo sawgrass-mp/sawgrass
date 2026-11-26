@@ -1083,8 +1083,9 @@ impl Players {
         let ready = pl
             .last_shot
             .is_none_or(|at| now.saturating_duration_since(at) >= rules.interval);
-        let then = self.history.at(shot.tick).filter(|_| fresh);
-        let next = self.history.at(shot.tick + after).filter(|_| fresh);
+        // Looked up only once `fresh` holds: before that, `shot.tick + after` may overflow.
+        let then = fresh.then(|| self.history.at(shot.tick)).flatten();
+        let next = fresh.then(|| self.history.at(shot.tick + after)).flatten();
         let (Some(own), Some(then), Some(next), true) = (own, then, next, ready) else {
             self.traffic.shots_refused.fetch_add(1, Ordering::Relaxed);
             return;

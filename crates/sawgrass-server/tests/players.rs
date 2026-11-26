@@ -1784,5 +1784,8 @@ fn a_hit_on_a_moving_target_is_checked_where_the_client_drew_it() {
     let shots_refused = traffic.shots_refused.load(Ordering::Relaxed);
     fire(&mut tick_loop, &mut seen_at, &|_, newest| (newest - 11, 128));
     assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), shots_refused + 1);
+    // The last tick there is, with a fraction toward one past it: refused whole, and the tick loop runs on.
+    fire(&mut tick_loop, &mut seen_at, &|_, _| (u32::MAX, 1));
+    assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), shots_refused + 2);
     assert_eq!(traffic.hits_accepted.load(Ordering::Relaxed), 1);
 }
