@@ -158,6 +158,7 @@ async fn server_and_bots_run_at_30_hz() {
         drivers: 0,
         shooters: 0,
         shot_hz: 1,
+        aim_delay: 0,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(SECONDS);
