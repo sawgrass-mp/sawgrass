@@ -69,6 +69,8 @@ pub enum WorldError {
     NoLocalPlayer,
     Bind(BindError),
     Game(GameError),
+    /// The table does not locate `ped_spawn` yet, so remote peds are not shown.
+    NoPedSpawn,
 }
 
 /// The game as the network core sees it: entities by server id, assets by protocol id.
@@ -76,6 +78,8 @@ pub struct World<'a> {
     game: &'a mut dyn GameApi,
     pool: &'a mut EntityPool,
     assets: &'a AssetTable,
+    /// Whether the table located `ped_spawn`.
+    peds_spawn: bool,
 }
 
 impl fmt::Debug for World<'_> {
@@ -96,6 +100,9 @@ impl World<'_> {
     ) -> Result<(), WorldError> {
         if self.pool.handle(net).is_some() {
             return Err(WorldError::Bind(BindError::NetIdTaken(net)));
+        }
+        if kind == EntityKind::Ped && !self.peds_spawn {
+            return Err(WorldError::NoPedSpawn);
         }
         let fallback = (asset == AssetId::NONE && kind == EntityKind::Ped).then(|| self.assets.default_ped());
         let game_asset = fallback
@@ -229,17 +236,19 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// What the first milestone, two players who see each other, cannot do without; the module does not start unless
-/// the table locates all of them:
+/// What the module cannot start without; it does not start unless the table locates all of them:
 ///
 /// - `frame`: the game's frame, hooked to run [`Module::frame`].
 /// - `local_player`: where the game keeps the local player's ped, whose position is read and sent.
-/// - `ped_spawn`: the game's function that creates a ped, for remote players.
 /// - `entity_set_pose`: the game's function that puts an entity at a position, to move remote players.
 ///
-/// The last three are used by the real [`GameApi`] for the build, which takes their addresses from
-/// [`Module::functions`].
-pub const REQUIRED_FUNCTIONS: [&str; 4] = ["frame", "local_player", "ped_spawn", "entity_set_pose"];
+/// The last two are used by the real [`GameApi`] for the build, which takes their addresses from
+/// [`Module::functions`]. Two players who see each other also need [`PED_SPAWN`]; until the table locates it the
+/// module starts anyway, sends the local player, and shows no remote peds.
+pub const REQUIRED_FUNCTIONS: [&str; 3] = ["frame", "local_player", "entity_set_pose"];
+
+/// The game's function that creates a ped, for remote players: optional while it is still being found.
+pub const PED_SPAWN: &str = "ped_spawn";
 
 /// The functions the module cannot start without: [`REQUIRED_FUNCTIONS`].
 pub fn required_functions() -> Vec<&'static str> {
@@ -259,9 +268,8 @@ fn required_on(runtime: &impl Runtime) -> Vec<&'static str> {
 /// single-player switch missing leaves that system running, the input or camera hook missing leaves the network
 /// core without those events.
 pub fn optional_functions() -> Vec<&'static str> {
-    HookPoint::ALL
-        .iter()
-        .map(|h| h.function())
+    std::iter::once(PED_SPAWN)
+        .chain(HookPoint::ALL.iter().map(|h| h.function()))
         .chain(SinglePlayerSystem::ALL.iter().map(|s| s.function()))
         .filter(|name| !REQUIRED_FUNCTIONS.contains(name))
         .collect()
@@ -396,6 +404,11 @@ impl<R: Runtime> Module<R> {
         &self.functions
     }
 
+    /// Whether remote peds can be shown: the table located [`PED_SPAWN`].
+    pub fn shows_remote_peds(&self) -> bool {
+        self.functions.address(PED_SPAWN).is_some()
+    }
+
     /// The optional functions the table did not locate, and why: what the adapter shows the player, and the list
     /// of what to find next.
     pub fn missing_functions(&self) -> &[(String, LookupError)] {
@@ -476,10 +489,12 @@ impl<R: Runtime> Module<R> {
                 GameEvent::SeatRequested { .. } | GameEvent::SeatLeft { .. } => {}
             }
         }
+        let peds_spawn = self.shows_remote_peds();
         let mut world = World {
             game,
             pool: &mut self.pool,
             assets: &self.assets,
+            peds_spawn,
         };
         core.on_frame(dt, &mut world);
         Ok(())

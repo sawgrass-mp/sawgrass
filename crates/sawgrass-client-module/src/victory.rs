@@ -358,6 +358,12 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
             module.functions().addresses.len()
         ),
     );
+    if !module.shows_remote_peds() {
+        runtime.log(
+            abi::LOG_WARN,
+            "sawgrass: ped_spawn not located: the local player is sent, but remote players are not shown yet",
+        );
+    }
     if runtime.title_tls().is_none() {
         runtime.log(
             abi::LOG_WARN,
@@ -629,6 +635,7 @@ mod tests {
         let log = calls();
         assert_eq!(log[0], format!("log 2 sawgrass: running build {key}"));
         assert_eq!(log[1], "log 2 sawgrass: started, 3 functions located");
+        assert!(!log.iter().any(|l| l.contains("ped_spawn not located")));
         assert!(log.iter().any(|l| l.contains("off until found: ped_create")));
         let callback = CALLBACK
             .lock()

@@ -7,7 +7,7 @@ use sawgrass_client_module::game::{
 };
 use sawgrass_client_module::hooks::{EventSink, GameEvent, HookPoint};
 use sawgrass_client_module::module::{
-    CoreEvent, Module, NetCore, REQUIRED_FUNCTIONS, StartError, World, WorldError, all_functions,
+    CoreEvent, Module, NetCore, PED_SPAWN, REQUIRED_FUNCTIONS, StartError, World, WorldError, all_functions,
     optional_functions,
 };
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
@@ -456,4 +456,41 @@ fn a_late_event_about_a_reused_handle_does_not_reach_the_new_entity() {
         "the removal of entity 1 is not reported as a loss of entity 2"
     );
     assert_eq!(module.ambient_removed, 0);
+}
+
+/// Tries to show a remote ped and a vehicle on its first frame.
+#[derive(Default)]
+struct SpawnTry {
+    results: Vec<Result<(), WorldError>>,
+}
+
+impl NetCore for SpawnTry {
+    fn on_event(&mut self, _event: &CoreEvent) {}
+
+    fn on_frame(&mut self, _dt: f32, world: &mut World<'_>) {
+        if self.results.is_empty() {
+            self.results
+                .push(world.spawn(1, EntityKind::Ped, AssetId(5), pose(1.0)));
+            self.results
+                .push(world.spawn(2, EntityKind::Vehicle, AssetId(5), pose(2.0)));
+        }
+    }
+}
+
+#[test]
+fn without_ped_spawn_the_module_starts_and_shows_no_remote_peds() {
+    let mut module =
+        Module::start(runtime(), &functions_only(&REQUIRED_FUNCTIONS), assets(BUILD_KEY)).expect("started");
+    assert!(!module.shows_remote_peds());
+    assert!(module.missing_functions().iter().any(|(n, _)| n == PED_SPAWN));
+    let mut core = SpawnTry::default();
+    module
+        .frame(1.0 / 60.0, &mut FakeGame::default(), &mut core)
+        .expect("frame");
+    assert_eq!(core.results, vec![Err(WorldError::NoPedSpawn), Ok(())]);
+
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.push(PED_SPAWN);
+    let module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    assert!(module.shows_remote_peds());
 }
