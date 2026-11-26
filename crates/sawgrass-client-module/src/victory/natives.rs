@@ -7,13 +7,16 @@
 //! and puts back what was there when it is dropped.
 //!
 //! Nothing about the title is built in. Every address, offset and hash comes from the function table on the
-//! player's machine, and before a handler is used it is checked against its hash ([`Native::verified`]): a handler
-//! answers a call with a negative argument count by writing its identity, `!rotl64(hash, 32)`, and that constant is
-//! read from its code, without calling it. A wrong address in a table is refused instead of called.
+//! player's machine, and so does the way a handler is checked before it is used ([`Native::verified`]): the table
+//! gives guard patterns to find in the handler's first bytes, the relative reference each one leads through, and how
+//! a native's hash turns into the 64-bit identity the code there must hold. A wrong address in a table is refused
+//! instead of called, and the check never runs the handler.
 
 use std::ffi::c_void;
 
+use crate::pattern::Pattern;
 use crate::runtime::CodeImage;
+use crate::table::{Entry, FunctionTable, Locator, follow};
 
 /// What a handler is given.
 #[repr(C)]
@@ -28,13 +31,12 @@ pub struct Call {
 /// A native handler.
 pub type Handler = unsafe extern "C" fn(*mut Call);
 
-/// How far into a handler the argument-count check is looked for, and how far past the branch its identity.
-const HEAD: usize = 0x100;
-const TAIL: usize = 0x40;
-/// `cmp dword [rcx+10h], 0`: the handler compares `Call::argc` (at 0x10) with zero.
-const ARGC_CHECK: [u8; 4] = [0x83, 0x79, 0x10, 0x00];
-/// How many bytes after that compare the `js` that takes the negative count is looked for.
-const BRANCH_WINDOW: usize = 16;
+/// Table names for the check: guard entries (`native_guard`, `native_guard_<anything>`), and its values.
+pub const GUARD: &str = "native_guard";
+pub const CHECK_WINDOW: &str = "native_check_window";
+pub const IDENTITY_WINDOW: &str = "native_identity_window";
+pub const IDENTITY_ROTATE: &str = "native_identity_rotate";
+pub const IDENTITY_XOR: &str = "native_identity_xor";
 
 /// Why a table's handler is not used.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +61,61 @@ impl std::fmt::Display for NativeError {
     }
 }
 
+/// How handlers are checked, as the function table describes it.
+///
+/// A handler passes when, within its first `native_check_window` bytes, a match of one of the guard patterns leads
+/// (through the guard's `offset`, `rel8` or `rel32` modifiers, as for any table entry) to a place whose next
+/// `native_identity_window` bytes hold the identity `rotl64(hash, native_identity_rotate) ^ native_identity_xor`,
+/// little-endian.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCheck {
+    guards: Vec<(Pattern, Entry)>,
+    check_window: usize,
+    identity_window: usize,
+    rotate: u32,
+    xor: u64,
+}
+
+impl NativeCheck {
+    /// The check the table describes; an error names what it lacks.
+    pub fn from_table(table: &FunctionTable) -> Result<Self, String> {
+        let guards: Vec<(Pattern, Entry)> = table
+            .entries
+            .iter()
+            .filter(|(name, _)| {
+                *name == GUARD || name.strip_prefix(GUARD).is_some_and(|r| r.starts_with('_'))
+            })
+            .filter_map(|(_, entry)| match &entry.locator {
+                Locator::Pattern(pattern) => Some((pattern.clone(), entry.clone())),
+                Locator::Offset(_) => None,
+            })
+            .collect();
+        if guards.is_empty() {
+            return Err(format!("no `{GUARD}` pattern"));
+        }
+        let missing: Vec<&str> = [CHECK_WINDOW, IDENTITY_WINDOW, IDENTITY_ROTATE, IDENTITY_XOR]
+            .into_iter()
+            .filter(|name| !table.values.contains_key(*name))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("no value for {}", missing.join(", ")));
+        }
+        let size =
+            |name: &str| usize::try_from(table.values[name]).map_err(|_| format!("{name} is too large"));
+        Ok(Self {
+            guards,
+            check_window: size(CHECK_WINDOW)?,
+            identity_window: size(IDENTITY_WINDOW)?,
+            rotate: u32::try_from(table.values[IDENTITY_ROTATE] % 64).unwrap_or(0),
+            xor: table.values[IDENTITY_XOR],
+        })
+    }
+
+    fn identity(&self, hash: u64) -> u64 {
+        hash.rotate_left(self.rotate) ^ self.xor
+    }
+}
+
 /// A handler checked against its native's hash.
 #[derive(Debug, Clone, Copy)]
 pub struct Native {
@@ -66,22 +123,27 @@ pub struct Native {
 }
 
 impl Native {
-    /// The handler at `address`, if its code identifies as the native `hash`.
-    ///
-    /// The check is on bytes, not a full decode: after `cmp dword [rcx+10h], 0` comes a `js` (short or near), and
-    /// within the first instructions at its target a `mov r64, imm64` loads the identity. A false match would need
-    /// the exact 64-bit identity at such a place, so a wrong address is refused.
-    pub fn verified(image: &CodeImage<'_>, address: u64, hash: u64) -> Result<Self, NativeError> {
-        let identity = !hash.rotate_left(32);
-        let start = offset_in(image, address, HEAD).ok_or(NativeError::OutOfImage)?;
-        let head = &image.bytes[start..start + HEAD];
-        let found = head
-            .windows(ARGC_CHECK.len())
-            .enumerate()
-            .filter(|(_, w)| *w == ARGC_CHECK)
-            .flat_map(|(at, _)| branch_targets(head, at + ARGC_CHECK.len()))
-            .filter_map(|target| offset_in(image, address.checked_add_signed(target as i64)?, TAIL))
-            .any(|tail| loads_immediate(&image.bytes[tail..tail + TAIL], identity));
+    /// The handler at `address`, if its code identifies as the native `hash` by the table's `check`.
+    pub fn verified(
+        image: &CodeImage<'_>,
+        address: u64,
+        hash: u64,
+        check: &NativeCheck,
+    ) -> Result<Self, NativeError> {
+        let identity = check.identity(hash).to_le_bytes();
+        let start = offset_in(image, address, check.check_window).ok_or(NativeError::OutOfImage)?;
+        let head = &image.bytes[start..start + check.check_window];
+        let found = check.guards.iter().any(|(pattern, guard)| {
+            pattern.find_all(head).any(|at| {
+                let target = usize::try_from(at as i64 + guard.offset)
+                    .ok()
+                    .and_then(|at| follow(guard, head, at))
+                    .and_then(|target| start.checked_add(target));
+                target
+                    .and_then(|t| image.bytes.get(t..t.checked_add(check.identity_window)?))
+                    .is_some_and(|tail| tail.windows(identity.len()).any(|w| w == identity))
+            })
+        });
         if found {
             // SAFETY: the code at `address` is a native handler, as its identity shows, and every handler has the
             // signature `Handler`. Calling it is still unsafe, and only `ScriptScope::call` does.
@@ -99,27 +161,6 @@ fn offset_in(image: &CodeImage<'_>, address: u64, len: usize) -> Option<usize> {
     (start.checked_add(len)? <= image.bytes.len()).then_some(start)
 }
 
-/// Targets, relative to the start of `code`, of each `js` that may begin in the window after `from`.
-fn branch_targets(code: &[u8], from: usize) -> impl Iterator<Item = isize> + '_ {
-    (from..(from + BRANCH_WINDOW).min(code.len())).filter_map(move |at| {
-        let rest = &code[at..];
-        match rest {
-            [0x78, rel, ..] => Some(at as isize + 2 + isize::from(*rel as i8)),
-            [0x0F, 0x88, a, b, c, d, ..] => {
-                Some(at as isize + 6 + i32::from_le_bytes([*a, *b, *c, *d]) as isize)
-            }
-            _ => None,
-        }
-    })
-}
-
-/// Whether `code` holds a `mov r64, imm64` (REX.W, `B8+r`) of `value`.
-fn loads_immediate(code: &[u8], value: u64) -> bool {
-    code.windows(10).any(|w| {
-        matches!(w[0], 0x48 | 0x49) && (0xB8..=0xBF).contains(&w[1]) && w[2..10] == value.to_le_bytes()
-    })
-}
-
 /// Where the title keeps a script thread's state, from the function table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScriptLayout {
@@ -129,10 +170,14 @@ pub struct ScriptLayout {
     pub context_thread: usize,
     /// Where a thread keeps its state byte.
     pub thread_state: usize,
+    /// The states in which the title is updating a thread, when its natives may run: bit N set for state N.
+    pub updating: u64,
 }
 
-/// The thread states in which the title is updating a script thread, when its natives may run.
-const UPDATING: [u8; 2] = [2, 3];
+thread_local! {
+    /// Whether a scope is open on this thread: scopes do not nest, so each restores what the title had.
+    static IN_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// The calling thread's block of the title's static TLS, from the host.
 pub type TitleTls = unsafe extern "C" fn() -> *mut c_void;
@@ -145,15 +190,17 @@ pub struct ScriptScope {
 }
 
 impl ScriptScope {
-    /// Makes `context` current, if its thread is one the title is updating.
+    /// Makes `context` current, if its thread is one the title is updating and no other scope is open on this
+    /// thread.
     ///
     /// # Safety
     ///
     /// Called on the thread that just ran `context`, right after the title's script run function returned, with
-    /// `layout` and `title_tls` right for the running build. The scope is dropped on the same thread before the
-    /// title runs another script.
+    /// `title_tls` the host's and `layout` right for the running build. The layout comes from the player's table
+    /// and is trusted as given: it is read through without a check, so a wrong value is undefined behaviour, not a
+    /// refusal. The scope is dropped on the same thread (it is not `Send`) before the title runs another script.
     pub unsafe fn enter(context: u64, layout: &ScriptLayout, title_tls: TitleTls) -> Option<Self> {
-        if context == 0 {
+        if context == 0 || IN_SCOPE.get() {
             return None;
         }
         // SAFETY: the caller's contract: a context the title just ran, whose thread pointer is at this offset.
@@ -163,7 +210,7 @@ impl ScriptScope {
         }
         // SAFETY: as above, the thread's state byte.
         let state = unsafe { ((thread as usize + layout.thread_state) as *const u8).read() };
-        if !UPDATING.contains(&state) {
+        if state >= 64 || layout.updating & (1 << state) == 0 {
             return None;
         }
         // SAFETY: the host's function, for the calling thread.
@@ -176,6 +223,7 @@ impl ScriptScope {
         let before = unsafe { slot.read() };
         // SAFETY: as above.
         unsafe { slot.write(context) };
+        IN_SCOPE.set(true);
         Some(Self { slot, before })
     }
 
@@ -201,6 +249,7 @@ impl Drop for ScriptScope {
     fn drop(&mut self) {
         // SAFETY: the slot `enter` wrote, on the same thread.
         unsafe { self.slot.write(self.before) };
+        IN_SCOPE.set(false);
     }
 }
 
@@ -223,20 +272,32 @@ mod tests {
 
     const HASH: u64 = 0xA86D_5F06_9399_F44D;
 
-    /// Made-up handler code: a prologue, the count check, a short `js` and, at its target, the identity load.
+    /// A made-up check, nothing like any title's: guard `D1 D2 ?? D3` whose third byte is a short jump from the
+    /// guard's end, or `E1 E2` and a near jump after it; the identity is the hash rotated by 8, xored with a mask.
+    fn check() -> NativeCheck {
+        let table = FunctionTable::parse(
+            "build = x\n\
+             native_guard = D1 D2 ?? D3 ; rel8=2,4\n\
+             native_guard_near = E1 E2 ?? ?? ?? ?? ; rel32=2,6\n\
+             value native_check_window = 0x80\n\
+             value native_identity_window = 0x20\n\
+             value native_identity_rotate = 8\n\
+             value native_identity_xor = 0x00FF00FF00FF00FF\n",
+        )
+        .expect("table");
+        NativeCheck::from_table(&table).expect("check")
+    }
+
+    fn identity(hash: u64) -> [u8; 8] {
+        (hash.rotate_left(8) ^ 0x00FF_00FF_00FF_00FF).to_le_bytes()
+    }
+
+    /// Made-up handler code: filler, the short guard leading 0x30 bytes on, and the identity there.
     fn handler_code(hash: u64) -> Vec<u8> {
-        let mut code = vec![0xCC; 0x200];
-        // sub rsp, 28h ; mov rbx, rcx ; cmp dword [rcx+10h], 0 ; js +40h ; ret
-        let head = [
-            0x48, 0x83, 0xEC, 0x28, 0x48, 0x89, 0xCB, 0x83, 0x79, 0x10, 0x00, 0x78, 0x40, 0xC3,
-        ];
-        code[..head.len()].copy_from_slice(&head);
-        // mov rax, [rcx] ; mov rcx, imm64 ; mov [rax], rcx
-        let at = head.len() + 0x40;
-        let mut tail = vec![0x48, 0x8B, 0x01, 0x48, 0xB9];
-        tail.extend((!hash.rotate_left(32)).to_le_bytes());
-        tail.extend([0x48, 0x89, 0x08]);
-        code[at..at + tail.len()].copy_from_slice(&tail);
+        let mut code = vec![0x90; 0x100];
+        code[4..8].copy_from_slice(&[0xD1, 0xD2, 0x30, 0xD3]);
+        let at = 8 + 0x30 + 3;
+        code[at..at + 8].copy_from_slice(&identity(hash));
         code
     }
 
@@ -251,41 +312,55 @@ mod tests {
     fn a_handler_is_taken_only_for_its_own_hash() {
         let code = handler_code(HASH);
         let image = image(&code);
-        assert!(Native::verified(&image, image.base, HASH).is_ok());
+        let check = check();
+        assert!(Native::verified(&image, image.base, HASH, &check).is_ok());
         assert_eq!(
-            Native::verified(&image, image.base, HASH ^ 1).err(),
+            Native::verified(&image, image.base, HASH ^ 1, &check).err(),
             Some(NativeError::NotThisNative { hash: HASH ^ 1 })
         );
         // Too near the image's end to read, or before it, it is refused.
         assert_eq!(
-            Native::verified(&image, image.base + 0x180, HASH).err(),
+            Native::verified(&image, image.base + 0x90, HASH, &check).err(),
             Some(NativeError::OutOfImage)
         );
         assert_eq!(
-            Native::verified(&image, image.base - 1, HASH).err(),
+            Native::verified(&image, image.base - 1, HASH, &check).err(),
             Some(NativeError::OutOfImage)
         );
     }
 
     #[test]
-    fn a_near_branch_is_followed_too() {
-        let mut code = handler_code(HASH);
-        // cmp ; js rel32 to the same target (0x4E) ; ret
-        let head = [0x83, 0x79, 0x10, 0x00, 0x0F, 0x88];
-        code[..6].copy_from_slice(&head);
-        code[6..10].copy_from_slice(&(0x4E_i32 - 10).to_le_bytes());
-        code[10] = 0xC3;
-        code[11..14].fill(0xCC);
+    fn every_guard_is_tried() {
+        let mut code = vec![0x90; 0x100];
+        code[0x10..0x12].copy_from_slice(&[0xE1, 0xE2]);
+        code[0x12..0x16].copy_from_slice(&0x40_i32.to_le_bytes());
+        let at = 0x16 + 0x40;
+        code[at..at + 8].copy_from_slice(&identity(HASH));
         let image = image(&code);
-        assert!(Native::verified(&image, image.base, HASH).is_ok());
+        assert!(Native::verified(&image, image.base, HASH, &check()).is_ok());
     }
 
     #[test]
-    fn without_the_count_check_there_is_no_identity() {
+    fn without_a_guard_there_is_no_identity() {
         let mut code = handler_code(HASH);
-        code[9] = 0x14;
+        code[5] = 0x00;
         let image = image(&code);
-        assert!(Native::verified(&image, image.base, HASH).is_err());
+        assert!(Native::verified(&image, image.base, HASH, &check()).is_err());
+    }
+
+    #[test]
+    fn the_check_needs_its_guard_and_values() {
+        let table = FunctionTable::parse("build = x\nvalue native_check_window = 0x80\n").expect("table");
+        let error = NativeCheck::from_table(&table).expect_err("incomplete");
+        assert!(error.contains("native_guard"), "{error}");
+        let table =
+            FunctionTable::parse("build = x\nnative_guard_a = D1\nvalue native_check_window = 0x80\n")
+                .expect("table");
+        let error = NativeCheck::from_table(&table).expect_err("incomplete");
+        assert!(error.contains("native_identity_window"), "{error}");
+        // `native_guards` is another entry, not a guard.
+        let table = FunctionTable::parse("build = x\nnative_guards = D1\n").expect("table");
+        assert!(NativeCheck::from_table(&table).is_err());
     }
 
     #[test]
@@ -324,6 +399,7 @@ mod tests {
             tls_context: 16,
             context_thread: 8,
             thread_state: 4,
+            updating: 0b1100,
         };
         let thread: *mut [u8; 8] = Box::into_raw(Box::new([0u8; 8]));
         let mut context = [0u64; 2];
@@ -340,6 +416,9 @@ mod tests {
         unsafe { (*thread)[4] = 2 };
         // SAFETY: as above.
         let scope = unsafe { ScriptScope::enter(ctx, &layout, title_tls) }.expect("updating");
+        // A second scope on the same thread is refused, so the first restores what the title had.
+        // SAFETY: as above.
+        assert!(unsafe { ScriptScope::enter(ctx, &layout, title_tls) }.is_none());
         let mut ret = [9u64; 2];
         // SAFETY: `echo` takes one slot and returns one.
         unsafe { scope.call(native, &mut [41], &mut ret) };

@@ -74,10 +74,12 @@ The game layer will mostly call the title's script natives rather than its inter
 handler the title's own scripts call, so it keeps its meaning across builds. `victory/natives.rs` calls them the
 way the title does, on a script thread with that thread's execution context current in the title's TLS (through
 the host's `title_tls`, added to ABI 1 at host size 104; a warning in the log says when the VIctory in use lacks
-it). Before a handler is used it is checked against its native's hash: the identity it writes for a negative
-argument count, `!rotl64(hash, 32)`, is read from its code, so a wrong address in the table is refused instead
-of called. Handler addresses, hashes and the script-thread offsets all come from the table on the player's
-machine; none are in this repository. Running the module's frame on a script thread, and the table entries for
+it). Before a handler is used it is checked against its native's hash, without running it, so a wrong address in
+the table is refused instead of called. How the check reads a handler is itself in the table: guard patterns
+(`native_guard`, `native_guard_<name>`) with the relative reference each leads through, the windows to search,
+and the rotation and mask that turn a hash into the identity the code must hold. The repository has only the
+generic matcher. Handler addresses, hashes, the check and the script-thread offsets all come from the table on
+the player's machine; none are in this repository. Running the module's frame on a script thread, and the table entries for
 it, come in the next task.
 
 ## Table formats
@@ -89,7 +91,13 @@ build = victory/1.0.2.1/0123abcd
 ped_create = 0A ?? 0C 0D
 vehicle_create = 1A 1B ?? ?? ?? ?? ; offset=2 ; rel32=1,5
 local_player = @0x2A41F80      # an offset from the image base, as a debugger shows it
+entity_set_pose = @0x1B2C3D0 ; hash=0x0123456789ABCDEF   # a script native's handler, with its hash
+native_guard = AA BB ?? CC ; rel8=2,4                    # how handlers are checked (see Script natives)
+value native_check_window = 0x100                         # a number that is not an address
 ```
+
+Modifiers: `offset=N` moves the match, `rel32=D,E` and `rel8=D,E` follow a relative reference (the displacement
+D bytes in, counted from the instruction's end E bytes in), and `hash=H` marks a native's handler.
 
 An `@` entry holds only for the build on the `build` line; a pattern usually survives a small patch, so an offset
 found first is best replaced by a pattern once one is known.
