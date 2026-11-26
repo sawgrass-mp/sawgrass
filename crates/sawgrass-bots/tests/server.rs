@@ -154,6 +154,9 @@ async fn server_and_bots_run_at_30_hz() {
         sockets: Vec::new(),
         pay_every: None,
         payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(SECONDS);
