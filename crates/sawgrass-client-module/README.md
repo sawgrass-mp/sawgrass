@@ -13,7 +13,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 |---|---|---|
 | Runtime boundary, build identity | `runtime.rs` | done |
 | VIctory adapter | `victory.rs` | done against the mod loader's ABI 1 (a local VIctory branch, proposed upstream): loads, reads the tables, hooks, counts frames; the build's `GameApi` and hook detours wait for the game's functions |
-| Script natives | `victory/natives.rs` | calls a handler checked against its hash, with a script context current; the frame on a script thread and the table entries for it come next |
+| Script natives | `victory/natives.rs` | calls a handler checked against its hash, with a script context current; the frame runs on a script thread when the table gives the layout, and reports the local player's position; the `GameApi` over natives comes next |
 | Functions located by pattern, per game build | `pattern.rs`, `table.rs` | done; tables live outside the repository |
 | Hook points and their events, an event queue that hooks may push into from any thread | `hooks.rs` | done |
 | `GameApi`: every change the module makes to the game, handles with generations | `game.rs` | trait and fake done; the real one waits for the game |
@@ -79,8 +79,21 @@ the table is refused instead of called. How the check reads a handler is itself 
 (`native_guard`, `native_guard_<name>`) with the relative reference each leads through, the windows to search,
 and the rotation and mask that turn a hash into the identity the code must hold. The repository has only the
 generic matcher. Handler addresses, hashes, the check and the script-thread offsets all come from the table on
-the player's machine; none are in this repository. Running the module's frame on a script thread, and the table entries for
-it, come in the next task.
+the player's machine; none are in this repository.
+
+The module's frame runs on a script thread (`victory/script.rs`) when the table has these entries:
+
+- `script_run`: the title's script run function, hooked;
+- `value script_tls_context`: the current context's offset in the title's TLS block;
+- `value script_context_thread`: where a context points to its thread;
+- `value script_thread_state`: where a thread keeps its state byte;
+- `value script_thread_updating`: a bit mask of the states in which natives may run.
+
+The frame then runs once per presented frame, right after the first script run on a thread the title is
+updating. The log says `sawgrass: frame runs on a script thread`, or `frame stays at the present` with the
+reason, and every 600 frames `sawgrass: N frames on a script thread`. When `local_player` and `entity_position`
+are natives in the table (`; hash=`) and pass the check, that line adds the local player's position, which shows
+end to end that native calls work.
 
 ## Table formats
 

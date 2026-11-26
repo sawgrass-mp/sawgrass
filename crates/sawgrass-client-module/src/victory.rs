@@ -13,7 +13,8 @@
 //! - The mapped image, scanned for the table's patterns and `@` offsets. VIctory rewrites code before the module
 //!   sees it, so patterns are taken from the running process, not from the file.
 //! - `hook` and `unhook`, only while [`victory_mod_init`] runs: every hook is installed at start.
-//! - A frame callback at every present, which drives the module's frame, so the table needs no `frame` entry.
+//! - A frame callback at every present, which drives the module's frame, so the table needs no `frame` entry. With
+//!   the table's script entries the frame moves to a script thread instead ([`script`]), where natives may run.
 //!
 //! The tables are files on the player's machine, named by `SAWGRASS_FUNCTION_TABLE` and `SAWGRASS_ASSET_TABLE`.
 //! The real [`crate::game::GameApi`] for a build, with its hook detours, arrives once the game's functions are found;
@@ -25,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_void};
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::assets::AssetTable;
@@ -34,6 +35,7 @@ use crate::runtime::{CodeImage, GameBuild, HookHandle, HookRequest, Runtime, Run
 use crate::table::FunctionTable;
 
 pub mod natives;
+pub mod script;
 
 /// The loader's C ABI, mirrored from VIctory's `victory-mod-api` crate (version 1). It is not a dependency: that
 /// crate lives in a local VIctory branch, and this repository takes no git or path dependency outside itself.
@@ -205,6 +207,27 @@ impl VictoryRuntime {
         unsafe { (self.host.log)(level, text.as_ptr(), text.len()) };
     }
 
+    /// Hooks `request` with `detour`, the host writing the original's address straight into `original`, so that it
+    /// is there before the hook goes live on another thread.
+    fn hook_into(
+        &mut self,
+        request: HookRequest,
+        detour: u64,
+        original: &'static AtomicU64,
+    ) -> Result<HookHandle, RuntimeError> {
+        self.image_open.store(false, Ordering::Relaxed);
+        // SAFETY: `original` is a valid place for the host to write the trampoline's address.
+        let result = unsafe { (self.host.hook)(request.address, detour, original.as_ptr()) };
+        if result > 0 {
+            Ok(HookHandle(result as u64))
+        } else {
+            Err(RuntimeError::HookRefused {
+                function: request.function,
+                reason: abi::status_name(result).into(),
+            })
+        }
+    }
+
     /// Has the host call `callback` at every present. The callback finds the module in a static, so no user
     /// pointer is passed.
     fn on_frame(&self, callback: abi::FrameFn) -> Result<(), RuntimeError> {
@@ -301,6 +324,8 @@ impl Runtime for VictoryRuntime {
 struct Running {
     module: Module<VictoryRuntime>,
     frames: u64,
+    /// Set when the frame runs on a script thread.
+    script: Option<script::Script>,
 }
 
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
@@ -315,7 +340,9 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
     runtime.log(abi::LOG_INFO, &format!("sawgrass: running build {key}"));
     let functions = FunctionTable::parse(functions).map_err(|e| format!("function table: {e}"))?;
     let assets = AssetTable::parse(assets).map_err(|e| format!("asset table: {e:?}"))?;
-    let module = match Module::start(runtime, &functions, assets) {
+    // The script entries are read and their natives checked first, while the image is lent.
+    let prepared = script::prepare(&runtime, &functions);
+    let mut module = match Module::start(runtime, &functions, assets) {
         Ok(module) => module,
         Err((error, runtime)) => {
             let text = format!("sawgrass: not started: {error}");
@@ -349,8 +376,13 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
             &format!("sawgrass: hook {} off: {why}", point.function()),
         );
     }
-    runtime.on_frame(frame).map_err(|e| e.to_string())?;
-    *RUNNING.lock().unwrap_or_else(PoisonError::into_inner) = Some(Running { module, frames: 0 });
+    let script = prepared.and_then(|prepared| script::install(module.runtime_mut(), prepared));
+    module.runtime().on_frame(frame).map_err(|e| e.to_string())?;
+    *RUNNING.lock().unwrap_or_else(PoisonError::into_inner) = Some(Running {
+        module,
+        frames: 0,
+        script,
+    });
     Ok(())
 }
 
@@ -359,6 +391,10 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
 /// TODO(game layer): run `Module::frame` with the build's `GameApi` and the network core once the game's functions
 /// are found; until then it counts frames, which shows in the log that the module runs with the game.
 unsafe extern "C" fn frame(_user: *mut c_void, _frame: u64) {
+    script::PRESENTS.fetch_add(1, Ordering::Relaxed);
+    if script::ON.load(Ordering::Acquire) {
+        return;
+    }
     let _ = std::panic::catch_unwind(|| {
         let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(running) = running.as_mut() {
@@ -435,7 +471,7 @@ mod tests {
     unsafe extern "C" fn hook(target: u64, detour: u64, original: *mut u64) -> i64 {
         record(format!("hook {target:#x} -> {detour:#x}"));
         // SAFETY: the adapter passes a valid place.
-        unsafe { *original = target + 0x1000 };
+        unsafe { *original = fake_run as *const () as u64 };
         HOOK_ANSWER.load(Ordering::Relaxed)
     }
 
@@ -477,23 +513,45 @@ mod tests {
         std::ptr::dangling_mut()
     }
 
-    #[test]
-    fn title_tls_is_read_only_from_a_host_that_gives_it() {
-        #[repr(C)]
-        struct Newer {
-            host: abi::Host,
-            title_tls: abi::TitleTlsFn,
-        }
-        assert_eq!(abi::SIZE_WITH_TITLE_TLS, std::mem::size_of::<Newer>());
-        let old = host(abi::ABI_VERSION);
-        assert!(abi::title_tls(old).is_none());
+    /// A host that gives `title_tls`.
+    #[repr(C)]
+    struct Newer {
+        host: abi::Host,
+        title_tls: abi::TitleTlsFn,
+    }
+
+    /// The title's TLS block for the script frame test; the current context is at 0x10.
+    static mut BLOCK: [u64; 4] = [0; 4];
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn block_tls() -> *mut c_void {
+        std::ptr::addr_of_mut!(BLOCK).cast()
+    }
+
+    /// The script run function's original code, as the test host hands it back for every hook.
+    unsafe extern "C" fn fake_run(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+        7
+    }
+
+    fn newer_host(old: &abi::Host, title_tls: abi::TitleTlsFn) -> &'static abi::Host {
         // SAFETY: a copy of the old host's fields, which are plain values and functions.
         let mut newer = Newer {
             host: unsafe { std::ptr::read(old) },
-            title_tls: test_tls,
+            title_tls,
         };
         newer.host.size = abi::SIZE_WITH_TITLE_TLS as u32;
-        let tls = abi::title_tls(&newer.host).expect("given");
+        let newer: &'static Newer = Box::leak(Box::new(newer));
+        // SAFETY: `Host` is the first field of the `repr(C)` `Newer`, and the pointer keeps the whole of it.
+        unsafe { &*std::ptr::from_ref(newer).cast::<abi::Host>() }
+    }
+
+    #[test]
+    fn title_tls_is_read_only_from_a_host_that_gives_it() {
+        assert_eq!(abi::SIZE_WITH_TITLE_TLS, std::mem::size_of::<Newer>());
+        let old = host(abi::ABI_VERSION);
+        assert!(abi::title_tls(old).is_none());
+        let tls = abi::title_tls(newer_host(old, test_tls)).expect("given");
         // SAFETY: the test's function.
         assert_eq!(unsafe { tls() }, std::ptr::dangling_mut());
     }
@@ -535,7 +593,7 @@ mod tests {
         runtime.set_detour("ped_create", 0xD000);
         let handle = runtime.install_hook(request("ped_create")).expect("hooked");
         assert_eq!(handle, HookHandle(7));
-        assert_eq!(runtime.original("ped_create"), Some(host.title_base + 0x1040));
+        assert_eq!(runtime.original("ped_create"), Some(fake_run as *const () as u64));
         HOOK_ANSWER.store(-9, Ordering::Relaxed);
         let Err(RuntimeError::HookRefused { reason, .. }) = runtime.install_hook(request("ped_create"))
         else {
@@ -581,5 +639,51 @@ mod tests {
             unsafe { callback(std::ptr::null_mut(), frame) };
         }
         assert_eq!(calls(), vec![format!("log 2 sawgrass: {FRAME_REPORT} frames")]);
+
+        // With the script run function and the layout in the table, the frame moves to a script thread: once per
+        // present, at the first run on a thread the title is updating, with that run's context current.
+        let script = "script_run = @0x10\nentity_position = @0x20 ; hash=0x1\n\
+                      value script_tls_context = 0x10\nvalue script_context_thread = 0x8\n\
+                      value script_thread_state = 0x4\nvalue script_thread_updating = 0xC\n";
+        HOOK_ANSWER.store(8, Ordering::Relaxed);
+        // SAFETY: a host built above, now giving `title_tls`.
+        let runtime = unsafe { VictoryRuntime::from_host(newer_host(host, block_tls)) }.expect("runtime");
+        start(runtime, &format!("{functions}{script}"), &assets).expect("started");
+        let log = calls();
+        assert!(
+            log.iter()
+                .any(|l| l.contains("native entity_position refused: no `native_guard`")),
+            "{log:?}"
+        );
+        assert!(
+            log.iter().any(|l| l.ends_with("frame runs on a script thread")),
+            "{log:?}"
+        );
+        let thread: &'static mut [u8; 8] = Box::leak(Box::new([0; 8]));
+        let context: &'static [u64; 2] = Box::leak(Box::new([0, std::ptr::from_mut(thread) as u64]));
+        let context = context.as_ptr() as u64;
+        let run = |context| {
+            // SAFETY: as the title calls it, with a context laid out as the table says.
+            assert_eq!(unsafe { script::script_run(context, 0, 0, 0, 0, 0) }, 7);
+        };
+        // SAFETY: the test's thread, read by the frame through the context.
+        unsafe { std::ptr::from_mut(thread).cast::<u8>().add(4).write(2) };
+        RUNS.store(0, Ordering::Relaxed);
+        for frame in 0..FRAME_REPORT {
+            // SAFETY: as the host calls it.
+            unsafe { callback(std::ptr::null_mut(), frame) };
+            run(0);
+            run(context);
+            run(context);
+        }
+        assert_eq!(RUNS.load(Ordering::Relaxed), 3 * FRAME_REPORT as usize);
+        assert_eq!(
+            calls(),
+            vec![format!(
+                "log 2 sawgrass: {FRAME_REPORT} frames on a script thread"
+            )]
+        );
+        // SAFETY: the test's block, after every scope is gone.
+        assert_eq!(unsafe { (*std::ptr::addr_of!(BLOCK))[2] }, 0);
     }
 }
