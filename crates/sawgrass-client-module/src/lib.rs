@@ -4,7 +4,8 @@
 //! that runtime's own API. It never loads or injects itself, and nothing in it works around protection or keys.
 //!
 //! - [`runtime`]: the boundary each runtime adapter implements, and the build identity of the running game.
-//! - [`victory`]: the VIctory adapter, a stub until VIctory has a module-loading and hook API.
+//! - [`victory`]: the VIctory adapter: the loader's C ABI, the module's entry point, and calls into the title's script
+//!   natives ([`victory::natives`]).
 //! - [`pattern`] and [`table`]: functions are located at run time by pattern, from a table written for one game
 //!   build and kept outside this repository.
 //! - [`game`]: [`game::GameApi`], every change the module makes to the game, and [`game::FakeGame`].
