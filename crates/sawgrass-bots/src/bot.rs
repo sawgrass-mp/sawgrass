@@ -4,15 +4,16 @@
 //! baseline it names from the ticks it decoded lately, and acknowledges the newest one in the tick field of its
 //! client states' headers, as a game client does.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use sawgrass_gateway::{Connector, Datagrams, EventSender, RootCertStore, connect};
 use sawgrass_protocol::EntityState;
+use sawgrass_protocol::combat::Shot;
 use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta, decode_delta_with_info};
 use sawgrass_protocol::entity::Info;
 use sawgrass_protocol::game::{ClientEvent, ClientState, OwnedState, PayResult, ServerEvent};
@@ -21,7 +22,7 @@ use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::actions::{Driver, Request, Seen, WEAPON, shot_at_vehicles};
+use crate::actions::{Driver, Request, Seen, WEAPON, render_time, shot_at_vehicles};
 use crate::record::Recorder;
 use crate::stats::Counters;
 use crate::walker::{Area, Rng, Walker};
@@ -64,17 +65,25 @@ pub struct BotConfig {
     pub shooters: u64,
     /// Shots per second of a shooting bot.
     pub shot_hz: u32,
+    /// How many ticks behind the newest snapshot a shooter draws its targets, interpolating between two
+    /// snapshots, as a game client does (BOT-10). 0 aims at the newest snapshot itself.
+    pub aim_delay: u32,
 }
 
-/// The newest snapshot a shooter may fire against: older ones are past the server's rewind of 250 ms.
+/// The newest snapshot a shooter may fire against: with the aim delay on top, older ones would come near the
+/// server's rewind of 500 ms.
 const FRESH: Duration = Duration::from_millis(150);
 
 /// What a driving or shooting bot's tasks share: the vehicles the server says it owns, with their epochs, and
-/// the latest snapshot it decoded, with when it arrived.
+/// the latest snapshot it decoded, with when it arrived; for a shooter with an aim delay, the snapshots before it
+/// back to the render time, `keep` of them; and the server's tick rate.
 #[derive(Debug, Default)]
 struct Shared {
     owned: Mutex<Vec<(u32, u8)>>,
     seen: Mutex<(Option<Instant>, Seen)>,
+    past: Mutex<VecDeque<Seen>>,
+    keep: usize,
+    tick_hz: AtomicU16,
 }
 
 /// What one bot learned from the server, for tests.
@@ -142,7 +151,14 @@ pub async fn run(
     }
 
     let acts = index < config.drivers || index < config.shooters;
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared {
+        keep: if index < config.shooters && config.aim_delay > 0 {
+            config.aim_delay as usize + 1
+        } else {
+            0
+        },
+        ..Shared::default()
+    });
     let events_counters = counters.clone();
     let payments = Arc::new(Mutex::new(HashMap::<u64, Instant>::new()));
     let own = Arc::new(AtomicU32::new(u32::MAX));
@@ -154,6 +170,7 @@ pub async fn run(
             match ServerEvent::decode(&packet[PacketHeader::SIZE..]) {
                 Ok(ServerEvent::Joined { entity, tick_hz }) => {
                     own_id.store(entity, Ordering::Relaxed);
+                    events_shared.tick_hz.store(tick_hz, Ordering::Relaxed);
                     if let Ok(mut payees) = payees.lock() {
                         payees.push(entity);
                     }
@@ -273,11 +290,13 @@ async fn send_states(
         let dt = (now - last).as_secs_f32();
         last = now;
         let mut fresh = false;
+        let mut arrived = Duration::ZERO;
         if driver.is_some() || shooter {
             if let Ok(latest) = shared.seen.lock() {
-                fresh = latest
+                arrived = latest
                     .0
-                    .is_some_and(|at| now.saturating_duration_since(at) <= FRESH);
+                    .map_or(Duration::MAX, |at| now.saturating_duration_since(at));
+                fresh = arrived <= FRESH;
                 seen.clone_from(&latest.1);
             }
             if let Ok(o) = shared.owned.lock() {
@@ -308,7 +327,7 @@ async fn send_states(
         if shooter && now >= next_shot {
             next_shot = now + shot_every;
             if let Some(shot) = fresh
-                .then(|| shot_at_vehicles(&seen, walker.position()))
+                .then(|| aim(shared, &seen, arrived, config.aim_delay, walker.position()))
                 .flatten()
             {
                 if send_event(events, &ClientEvent::Shot(Box::new(shot)))
@@ -464,6 +483,16 @@ async fn read_snapshots(
         if let Some(shared) = &shared
             && let Ok(mut seen) = shared.seen.lock()
         {
+            if shared.keep > 0
+                && seen.0.is_some()
+                && let Ok(mut past) = shared.past.lock()
+            {
+                // The snapshot being replaced joins the ones a delayed shooter draws from.
+                if past.len() == shared.keep {
+                    past.pop_front();
+                }
+                past.push_back(seen.1.clone());
+            }
             seen.0 = Some(Instant::now());
             seen.1.tick = tick;
             seen.1.entities.clone_from(&decoded);
@@ -477,6 +506,29 @@ async fn read_snapshots(
         std::mem::swap(&mut slot.2, &mut infos);
         ack.fetch_max(tick, Ordering::Relaxed);
     }
+}
+
+/// A shooter's shot at the vehicles in `newest`, which arrived `arrived` ago. With an aim delay it aims at its
+/// render time, that many ticks behind, moving on with the time since the newest snapshot; `None` when the
+/// snapshots around the render time are not kept (one was lost) or there is nothing to hit.
+fn aim(shared: &Shared, newest: &Seen, arrived: Duration, delay: u32, from: [f32; 3]) -> Option<Shot> {
+    if delay == 0 {
+        return shot_at_vehicles(newest, None, 0, from);
+    }
+    let hz = match shared.tick_hz.load(Ordering::Relaxed) {
+        0 => 20.0,
+        hz => f32::from(hz),
+    };
+    let (tick, frac) = render_time(newest.tick, arrived.as_secs_f32() * hz, delay);
+    let past = shared.past.lock().ok()?;
+    let at = |t: u32| {
+        (t == newest.tick)
+            .then_some(newest)
+            .or_else(|| past.iter().find(|s| s.tick == t))
+    };
+    let then = at(tick)?;
+    let next = if frac > 0 { Some(at(tick + 1)?) } else { None };
+    shot_at_vehicles(then, next, frac, from)
 }
 
 fn client_state(walker: &Walker) -> Option<ClientState> {

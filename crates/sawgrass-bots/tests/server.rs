@@ -61,6 +61,7 @@ async fn bots_move_on_the_server_and_see_each_other() {
         drivers: 0,
         shooters: 0,
         shot_hz: 1,
+        aim_delay: 0,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(4);
@@ -127,6 +128,78 @@ async fn bots_move_on_the_server_and_see_each_other() {
     assert!(entities > 60, "each bot saw the other: {entities} states");
 }
 
+/// The rate SRV-8 makes the default: the server ticks at 30 Hz, says so on join, and bots sending 30 states a
+/// second get a snapshot for every tick, half again what 20 Hz carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_and_bots_run_at_30_hz() {
+    const HZ: u32 = 30;
+    const SECONDS: u64 = 4;
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    let mut players = net::listen(gateway, ListenConfig::default());
+    let tick_config = TickConfig::new(HZ).expect("30 Hz");
+    let mut tick_loop = TickLoop::new(tick_config);
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let config = Arc::new(BotConfig {
+        server: addr,
+        server_name: "localhost".to_owned(),
+        roots,
+        send_hz: HZ,
+        area: Area {
+            size: 100.0,
+            hotspots: 0,
+            ..Area::default()
+        },
+        record: None,
+        decoders: u64::MAX,
+        sockets: Vec::new(),
+        pay_every: None,
+        payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
+        aim_delay: 0,
+    });
+    let counters = Arc::new(Counters::default());
+    let stop = Instant::now() + Duration::from_secs(SECONDS);
+    let mut joined = Vec::new();
+    for index in 0..2 {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Joined>();
+        tokio::spawn(run(
+            config.clone(),
+            index,
+            counters.clone(),
+            false,
+            stop,
+            Some(tx),
+        ));
+        joined.push(rx);
+    }
+    let interval = Duration::from_secs(1) / HZ;
+    let ticks = std::thread::spawn(move || {
+        let mut next = std::time::Instant::now();
+        while std::time::Instant::now() < stop.into_std() {
+            tick_loop.run_tick();
+            next += interval;
+            std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+        }
+    });
+    let first = tokio::time::timeout(Duration::from_secs(5), joined.remove(0))
+        .await
+        .expect("joined in time")
+        .expect("joined");
+    assert_eq!(u32::from(first.tick_hz), HZ);
+    tokio::task::spawn_blocking(move || ticks.join().expect("tick thread"))
+        .await
+        .expect("join");
+    // Two bots for SECONDS at 30 Hz: up to 240 states sent and 240 snapshots seen. 20 Hz would carry at most 160.
+    let at_20_hz = 2 * 20 * SECONDS;
+    let sent = counters.sent_datagrams.load(Ordering::Relaxed);
+    let ticks_seen = counters.ticks_seen.load(Ordering::Relaxed);
+    assert!(sent > at_20_hz + 20, "sent {sent}");
+    assert!(ticks_seen > at_20_hz + 20, "snapshots for {ticks_seen} ticks");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn misbehaving_bots_are_stopped_and_an_honest_one_plays_on() {
     use sawgrass_bots::misbehave::{self, Kind, Misbehaving};
@@ -165,6 +238,7 @@ async fn misbehaving_bots_are_stopped_and_an_honest_one_plays_on() {
         drivers: 0,
         shooters: 0,
         shot_hz: 1,
+        aim_delay: 0,
     });
     let stop = Instant::now() + Duration::from_secs(3);
     let honest = Arc::new(Counters::default());
@@ -251,6 +325,7 @@ async fn refused_bots_retry_and_light_bots_on_shared_sockets_play() {
         drivers: 0,
         shooters: 0,
         shot_hz: 1,
+        aim_delay: 0,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(5);
@@ -327,6 +402,7 @@ async fn bots_pay_each_other_through_the_ledger() {
         drivers: 0,
         shooters: 0,
         shot_hz: 1,
+        aim_delay: 0,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(3);

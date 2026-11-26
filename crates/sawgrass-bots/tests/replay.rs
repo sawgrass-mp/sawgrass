@@ -69,6 +69,7 @@ async fn a_recorded_session_plays_again_on_another_server() {
         drivers: 0,
         shooters: 0,
         shot_hz: 1,
+        aim_delay: 0,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(2);

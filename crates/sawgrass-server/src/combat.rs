@@ -4,8 +4,9 @@
 //! A shot is accepted only if the shooter is alive and holds the weapon, the weapon's fire rate allows it, its tick
 //! is at most [`REWIND`] old, and the position it was fired from is within [`FROM_TOLERANCE`] of where the server
 //! holds the shooter. A hit is then accepted only if the target was in the snapshot the shooter was sent for that
-//! tick, is within the weapon's range, and was within [`HIT_TOLERANCE`] of the hit point at that tick. `net.rs` runs these
-//! checks; this module holds the figures and the arithmetic.
+//! tick, is within the weapon's range, and was within [`HIT_TOLERANCE`] of the hit point where the shooter's
+//! client drew it: between the shot's tick and the next, at the shot's fraction ([`interpolate`], NET-22). `net.rs`
+//! runs these checks; this module holds the figures and the arithmetic.
 //!
 //! - *Assumption:* every weapon has the figures of [`WeaponRules::default`] until the game's are known.
 //! - *Assumption:* "holds the weapon" means the weapon in the shooter's ped block, which its client sets; the
@@ -15,20 +16,32 @@
 
 use std::time::Duration;
 
+use sawgrass_protocol::Position;
 use sawgrass_protocol::combat::Zone;
 use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::vehicle::VehicleBlock;
 
-/// Oldest snapshot a shot may be checked against: 250 ms, a placeholder for the round trip plus the client's
-/// interpolation delay of a player far from the server.
-pub const REWIND: Duration = Duration::from_millis(250);
+/// Oldest snapshot a shot may be checked against: the longest render delay a client may draw at (400 ms, 8 ticks
+/// at 20 Hz) plus 100 ms for the shot's way to the server (NET-22). A hard cap: no client setting raises it, so a
+/// client cannot shoot at where a target was further back than this.
+pub const REWIND: Duration = Duration::from_millis(500);
 
 /// Farthest the hit point may be from where the server had the target at the shot's tick, in metres: a ped's
 /// size plus the 1 cm quantization, and the movement within one tick at a run.
 pub const HIT_TOLERANCE: f32 = 2.0;
 
-/// Farthest the shooter's reported position may be from where the server holds it, in metres: about what a
-/// sprint covers in the rewind window.
+/// Where an entity was drawn at a render time `frac` / 256 of the way from position `a` (at the shot's tick) to
+/// `b` (at the next tick), in metres: the client's own interpolation.
+#[must_use]
+pub fn interpolate(a: Position, b: Position, frac: u8) -> [f32; 3] {
+    let (a, b) = (a.to_metres(), b.to_metres());
+    let t = f32::from(frac) / 256.0;
+    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// Farthest the shooter's reported position may be from where the server holds it now, in metres. A shooter
+/// fires from where it stands, not from its render time, so the rewind does not apply: this covers the latest
+/// state still in flight, a few ticks of a sprint.
 pub const FROM_TOLERANCE: f32 = 3.0;
 
 /// A weapon's figures.
@@ -100,6 +113,16 @@ pub fn hit_vehicle(vehicle: &mut VehicleBlock, damage: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_render_position_is_between_the_two_ticks() {
+        let at = |x: f32| Position::from_metres([x, 2.0, 30.0]).expect("position");
+        assert_eq!(interpolate(at(10.0), at(11.0), 0), [10.0, 2.0, 30.0]);
+        let [x, y, z] = interpolate(at(10.0), at(11.0), 128);
+        assert!((x - 10.5).abs() < 1e-4 && y == 2.0 && z == 30.0);
+        let [x, ..] = interpolate(at(10.0), at(14.0), 192);
+        assert!((x - 13.0).abs() < 1e-4);
+    }
 
     fn ped(health: u8, armour: u8) -> PedBlock {
         PedBlock {

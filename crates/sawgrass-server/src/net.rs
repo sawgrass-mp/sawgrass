@@ -59,7 +59,7 @@ use sawgrass_store::WalletId;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::TickInfo;
-use crate::combat::{FROM_TOLERANCE, HIT_TOLERANCE, REWIND, WeaponRules, hit_ped, hit_vehicle};
+use crate::combat::{FROM_TOLERANCE, HIT_TOLERANCE, REWIND, WeaponRules, hit_ped, hit_vehicle, interpolate};
 use crate::interest::{DENSE_CELL_SIZE, DenseGrid, EntityId, Point, VisibilityConfig};
 use crate::limits::{Admit, Bucket, Limits};
 use crate::money::Money;
@@ -115,6 +115,11 @@ fn seat_answer(result: Result<(), Refusal>) -> SeatAnswer {
         Err(Refusal::CannotReach) => SeatAnswer::CannotReach,
         Err(Refusal::AlreadySeated) => SeatAnswer::AlreadySeated,
     }
+}
+
+/// Metres between two points given in metres.
+fn metres_apart(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
 /// Metres between two positions.
@@ -1068,14 +1073,20 @@ impl Players {
         let shooter = self.peds.get(p).copied().unwrap_or_default();
         let own = self.states.get(p).copied().flatten();
         let rewind = (REWIND.as_secs_f64() / self.tick_dt.as_secs_f64().max(1e-6)) as u32;
-        let fresh = shot.tick <= self.tick && self.tick - shot.tick <= rewind;
+        // The render time is between the shot's tick and the next; with a fraction, both must be past ticks.
+        let after = u32::from(shot.frac > 0);
+        let fresh =
+            shot.tick.checked_add(after).is_some_and(|t| t <= self.tick) && self.tick - shot.tick <= rewind;
         let Some(Some(pl)) = self.players.get_mut(p) else {
             return;
         };
         let ready = pl
             .last_shot
             .is_none_or(|at| now.saturating_duration_since(at) >= rules.interval);
-        let (Some(own), Some(then), true) = (own, self.history.at(shot.tick).filter(|_| fresh), ready) else {
+        // Looked up only once `fresh` holds: before that, `shot.tick + after` may overflow.
+        let then = fresh.then(|| self.history.at(shot.tick)).flatten();
+        let next = fresh.then(|| self.history.at(shot.tick + after)).flatten();
+        let (Some(own), Some(then), Some(next), true) = (own, then, next, ready) else {
             self.traffic.shots_refused.fetch_add(1, Ordering::Relaxed);
             return;
         };
@@ -1096,12 +1107,21 @@ impl Players {
             let slot = hit.target >> 16;
             let current = self.states.get(slot as usize).copied().flatten();
             let past = then.get(slot as usize).copied().flatten();
+            // Where the shooter's client drew the target; one missing from the next tick is checked where it was.
+            let drawn = past.filter(|t| t.id == hit.target).map(|t| {
+                let later = next
+                    .get(slot as usize)
+                    .copied()
+                    .flatten()
+                    .filter(|n| n.id == hit.target)
+                    .map_or(t.position, |n| n.position);
+                interpolate(t.position, later, shot.frac)
+            });
             let ok = slot != player
                 && seen.binary_search(&slot).is_ok()
                 && current
                     .is_some_and(|c| c.id == hit.target && distance(c.position, own.position) <= rules.range)
-                && past
-                    .is_some_and(|t| t.id == hit.target && distance(t.position, hit.point) <= HIT_TOLERANCE);
+                && drawn.is_some_and(|d| metres_apart(d, hit.point.to_metres()) <= HIT_TOLERANCE);
             if ok {
                 accepted.push((slot as usize, hit.zone));
             } else {
@@ -1212,13 +1232,21 @@ impl Players {
         Ok(())
     }
 
-    /// Takes the player in slot `player` out of its seat, if it sits in one, and starts its movement checks from
-    /// where the vehicle is, so its first state outside is checked from there.
-    /// Tells the player it left (NET-21); returns whether it sat anywhere.
+    /// Takes the player in slot `player` out of its seat, as [`Players::take_out_of_seat`] does, and tells it it
+    /// left (NET-21); returns whether it sat anywhere.
     fn leave_seat(&mut self, player: u32) -> bool {
-        let Some((vehicle, seat)) = self.seats.leave(player) else {
+        let Some((vehicle, seat)) = self.take_out_of_seat(player) else {
             return false;
         };
+        self.tell_seat(player, vehicle, seat, SeatAnswer::Left);
+        true
+    }
+
+    /// Takes the player in slot `player` out of its seat, if it sits in one, and starts its movement checks from
+    /// where the vehicle is, so its first state outside is checked from there. Returns the vehicle's entity id
+    /// and the seat, telling nobody: a player that disconnects is not sent an answer.
+    fn take_out_of_seat(&mut self, player: u32) -> Option<(u32, u8)> {
+        let (vehicle, seat) = self.seats.leave(player)?;
         if seat == 0 {
             self.ownership.set_driver(vehicle, None);
         }
@@ -1229,8 +1257,7 @@ impl Players {
             .copied()
             .flatten()
             .map_or(0, |s| s.id);
-        self.tell_seat(player, id, seat, SeatAnswer::Left);
-        true
+        Some((id, seat))
     }
 
     /// Sends the player in slot `player` a [`ServerEvent::Seat`]; one that finds its queue full is counted.
@@ -1554,7 +1581,8 @@ impl Players {
                     let Some(slot) = self.by_connection.remove(&id) else {
                         continue;
                     };
-                    self.leave_seat(slot.index);
+                    // Its queue is closing: an answer would only be counted as lost.
+                    self.take_out_of_seat(slot.index);
                     if let Some(money) = &self.money {
                         money.unregister(slot.wire_id());
                     }
