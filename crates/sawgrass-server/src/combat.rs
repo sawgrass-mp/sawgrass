@@ -39,8 +39,9 @@ pub fn interpolate(a: Position, b: Position, frac: u8) -> [f32; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
 
-/// Farthest the shooter's reported position may be from where the server holds it, in metres: about what a
-/// sprint covers in the rewind window.
+/// Farthest the shooter's reported position may be from where the server holds it now, in metres. A shooter
+/// fires from where it stands, not from its render time, so the rewind does not apply: this covers the latest
+/// state still in flight, a few ticks of a sprint.
 pub const FROM_TOLERANCE: f32 = 3.0;
 
 /// A weapon's figures.
