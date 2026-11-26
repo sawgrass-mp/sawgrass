@@ -189,6 +189,14 @@ pub fn required_functions() -> Vec<&'static str> {
     REQUIRED_FUNCTIONS.to_vec()
 }
 
+/// [`required_functions`] on a runtime: one that calls the module once a frame by itself needs no `frame` entry.
+fn required_on(runtime: &impl Runtime) -> Vec<&'static str> {
+    required_functions()
+        .into_iter()
+        .filter(|name| !(runtime.drives_frames() && *name == HookPoint::Frame.function()))
+        .collect()
+}
+
 /// The functions the module uses when the table locates them: the other hooks, then the single-player switches.
 /// Without one, what it serves is switched off: an ambient-life hook missing leaves that life in the world, a
 /// single-player switch missing leaves that system running, the input or camera hook missing leaves the network
@@ -223,6 +231,8 @@ pub struct Module<R: Runtime> {
     switches: Vec<SinglePlayerSystem>,
     /// The hook points installed.
     hooked: Vec<HookPoint>,
+    /// Optional hooks the runtime refused, and why; their events are off.
+    refused: Vec<(HookPoint, RuntimeError)>,
     /// Peds and vehicles the game made by itself and the module removed. Entities that were already gone when the
     /// frame got to them (one of ours spawned and despawned within a frame, say) are not counted.
     pub ambient_removed: u64,
@@ -230,9 +240,10 @@ pub struct Module<R: Runtime> {
 
 impl<R: Runtime> Module<R> {
     /// Locates the functions for the running build and installs the hooks the table has. A required function
-    /// missing, or a hook the runtime refuses, stops the start: nothing is left installed and the runtime is given
-    /// back with the reason, so the adapter can report it in the game. Optional functions missing only switch off
-    /// what they serve; [`Module::missing_functions`] lists them.
+    /// missing, or the frame hook refused, stops the start: nothing is left installed and the runtime is given back
+    /// with the reason, so the adapter can report it in the game. Optional functions missing, or optional hooks the
+    /// runtime refuses, only switch off what they serve; [`Module::missing_functions`] and
+    /// [`Module::refused_hooks`] list them.
     pub fn start(
         mut runtime: R,
         functions: &FunctionTable,
@@ -244,7 +255,11 @@ impl<R: Runtime> Module<R> {
         };
         let mut hooks = Vec::new();
         let mut hooked = Vec::new();
+        let mut refused = Vec::new();
         for point in HookPoint::ALL {
+            if point == HookPoint::Frame && runtime.drives_frames() {
+                continue;
+            }
             let function = point.function().to_owned();
             // `frame` is required, so it is always here; another hook missing switches its events off.
             let Some(address) = resolved.address(&function) else {
@@ -255,6 +270,7 @@ impl<R: Runtime> Module<R> {
                     hooks.push(handle);
                     hooked.push(point);
                 }
+                Err(error) if point != HookPoint::Frame => refused.push((point, error)),
                 Err(error) => {
                     for handle in hooks {
                         // Best effort: the start already failed, and the error that caused it is the one to report.
@@ -282,6 +298,7 @@ impl<R: Runtime> Module<R> {
                 .filter(|s| switches_located.contains(&s.function()))
                 .collect(),
             hooked,
+            refused,
             ambient_removed: 0,
         })
     }
@@ -300,7 +317,7 @@ impl<R: Runtime> Module<R> {
         }
         let image = runtime.code_image().map_err(StartError::Runtime)?;
         functions
-            .resolve(&build, image, &required_functions(), &optional_functions())
+            .resolve(&build, image, &required_on(runtime), &optional_functions())
             .map_err(StartError::Functions)
     }
 
@@ -316,6 +333,11 @@ impl<R: Runtime> Module<R> {
     /// of what to find next.
     pub fn missing_functions(&self) -> &[(String, LookupError)] {
         &self.functions.missing
+    }
+
+    /// The optional hooks the runtime refused, and why.
+    pub fn refused_hooks(&self) -> &[(HookPoint, RuntimeError)] {
+        &self.refused
     }
 
     /// Whether this hook point is installed.

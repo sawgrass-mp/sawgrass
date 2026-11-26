@@ -243,13 +243,41 @@ fn a_missing_required_function_stops_the_start() {
 }
 
 #[test]
-fn a_refused_hook_leaves_nothing_installed() {
+fn a_refused_frame_hook_leaves_nothing_installed() {
     let mut rt = runtime();
-    rt.refuse.push(HookPoint::StreamingUpdate.function().into());
+    rt.refuse.push(HookPoint::Frame.function().into());
     let Err((StartError::Runtime(_), rt)) = Module::start(rt, &functions(), assets(BUILD_KEY)) else {
-        panic!("a refused hook stops the start");
+        panic!("a refused frame hook stops the start");
     };
     assert!(rt.hooks.is_empty());
+}
+
+#[test]
+fn a_refused_optional_hook_only_switches_its_events_off() {
+    let mut rt = runtime();
+    rt.refuse.push(HookPoint::StreamingUpdate.function().into());
+    let module = Module::start(rt, &functions(), assets(BUILD_KEY)).expect("started");
+    assert!(!module.is_hooked(HookPoint::StreamingUpdate));
+    assert!(module.is_hooked(HookPoint::PedCreate));
+    let refused: Vec<_> = module.refused_hooks().iter().map(|(p, _)| *p).collect();
+    assert_eq!(refused, vec![HookPoint::StreamingUpdate]);
+}
+
+#[test]
+fn a_runtime_that_drives_frames_needs_no_frame_entry() {
+    let mut rt = runtime();
+    rt.drives_frames = true;
+    let table = functions_only(&["local_player", "ped_spawn", "entity_set_pose"]);
+    let mut module = Module::start(rt, &table, assets(BUILD_KEY)).expect("started");
+    assert!(module.runtime().hooks.is_empty());
+    assert!(!module.is_hooked(HookPoint::Frame));
+    module
+        .frame(
+            1.0 / 60.0,
+            &mut FakeGame::default(),
+            &mut RecordingCore::default(),
+        )
+        .expect("frame");
 }
 
 #[test]

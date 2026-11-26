@@ -33,10 +33,12 @@ None of this can be in the repository; it comes from a maintainer with the game:
    VIctory until it lands. `VictoryRuntime` is written against it.
 2. A function table for the exact game build. Four entries are enough to start, `module::REQUIRED_FUNCTIONS`:
    `frame` (hooked once a frame), `local_player` (where the local player's ped is kept), `ped_spawn` (creates a
-   ped) and `entity_set_pose` (puts an entity at a position). The module refuses to start without them, and
-   refuses a table for another build. Every other entry (`module::optional_functions()`: creation and removal of
+   ped) and `entity_set_pose` (puts an entity at a position). A runtime that calls the module once a frame by
+   itself, as VIctory's loader does, makes `frame` unneeded. The module refuses to start without them, and refuses a
+   table for another build. Every other entry (`module::optional_functions()`: creation and removal of
    peds, vehicles and objects, input, camera, streaming, the five single-player switches) is used when it is there
-   and switches its feature off when it is not; `Module::missing_functions` lists what is still to find.
+   and switches its feature off when it is not, as does a hook the runtime refuses; `Module::missing_functions`
+   and `Module::refused_hooks` list what is still to find.
 3. An asset table for that build, with at least the `ped` line (the model players are shown with) and one vehicle,
    plus a line for each weather and each door the server's resources name (ADR 0006, assumption A4).
 4. The game's coordinate conventions, checked once: `link.rs` assumes a Z-up world with the heading as yaw about Z.

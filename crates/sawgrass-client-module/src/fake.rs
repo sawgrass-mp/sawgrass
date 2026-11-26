@@ -13,6 +13,8 @@ pub struct FakeRuntime {
     pub refuse: Vec<String>,
     /// Function names whose hooks the fake refuses to remove.
     pub refuse_removal: Vec<String>,
+    /// Whether the fake calls the module's frame itself, as VIctory does.
+    pub drives_frames: bool,
     next_handle: u64,
 }
 
@@ -25,6 +27,7 @@ impl FakeRuntime {
             hooks: Vec::new(),
             refuse_removal: Vec::new(),
             refuse: Vec::new(),
+            drives_frames: false,
             next_handle: 1,
         }
     }
@@ -74,5 +77,9 @@ impl Runtime for FakeRuntime {
         }
         self.hooks.remove(index);
         Ok(())
+    }
+
+    fn drives_frames(&self) -> bool {
+        self.drives_frames
     }
 }
