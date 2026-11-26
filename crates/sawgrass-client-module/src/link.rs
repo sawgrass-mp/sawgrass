@@ -131,6 +131,14 @@ pub struct Owned {
     pub pose: Option<NetPose>,
 }
 
+/// A render tick as a shot names it: the tick drawn from and how far toward the next, out of 256.
+fn render_time(render: f64) -> (u32, u8) {
+    let render = render.max(0.0);
+    let whole = render.floor();
+    // The fraction is below 1, so the product is below 256.
+    (whole as u32, ((render - whole) * 256.0) as u8)
+}
+
 /// Velocity from the last position to this one over `dt`; zero without a last position.
 fn velocity(last: Option<[f32; 3]>, now: [f32; 3], dt: f32) -> [f32; 3] {
     match last {
@@ -290,8 +298,10 @@ impl NetLink {
         }
     }
 
-    /// Queues a shot for the server, stamped with the newest snapshot tick, which is what the player saw the targets
-    /// at. A shot before the join, or fired from off the wire ranges, is dropped; a hit off the ranges is left out.
+    /// Queues a shot for the server, stamped with the render time the remote entities were last drawn at (NET-22):
+    /// the player aims at what it sees, which trails the newest snapshot. Before anything was drawn, the newest
+    /// snapshot tick stands in. A shot before the join, or fired from off the wire ranges, is dropped; a hit off the
+    /// ranges is left out.
     fn report_shot(&mut self, report: &ShotReport) {
         let Some(client) = self.client.as_ref() else {
             return;
@@ -299,7 +309,9 @@ impl NetLink {
         let Ok(from) = Position::from_metres(report.from) else {
             return;
         };
-        let mut shot = Shot::new(client.ack(), report.weapon, from);
+        let (tick, frac) = client.render_tick().map_or((client.ack(), 0), render_time);
+        let mut shot = Shot::new(tick, report.weapon, from);
+        shot.frac = frac;
         for hit in &report.hits {
             let Ok(point) = Position::from_metres(hit.point) else {
                 continue;
@@ -470,6 +482,14 @@ impl NetCore for NetLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_render_tick_splits_into_tick_and_fraction() {
+        assert_eq!(render_time(41.0), (41, 0));
+        assert_eq!(render_time(41.5), (41, 128));
+        assert_eq!(render_time(41.999), (41, 255));
+        assert_eq!(render_time(-1.0), (0, 0));
+    }
 
     #[test]
     fn heading_survives_the_round_trip() {

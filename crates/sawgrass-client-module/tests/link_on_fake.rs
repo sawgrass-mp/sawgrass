@@ -564,6 +564,8 @@ fn the_local_players_shots_and_weapon_go_to_the_server() {
             ],
         })
     };
+    // The player fires at what the last frame drew: that frame's render time.
+    let render = link.client().expect("joined").render_tick().expect("drawn");
     let hooks = module.event_sink();
     hooks.push(shot(me, 0xE0));
     // Another ped's shot is not this client's to report, and one with a weapon the table does not know is dropped.
@@ -576,7 +578,10 @@ fn the_local_players_shots_and_weapon_go_to_the_server() {
     let [ClientEvent::Shot(shot)] = events.as_slice() else {
         panic!("one shot, not {events:?}");
     };
-    assert_eq!(shot.tick, link.client().expect("joined").ack());
+    // The render time trails the newest snapshot.
+    assert_eq!(shot.tick, render.floor() as u32);
+    assert_eq!(shot.frac, (render.fract() * 256.0) as u8);
+    assert!(shot.tick < link.client().expect("joined").ack());
     assert_eq!(shot.weapon, AssetId(9));
     assert_eq!(shot.from.to_metres(), [0.0, 5.0, 31.0]);
     let hits: Vec<_> = shot
