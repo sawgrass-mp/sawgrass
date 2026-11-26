@@ -49,8 +49,8 @@ So the work is split in three, in this order:
 
 | | Side | State |
 |---|---|---|
-| 🟢 | **Server, protocol, storage, scripting** | Being built now and load-tested with headless bots that speak the real protocol: the parallel tick, delta snapshots cut to the nearest entities, movement and rate checks, peds, vehicles, NPCs and objects as server entities, the RocksDB single writer and Luau resources with a script budget. |
-| 🟡 | **Client module** | Everything that does not need the game is built and tested on a fake game: the runtime boundary, per-build function and asset tables, hooks, the network core and the module's own connection. Two modules on fake games already see each other through the real server. The VIctory adapter, the real `GameApi` and the tables for a game build wait for the game ([crate README](crates/sawgrass-client-module/README.md)). |
+| 🟢 | **Server, protocol, storage, scripting** | Being built now and load-tested with headless bots that speak the real protocol: the parallel tick, delta snapshots cut to the nearest entities, movement and rate checks, peds, vehicles, NPCs and objects as server entities, the RocksDB single writer and Luau resources with a script budget. The tick runs at 20 Hz by default, and 30 Hz is ready behind `--tick-hz 30`. |
+| 🟡 | **Client module** | Everything that does not need the game is built and tested on a fake game: the runtime boundary, per-build function and asset tables, hooks, the network core, seats, shots and the module's own connection. Two modules on fake games already see each other through the real server. **It has also run inside the game for the first time:** loaded by a local VIctory build through its mod loader, it runs its frame on one of the game's script threads, calls script natives and reads the local player's position, and the game keeps running. Next is showing a remote player's ped, which does not work yet, then a bot and a second player in one game session. The real `GameApi` grows with that work, and the tables for a game build stay on the player's machine ([crate README](crates/sawgrass-client-module/README.md)). |
 | ⏸️ | **Roleplay gameplay and the launcher** | Waiting on purpose. Characters, money, inventory, property and jobs start after the first session where two clients on one server see each other ([roadmap](docs/roadmap.md#7-client-module-in-the-game)). |
 
 ## Progress
@@ -75,12 +75,12 @@ So the work is split in three, in this order:
 | ⚪ | [**10. Launcher and releases**](docs/roadmap.md#10-launcher-and-releases)<br><sub>Stage 4</sub> | Detects the runtime and checks its build, installs the signed client module, auto-update, server list, downloads server resources, release process | — | 🟡 **Medium**<br><sub>Known technology (Tauri, signing, updates), but a security boundary on every player's machine</sub> | not started |
 | ⚪ | [**11. Scale**](docs/roadmap.md#11-scale)<br><sub>Stage 5</sub> | Real players on public servers, gateways in their own processes if the gateway limits, zones with entity hand-off only if measurements call for them, operations and moderation | — | 🔴 **Very hard**<br><sub>Real players behave unlike bots; zones with hand-off are the most error-prone step of the architecture</sub> | not started |
 
-Tooling and docs run alongside every step: 24 of 31 tasks done.
+Tooling and docs run alongside every step: 26 of 32 tasks done.
 
-Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: ⚪ [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
+Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: 🟢 [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🔍 [BOT-11](https://github.com/sawgrass-mp/sawgrass/issues/260) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
 
 <details>
-<summary><b>All tasks</b>: 111 done, 1 in review, 4 in progress, 1 ready, 7 planned</summary>
+<summary><b>All tasks</b>: 122 done, 1 in review, 2 in progress, 3 ready, 6 planned</summary>
 
 | | Task | Step | Size | Status |
 |---|---|---|---|---|
@@ -161,7 +161,15 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [CLIENT-12](https://github.com/sawgrass-mp/sawgrass/issues/189): Send owned entities' states from the network core | 7. In game | M | done |
 | ✅ | [CLIENT-13](https://github.com/sawgrass-mp/sawgrass/issues/207): Send owned entity states from the client module | 7. In game | M | done |
 | ✅ | [CLIENT-14](https://github.com/sawgrass-mp/sawgrass/issues/235): Apply the server's clock, weather and doors in the client module | 7. In game | M | done |
-| 🛠️ | [CLIENT-15](https://github.com/sawgrass-mp/sawgrass/issues/239): Report the local player's shots and weapon from the client module | 7. In game | M | in progress |
+| ✅ | [CLIENT-15](https://github.com/sawgrass-mp/sawgrass/issues/239): Report the local player's shots and weapon from the client module | 7. In game | M | done |
+| ✅ | [CLIENT-16](https://github.com/sawgrass-mp/sawgrass/issues/258): Seat the local player on the server's answer | 7. In game | M | done |
+| ✅ | [CLIENT-17](https://github.com/sawgrass-mp/sawgrass/issues/254): Start the client module with the four functions the first milestone needs | 7. In game | M | done |
+| ✅ | [CLIENT-18](https://github.com/sawgrass-mp/sawgrass/issues/256): Load the client module through VIctory's mod loader | 7. In game | M | done |
+| ✅ | [CLIENT-19](https://github.com/sawgrass-mp/sawgrass/issues/262): Keep one seat request in flight | 7. In game | M | done |
+| ✅ | [CLIENT-20](https://github.com/sawgrass-mp/sawgrass/issues/265): Call script natives through VIctory's title\_tls | 7. In game | M | done |
+| ✅ | [CLIENT-21](https://github.com/sawgrass-mp/sawgrass/issues/267): Run the module's frame on a script thread | 7. In game | M | done |
+| ✅ | [CLIENT-22](https://github.com/sawgrass-mp/sawgrass/issues/269): Start without ped\_spawn and entity\_set\_pose while they are being found | 7. In game | M | done |
+| ✅ | [CLIENT-23](https://github.com/sawgrass-mp/sawgrass/issues/272): Send no unapplied corrections and count missing functions apart | 7. In game | M | done |
 | ✅ | [NET-15](https://github.com/sawgrass-mp/sawgrass/issues/136): Entity kinds, model ids and the blocks list in delta snapshots | 9. Sync | M | done |
 | ✅ | [NET-16](https://github.com/sawgrass-mp/sawgrass/issues/148): The ped block in the protocol | 9. Sync | M | done |
 | ✅ | [SRV-18](https://github.com/sawgrass-mp/sawgrass/issues/152): Send entity infos and relay the players' ped blocks | 9. Sync | M | done |
@@ -175,7 +183,8 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [SRV-17](https://github.com/sawgrass-mp/sawgrass/issues/215): Clock, weather and doors sent on joining and on change | 9. Sync | M | done |
 | ✅ | [BOT-5](https://github.com/sawgrass-mp/sawgrass/issues/219): Bots that drive, change seats and shoot | 9. Sync | M | done |
 | ✅ | [BOT-9](https://github.com/sawgrass-mp/sawgrass/issues/232): Bots shoot only intact vehicles, keep driving speed and check their seat | 9. Sync | M | done |
-| ⚪ | [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122): Show movement refusals per player for admins | Outside the plan | M | planned |
+| 🟢 | [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122): Show movement refusals per player for admins | Outside the plan | M | ready |
+| 🔍 | [BOT-11](https://github.com/sawgrass-mp/sawgrass/issues/260): Fix the four BOT\-5 bot problems from \#231 | Outside the plan | M | in review |
 | 🛠️ | [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157): Turn off a resource that keeps overrunning | Outside the plan | M | in progress |
 | ⚪ | [OPS-1](https://github.com/sawgrass-mp/sawgrass/issues/9): Benchmark regression gate | Tooling and docs | M | planned |
 | ⚪ | [OPS-2](https://github.com/sawgrass-mp/sawgrass/issues/10): Markdown link check | Tooling and docs | S | planned |
@@ -189,10 +198,10 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [OPS-10](https://github.com/sawgrass-mp/sawgrass/issues/51): Let the claims link job label pull requests and survive one failure | Tooling and docs | S | done |
 | ✅ | [OPS-11](https://github.com/sawgrass-mp/sawgrass/issues/55): Review agent merges the maintainer's pull requests that pass | Tooling and docs | S | done |
 | ✅ | [OPS-12](https://github.com/sawgrass-mp/sawgrass/issues/128): Install libclang for the RocksDB build in CI | Tooling and docs | M | done |
-| 🔍 | [DOC-1](https://github.com/sawgrass-mp/sawgrass/issues/13): Wire format in architecture\.md | Tooling and docs | S | in review |
+| 🟢 | [OPS-13](https://github.com/sawgrass-mp/sawgrass/issues/261): Raise the workspace rust\-version to 1\.94 | Tooling and docs | M | ready |
+| ✅ | [DOC-1](https://github.com/sawgrass-mp/sawgrass/issues/13): Wire format in architecture\.md | Tooling and docs | S | done |
 | ✅ | [DOC-2](https://github.com/sawgrass-mp/sawgrass/issues/23): README with project status and generated progress | Tooling and docs | M | done |
 | ✅ | [DOC-3](https://github.com/sawgrass-mp/sawgrass/issues/34): Support Leonida and XCL as client runtimes | Tooling and docs | S | done |
-| 🟢 | [DOC-4](https://github.com/sawgrass-mp/sawgrass/issues/40): Accept ADR 0002 and name both runtimes in the README | Tooling and docs | S | ready |
 | ✅ | [DOC-5](https://github.com/sawgrass-mp/sawgrass/issues/53): Target VIctory as the client runtime | Tooling and docs | M | done |
 | ✅ | [DOC-6](https://github.com/sawgrass-mp/sawgrass/issues/57): Transparent background for the README logo | Tooling and docs | M | done |
 | ✅ | [DOC-7](https://github.com/sawgrass-mp/sawgrass/issues/85): Official Telegram and X links in the README | Tooling and docs | M | done |
@@ -207,7 +216,8 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [DOC-16](https://github.com/sawgrass-mp/sawgrass/issues/222): Record DB\-8's change to the store writer, and ask scopes to list every crate | Tooling and docs | M | done |
 | ✅ | [DOC-17](https://github.com/sawgrass-mp/sawgrass/issues/233): Regenerate the README progress and pictures on current main | Tooling and docs | M | done |
 | ✅ | [DOC-18](https://github.com/sawgrass-mp/sawgrass/issues/247): Steps that need the game are not done from their tasks alone | Tooling and docs | M | done |
-| 🛠️ | [DOC-19](https://github.com/sawgrass-mp/sawgrass/issues/250): Record NET\-22's render\-time hit check and 500 ms rewind in ADR 0006 | Tooling and docs | M | in progress |
+| ✅ | [DOC-19](https://github.com/sawgrass-mp/sawgrass/issues/250): Record NET\-22's render\-time hit check and 500 ms rewind in ADR 0006 | Tooling and docs | M | done |
+| 🟢 | [DOC-20](https://github.com/sawgrass-mp/sawgrass/issues/274): README status and progress after the client module's first run in the game | Tooling and docs | M | ready |
 
 </details>
 
