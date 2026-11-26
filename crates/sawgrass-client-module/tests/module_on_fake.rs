@@ -318,6 +318,9 @@ impl GameApi for ReentrantGame {
     fn local_player(&self) -> Option<GameHandle> {
         self.inner.local_player()
     }
+    fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset> {
+        self.inner.held_weapon(ped)
+    }
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
         self.inner.set_streaming_focus(points);
     }

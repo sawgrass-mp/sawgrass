@@ -12,14 +12,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use sawgrass_netcode::interp::{Event, Sample};
 use sawgrass_netcode::local::Correction;
 use sawgrass_netcode::{Client, ClientConfig, Pose as NetPose};
-use sawgrass_protocol::EntityState;
+use sawgrass_protocol::combat::{Hit, Shot};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
-use sawgrass_protocol::game::{OwnedState, ServerEvent};
+use sawgrass_protocol::game::{ClientEvent, OwnedState, ServerEvent};
 use sawgrass_protocol::ped::PedBlock;
+use sawgrass_protocol::{EntityState, Position};
 
 use crate::entity_pool::NetId;
 use crate::game::{EntityKind, Pose};
-use crate::module::{CoreEvent, NetCore, World};
+use crate::module::{CoreEvent, NetCore, ShotReport, World};
 use crate::world_state::WorldState;
 
 /// Datagrams kept at most in a [`Datagrams`] queue. While frames stop (a loading screen, a pause) the connection
@@ -47,24 +48,47 @@ impl Datagrams {
     }
 }
 
-/// Server events handed from the connection to the link, oldest first. Cloning gives another handle.
-#[derive(Debug, Clone, Default)]
-pub struct ServerEvents {
-    queue: Arc<Mutex<Vec<ServerEvent>>>,
+/// Reliable events handed between the connection and the link, oldest first. Cloning gives another handle to the
+/// same queue.
+#[derive(Debug)]
+pub struct EventQueue<T> {
+    queue: Arc<Mutex<Vec<T>>>,
 }
 
-impl ServerEvents {
-    pub fn push(&self, event: ServerEvent) {
+impl<T> Clone for EventQueue<T> {
+    fn clone(&self) -> Self {
+        Self {
+            queue: self.queue.clone(),
+        }
+    }
+}
+
+impl<T> Default for EventQueue<T> {
+    fn default() -> Self {
+        Self {
+            queue: Arc::default(),
+        }
+    }
+}
+
+impl<T> EventQueue<T> {
+    pub fn push(&self, event: T) {
         self.queue
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(event);
     }
 
-    pub fn take(&self) -> Vec<ServerEvent> {
+    pub fn take(&self) -> Vec<T> {
         std::mem::take(&mut *self.queue.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
+
+/// Server events, from the connection to the link.
+pub type ServerEvents = EventQueue<ServerEvent>;
+
+/// Client events, from the link to the connection.
+pub type ClientEvents = EventQueue<ClientEvent>;
 
 /// The game's kind of entity for the protocol's.
 pub fn game_kind(kind: NetKind) -> EntityKind {
@@ -107,6 +131,14 @@ pub struct Owned {
     pub pose: Option<NetPose>,
 }
 
+/// A render tick as a shot names it: the tick drawn from and how far toward the next, out of 256.
+fn render_time(render: f64) -> (u32, u8) {
+    let render = render.max(0.0);
+    let whole = render.floor();
+    // The fraction is below 1, so the product is below 256.
+    (whole as u32, ((render - whole) * 256.0) as u8)
+}
+
 /// Velocity from the last position to this one over `dt`; zero without a last position.
 fn velocity(last: Option<[f32; 3]>, now: [f32; 3], dt: f32) -> [f32; 3] {
     match last {
@@ -123,6 +155,7 @@ pub struct NetLink {
     /// The clock, weather and doors the server sent.
     world_state: WorldState,
     events: ServerEvents,
+    client_events: ClientEvents,
     inbox: Datagrams,
     outbox: Datagrams,
     /// Local time in seconds, the sum of the frames' `dt`.
@@ -156,6 +189,7 @@ impl NetLink {
             config,
             world_state: WorldState::default(),
             events: ServerEvents::default(),
+            client_events: ClientEvents::default(),
             inbox: Datagrams::default(),
             outbox: Datagrams::default(),
             now: 0.0,
@@ -196,6 +230,11 @@ impl NetLink {
     /// states of those the game has spawned.
     pub fn owned(&self) -> &BTreeMap<NetId, Owned> {
         &self.owned
+    }
+
+    /// Where the connection takes the events to send.
+    pub fn client_events(&self) -> ClientEvents {
+        self.client_events.clone()
     }
 
     /// Where the connection pushes server events.
@@ -257,6 +296,37 @@ impl NetLink {
             let result = world.set_pose(state.id, game_pose(&NetPose::from_state(state)));
             self.count(result);
         }
+    }
+
+    /// Queues a shot for the server, stamped with the render time the remote entities were last drawn at (NET-22):
+    /// the player aims at what it sees, which trails the newest snapshot. Before anything was drawn, the newest
+    /// snapshot tick stands in. A shot before the join, or fired from off the wire ranges, is dropped; a hit off the
+    /// ranges is left out.
+    fn report_shot(&mut self, report: &ShotReport) {
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        let Ok(from) = Position::from_metres(report.from) else {
+            return;
+        };
+        let (tick, frac) = client.render_tick().map_or((client.ack(), 0), render_time);
+        let mut shot = Shot::new(tick, report.weapon, from);
+        shot.frac = frac;
+        for hit in &report.hits {
+            let Ok(point) = Position::from_metres(hit.point) else {
+                continue;
+            };
+            let hit = Hit {
+                target: hit.target,
+                zone: hit.zone,
+                point,
+            };
+            // The game resolves a pull of the trigger into at most a shotgun's pellets; more are left out.
+            if !shot.push(hit) {
+                break;
+            }
+        }
+        self.client_events.push(ClientEvent::Shot(Box::new(shot)));
     }
 
     fn apply_world_state(&mut self, world: &mut World<'_>) {
@@ -372,15 +442,17 @@ impl NetLink {
                 self.owned_states.push(state);
             }
         }
-        // ASSUMPTION: the player's ped block is a standing, unarmed ped until the blocks task reads it from the
-        // game. Health, armour, vehicle and seat are the server's, so this cannot change them.
+        // The weapon in hand comes from the game, since the server checks each shot against it (SRV-16).
+        // ASSUMPTION: the rest of the ped block is a standing ped until the blocks task reads it from the game.
+        // Health, armour, vehicle and seat are the server's, so this cannot change them.
+        let ped = PedBlock {
+            weapon: world.local_player_weapon(),
+            ..PedBlock::default()
+        };
         // An error means the player's pose is off the wire ranges; the slot is spent and the server corrects.
-        if let Ok(Some(datagram)) = client.outgoing_with(
-            self.now,
-            &net_pose(&local, measured),
-            &PedBlock::default(),
-            &self.owned_states,
-        ) {
+        if let Ok(Some(datagram)) =
+            client.outgoing_with(self.now, &net_pose(&local, measured), &ped, &self.owned_states)
+        {
             self.outbox.push(datagram);
         }
     }
@@ -389,8 +461,12 @@ impl NetLink {
 impl NetCore for NetLink {
     fn on_event(&mut self, event: &CoreEvent) {
         // An entity the game removed by itself is spawned again on the next frame it is still in the snapshot.
-        if let CoreEvent::EntityLost(id) = event {
-            self.shown.remove(id);
+        match event {
+            CoreEvent::EntityLost(id) => {
+                self.shown.remove(id);
+            }
+            CoreEvent::Shot(report) => self.report_shot(report),
+            CoreEvent::Input(_) | CoreEvent::Camera(_) => {}
         }
     }
 
@@ -406,6 +482,14 @@ impl NetCore for NetLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_render_tick_splits_into_tick_and_fraction() {
+        assert_eq!(render_time(41.0), (41, 0));
+        assert_eq!(render_time(41.5), (41, 128));
+        assert_eq!(render_time(41.999), (41, 255));
+        assert_eq!(render_time(-1.0), (0, 0));
+    }
 
     #[test]
     fn heading_survives_the_round_trip() {
