@@ -1460,6 +1460,21 @@ fn a_player_enters_drives_and_leaves_a_vehicle() {
             (car, 1, SeatAnswer::Left),
         ]
     );
+    // A seated player that disconnects leaves its seat without an answer being counted as lost.
+    let other = lock(&players).spawn(info, at(17.0)).expect("spawned");
+    ask(
+        &mut a,
+        ClientEvent::EnterSeat {
+            vehicle: other,
+            seat: 0,
+        },
+    );
+    assert!(tick_until(&mut tick_loop, |_| lock(&players).seat_of(me) == Some((other, 0))));
+    a.close();
+    assert!(tick_until(&mut tick_loop, |_| lock(&players)
+        .seat_of(me)
+        .is_none()));
+    assert_eq!(traffic.lost_seat_answers.load(Ordering::Relaxed), 0);
 }
 
 /// SRV-16, ADR 0006 section 5: the server applies a hit only from a live shooter holding the weapon, at the fire
