@@ -10,11 +10,12 @@ use crate::entity_pool::{BindError, EntityPool, NetId};
 use sawgrass_protocol::world::{Door, Environment};
 
 use crate::game::{
-    CameraPose, EntityKind, GameApi, GameAsset, GameError, InputState, Pose, SinglePlayerSystem,
+    CameraPose, EntityKind, GameApi, GameAsset, GameError, GameShot, InputState, Pose, SinglePlayerSystem,
+    Zone,
 };
 use crate::hooks::{EventSink, GameEvent, HookPoint};
 use crate::runtime::{HookHandle, HookRequest, Runtime, RuntimeError};
-use crate::table::{FunctionTable, ResolveError, ResolvedFunctions};
+use crate::table::{FunctionTable, LookupError, ResolveError, ResolvedFunctions};
 
 /// What the network core learns from the game, between frames.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,25 @@ pub enum CoreEvent {
     /// The game removed an entity the server owns (streamed out, destroyed). The core decides whether to spawn it
     /// again.
     EntityLost(NetId),
+    /// The local player fired once.
+    Shot(ShotReport),
+}
+
+/// One of the local player's shots, in server ids and protocol asset ids.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShotReport {
+    pub weapon: AssetId,
+    pub from: [f32; 3],
+    /// The hits on entities the server knows; hits on anything else (the map, a prop) are left out.
+    pub hits: Vec<ShotHit>,
+}
+
+/// One hit of a [`ShotReport`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotHit {
+    pub target: NetId,
+    pub zone: Zone,
+    pub point: [f32; 3],
 }
 
 /// The network core's side of the module.
@@ -99,6 +119,16 @@ impl World<'_> {
         self.game.pose(self.game.local_player()?)
     }
 
+    /// The weapon in the local player's hand, [`AssetId::NONE`] when unarmed or when the asset table does not
+    /// name it (the server then takes the player as unarmed).
+    pub fn local_player_weapon(&self) -> AssetId {
+        self.game
+            .local_player()
+            .and_then(|ped| self.game.held_weapon(ped))
+            .and_then(|weapon| self.assets.asset_id(weapon))
+            .unwrap_or(AssetId::NONE)
+    }
+
     /// Moves the local player, to apply a correction from the server.
     pub fn set_local_player_pose(&mut self, pose: Pose) -> Result<(), WorldError> {
         let handle = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
@@ -172,11 +202,49 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// Every function the module locates at start-up: the hooks, then the single-player switches.
+/// What the first milestone, two players who see each other, cannot do without; the module does not start unless
+/// the table locates all of them:
+///
+/// - `frame`: the game's frame, hooked to run [`Module::frame`].
+/// - `local_player`: where the game keeps the local player's ped, whose position is read and sent.
+/// - `ped_spawn`: the game's function that creates a ped, for remote players.
+/// - `entity_set_pose`: the game's function that puts an entity at a position, to move remote players.
+///
+/// The last three are used by the real [`GameApi`] for the build, which takes their addresses from
+/// [`Module::functions`].
+pub const REQUIRED_FUNCTIONS: [&str; 4] = ["frame", "local_player", "ped_spawn", "entity_set_pose"];
+
+/// The functions the module cannot start without: [`REQUIRED_FUNCTIONS`].
 pub fn required_functions() -> Vec<&'static str> {
-    let hooks = HookPoint::ALL.iter().map(|h| h.function());
-    hooks
+    REQUIRED_FUNCTIONS.to_vec()
+}
+
+/// [`required_functions`] on a runtime: one that calls the module once a frame by itself needs no `frame` entry.
+fn required_on(runtime: &impl Runtime) -> Vec<&'static str> {
+    required_functions()
+        .into_iter()
+        .filter(|name| !(runtime.drives_frames() && *name == HookPoint::Frame.function()))
+        .collect()
+}
+
+/// The functions the module uses when the table locates them: the other hooks, then the single-player switches.
+/// Without one, what it serves is switched off: an ambient-life hook missing leaves that life in the world, a
+/// single-player switch missing leaves that system running, the input or camera hook missing leaves the network
+/// core without those events.
+pub fn optional_functions() -> Vec<&'static str> {
+    HookPoint::ALL
+        .iter()
+        .map(|h| h.function())
         .chain(SinglePlayerSystem::ALL.iter().map(|s| s.function()))
+        .filter(|name| !REQUIRED_FUNCTIONS.contains(name))
+        .collect()
+}
+
+/// Every function the module knows of, required first: what a complete table lists.
+pub fn all_functions() -> Vec<&'static str> {
+    required_functions()
+        .into_iter()
+        .chain(optional_functions())
         .collect()
 }
 
@@ -189,14 +257,26 @@ pub struct Module<R: Runtime> {
     pool: EntityPool,
     events: EventSink,
     single_player_off: bool,
+    /// The single-player systems whose switch the table located.
+    switches: Vec<SinglePlayerSystem>,
+    /// The hook points installed.
+    hooked: Vec<HookPoint>,
+    /// Optional hooks the runtime refused, and why; their events are off.
+    refused: Vec<(HookPoint, RuntimeError)>,
+    /// The local player's shots not reported: their weapon is not in the asset table, so the server could not
+    /// check them.
+    pub shots_dropped: u64,
     /// Peds and vehicles the game made by itself and the module removed. Entities that were already gone when the
     /// frame got to them (one of ours spawned and despawned within a frame, say) are not counted.
     pub ambient_removed: u64,
 }
 
 impl<R: Runtime> Module<R> {
-    /// Locates every required function for the running build and installs the hooks. If any step fails, nothing is
-    /// left installed and the runtime is given back with the reason, so the adapter can report it in the game.
+    /// Locates the functions for the running build and installs the hooks the table has. A required function
+    /// missing, or the frame hook refused, stops the start: nothing is left installed and the runtime is given back
+    /// with the reason, so the adapter can report it in the game. Optional functions missing, or optional hooks the
+    /// runtime refuses, only switch off what they serve; [`Module::missing_functions`] and
+    /// [`Module::refused_hooks`] list them.
     pub fn start(
         mut runtime: R,
         functions: &FunctionTable,
@@ -207,13 +287,23 @@ impl<R: Runtime> Module<R> {
             Err(error) => return Err((error, runtime)),
         };
         let mut hooks = Vec::new();
+        let mut hooked = Vec::new();
+        let mut refused = Vec::new();
         for point in HookPoint::ALL {
+            if point == HookPoint::Frame && runtime.drives_frames() {
+                continue;
+            }
             let function = point.function().to_owned();
-            let address = resolved
-                .address(&function)
-                .expect("resolve located every required function");
+            // `frame` is required, so it is always here; another hook missing switches its events off.
+            let Some(address) = resolved.address(&function) else {
+                continue;
+            };
             match runtime.install_hook(HookRequest { function, address }) {
-                Ok(handle) => hooks.push(handle),
+                Ok(handle) => {
+                    hooks.push(handle);
+                    hooked.push(point);
+                }
+                Err(error) if point != HookPoint::Frame => refused.push((point, error)),
                 Err(error) => {
                     for handle in hooks {
                         // Best effort: the start already failed, and the error that caused it is the one to report.
@@ -223,6 +313,11 @@ impl<R: Runtime> Module<R> {
                 }
             }
         }
+        let switches_located: Vec<&str> = SinglePlayerSystem::ALL
+            .iter()
+            .map(|s| s.function())
+            .filter(|name| resolved.address(name).is_some())
+            .collect();
         Ok(Self {
             runtime,
             functions: resolved,
@@ -231,7 +326,14 @@ impl<R: Runtime> Module<R> {
             pool: EntityPool::default(),
             events: EventSink::default(),
             single_player_off: false,
+            switches: SinglePlayerSystem::ALL
+                .into_iter()
+                .filter(|s| switches_located.contains(&s.function()))
+                .collect(),
+            hooked,
+            refused,
             ambient_removed: 0,
+            shots_dropped: 0,
         })
     }
 
@@ -249,7 +351,7 @@ impl<R: Runtime> Module<R> {
         }
         let image = runtime.code_image().map_err(StartError::Runtime)?;
         functions
-            .resolve(&build, image, &required_functions())
+            .resolve(&build, image, &required_on(runtime), &optional_functions())
             .map_err(StartError::Functions)
     }
 
@@ -259,6 +361,22 @@ impl<R: Runtime> Module<R> {
 
     pub fn functions(&self) -> &ResolvedFunctions {
         &self.functions
+    }
+
+    /// The optional functions the table did not locate, and why: what the adapter shows the player, and the list
+    /// of what to find next.
+    pub fn missing_functions(&self) -> &[(String, LookupError)] {
+        &self.functions.missing
+    }
+
+    /// The optional hooks the runtime refused, and why.
+    pub fn refused_hooks(&self) -> &[(HookPoint, RuntimeError)] {
+        &self.refused
+    }
+
+    /// Whether this hook point is installed.
+    pub fn is_hooked(&self, point: HookPoint) -> bool {
+        self.hooked.contains(&point)
     }
 
     pub fn entities(&self) -> &EntityPool {
@@ -278,7 +396,8 @@ impl<R: Runtime> Module<R> {
         core: &mut dyn NetCore,
     ) -> Result<(), GameError> {
         if !self.single_player_off {
-            for system in SinglePlayerSystem::ALL {
+            // Only the systems whose switch the table located; the others keep running until it does.
+            for &system in &self.switches {
                 game.disable(system)?;
             }
             self.single_player_off = true;
@@ -303,6 +422,14 @@ impl<R: Runtime> Module<R> {
                 }
                 GameEvent::Input(input) => core.on_event(&CoreEvent::Input(input)),
                 GameEvent::Camera(camera) => core.on_event(&CoreEvent::Camera(camera)),
+                GameEvent::Shot(shot) if game.local_player() == Some(shot.shooter) => {
+                    match self.shot_report(&shot) {
+                        Some(report) => core.on_event(&CoreEvent::Shot(report)),
+                        None => self.shots_dropped += 1,
+                    }
+                }
+                // Other peds' shots are the server's to show, from their own clients' reports.
+                GameEvent::Shot(_) => {}
             }
         }
         let mut world = World {
@@ -312,6 +439,26 @@ impl<R: Runtime> Module<R> {
         };
         core.on_frame(dt, &mut world);
         Ok(())
+    }
+
+    fn shot_report(&self, shot: &GameShot) -> Option<ShotReport> {
+        let weapon = self.assets.asset_id(shot.weapon)?;
+        let hits = shot
+            .hits
+            .iter()
+            .filter_map(|hit| {
+                Some(ShotHit {
+                    target: self.pool.net_id(hit.target)?,
+                    zone: hit.zone,
+                    point: hit.point,
+                })
+            })
+            .collect();
+        Some(ShotReport {
+            weapon,
+            from: shot.from,
+            hits,
+        })
     }
 
     /// Removes every hook and gives the runtime back, with the hooks it could not remove, if any.

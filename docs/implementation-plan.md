@@ -13,7 +13,7 @@ stays the contract. Task IDs are new and continue the series in [roadmap.md](roa
 | Transport | QUIC through quinn ([NET-3](research/network-transport/README.md)) | Yes, one in-process gateway |
 | Async runtime | Tokio multi-thread ([SRV-5](research/allocator-runtime/README.md)) | Yes |
 | Allocator | jemalloc ([SRV-5](research/allocator-runtime/README.md), confirmed by BOT-3) | No: glibc malloc |
-| Serialization | postcard ([NET-4](research/packet-serialization/README.md), confirmed by NET-8) | No: hand-written format |
+| Serialization | postcard ([NET-4](research/packet-serialization/README.md), confirmed by NET-8) | Its varints, written by hand in the delta snapshots (NET-11); client states and events keep fixed fields, since postcard would save about 3% there (NET-10 dropped, #223) |
 | Snapshots | Delta against the last acknowledged snapshot ([NET-5](research/packet-compression/README.md)) | No: whole snapshots |
 | Visible sets | Dense 50 m grid, bitset sets over dense slots ([IM-2](research/visibility-index/README.md)) | No: hashed 100 m grid, sorted sets, ids never reused |
 | Tick model | hecs, per-player work in parallel on rayon, 30 Hz ([SRV-4](research/tick-model/README.md)) | No: one thread, 20 Hz |
@@ -33,7 +33,7 @@ network, is the limit. Its profile at 2,000 bots in that crowd:
 | Visible sets | 26% | IM-4, IM-5 (dense slots, dense grid, bitsets), SRV-7 (parallel) |
 | Waking the gateway, once per datagram | 22% | NET-9 (one hand-off per tick) |
 | Copying states out of hash maps | 8% | IM-4 (states in a slot-indexed array) |
-| Encoding and handing datagrams to quinn | 6% | SRV-7 (encoding in parallel), NET-10 and NET-11 (fewer, smaller datagrams) |
+| Encoding and handing datagrams to quinn | 6% | SRV-7 (encoding in parallel), NET-11 (fewer, smaller datagrams) |
 
 ## Target
 
@@ -94,10 +94,12 @@ and 24.4 ms with no overrun and no dropped bot. For reference, 3,000 bots on the
 
 | ID | Task | Expected effect | Depends on |
 |---|---|---|---|
-| NET-10 | postcard for every payload; `PROTOCOL_VERSION` bump; bots follow | Snapshots 17% smaller on the bots' traffic (NET-8) | — |
-| NET-11 | Delta snapshots against the last acknowledged one; client states carry the acknowledgement | Snapshot bytes cut by about 76% on the bots' traffic, one datagram per snapshot (NET-8) | NET-10, IM-4 |
+| NET-11 | Delta snapshots against the last acknowledged one; client states carry the acknowledgement | Snapshot bytes cut by about 76% on the bots' traffic, one datagram per snapshot (NET-8) | IM-4 |
 | IM-6 | Rank the visible set and cut it to the per-player byte budget (issue #18) | Bounds per-player work and bytes in any crowd | IM-5 |
-| SRV-8 | 30 Hz by default | The rate SRV-4 planned for | SRV-7, NET-11 |
+| SRV-8 | 30 Hz ready, 20 Hz kept by default: at 2,700 players 30 Hz gave p99 15 to 16 ms and every snapshot with a gateway thread per core; 4,096 at 30 Hz could not be measured on the two machines (#228) | The rate SRV-4 planned for, behind `--tick-hz 30` | SRV-7, NET-11 |
+
+NET-10 (postcard for every payload) was dropped (#223): NET-11's delta payload already writes postcard's varints,
+and what stays hand-written, the client state and rare events, would shrink by about 3%.
 
 Gate: 4,096 bots with the bots on a second machine, as the
 [bots README](../crates/sawgrass-bots/README.md#bots-and-server-on-separate-machines) describes. This is stage
@@ -106,6 +108,11 @@ Gate: 4,096 bots with the bots on a second machine, as the
 Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.md)): not met. At 20 Hz, with 3,700
 of the 4,096 bots on the server's machine, 4,096 bots ran with no overrun. On two server cores the gateway is the limit: with one gateway thread, tick p99
 28 to 30 ms and 7 to 12% of snapshots dropped; with two, every snapshot delivered and p99 38 to 39 ms.
+
+Step 4 closes with SRV-8 by the maintainer's decision (2026-11-26), with this gate still open. 20 Hz stays the
+default, and 30 Hz is ready behind `--tick-hz 30`. With a gateway thread on a core of its own, 30 Hz delivered every
+snapshot at 2,700 players with tick p99 15 to 16 ms. Neither 4,096 at 30 Hz nor 4,096 with two gateway threads on
+their own cores can be measured on the two machines available. The gate is measured again when a larger rig exists.
 
 ### Phase 3: reliability of the realtime core
 
@@ -150,9 +157,11 @@ core decodes, so they land in this order.
 | SRV-14 | Owners for vehicles and NPCs: the four rules, epochs and the ownership event | SRV-13, NET-17 |
 | SRV-19 | Owned states taken from their owner only, with the right epoch, checked for bounds, speed and distance; an owner's damage values taken only for NPCs and vehicles nobody owns as property, and only as decreases | SRV-14 |
 | SRV-15 | Seats: enter and leave requests, decided by the server | SRV-14, NET-16 |
+| NET-21 | Every seat request answered with granted or the reason it was refused | SRV-15 |
 | SRV-16 | Hit reports checked against the snapshot history; health, armour and death on the server | NET-16 |
 | SRV-17 | World state: time, weather, doors and routing buckets, sent on join and on change | NET-15 |
 | BOT-5 | Bots that drive, change seats and owners and shoot, as a load-test scenario with bytes per player | SRV-19, SRV-15, SRV-16 |
+| BOT-9 | Bots shoot only intact vehicles, keep driving speed and check their seat | BOT-5, NET-21 |
 
 Gate: the BOT-5 scenario at 3,000 bots in the 1.5 km square, with phase 1's tick budget, no refused state from a
 well-behaved bot, and the bytes per player reported against architecture.md's budget.
@@ -161,5 +170,5 @@ well-behaved bot, and the bytes per player reported against architecture.md's bu
 
 - The decisions themselves. A step that finds a chosen option does not work on the real server stops and proposes
   an ADR, as AGENTS.md asks.
-- architecture.md. Its wire format section (DOC-1, #13) is written when NET-10 and NET-11 land; its tick rate
+- architecture.md. Its wire format section (DOC-1, #13) is written now that NET-11 has landed; its tick rate
   already allows 30 Hz.

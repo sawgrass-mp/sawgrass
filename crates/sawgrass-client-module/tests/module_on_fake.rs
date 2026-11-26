@@ -7,10 +7,11 @@ use sawgrass_client_module::game::{
 };
 use sawgrass_client_module::hooks::{EventSink, GameEvent, HookPoint};
 use sawgrass_client_module::module::{
-    CoreEvent, Module, NetCore, StartError, World, WorldError, required_functions,
+    CoreEvent, Module, NetCore, REQUIRED_FUNCTIONS, StartError, World, WorldError, all_functions,
+    optional_functions,
 };
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
-use sawgrass_client_module::table::FunctionTable;
+use sawgrass_client_module::table::{FunctionTable, LookupError, ResolveError};
 
 const BUILD_KEY: &str = "victory/1.0.0/00ff";
 const CAR: GameAsset = GameAsset(0xCA);
@@ -22,8 +23,8 @@ fn runtime() -> FakeRuntime {
         image_digest: "00ff".into(),
     };
     // Made-up bytes: function `i` sits at 0x10 * i and starts with 5A i A5 3C.
-    let mut image = vec![0u8; 0x10 * required_functions().len()];
-    for i in 0..required_functions().len() {
+    let mut image = vec![0u8; 0x10 * all_functions().len()];
+    for i in 0..all_functions().len() {
         image[0x10 * i..0x10 * i + 4].copy_from_slice(&[0x5A, i as u8, 0xA5, 0x3C]);
     }
     FakeRuntime::new(build, 0x4000, image)
@@ -31,7 +32,7 @@ fn runtime() -> FakeRuntime {
 
 fn functions() -> FunctionTable {
     let mut text = format!("build = {BUILD_KEY}\n");
-    for (i, name) in required_functions().iter().enumerate() {
+    for (i, name) in all_functions().iter().enumerate() {
         text += &format!("{name} = 5A {i:02X} A5 3C\n");
     }
     FunctionTable::parse(&text).expect("valid table")
@@ -163,14 +164,120 @@ fn installs_one_hook_per_hook_point() {
     assert_eq!(hooked, HookPoint::ALL.map(HookPoint::function).to_vec());
 }
 
+/// A table with only these entries, at the same made-up places as [`functions`].
+fn functions_only(names: &[&str]) -> FunctionTable {
+    let mut text = format!("build = {BUILD_KEY}\n");
+    for (i, name) in all_functions().iter().enumerate() {
+        if names.contains(name) {
+            text += &format!("{name} = 5A {i:02X} A5 3C\n");
+        }
+    }
+    FunctionTable::parse(&text).expect("valid table")
+}
+
 #[test]
-fn a_refused_hook_leaves_nothing_installed() {
+fn starts_with_the_four_required_functions_and_switches_the_rest_off() {
+    let mut module =
+        Module::start(runtime(), &functions_only(&REQUIRED_FUNCTIONS), assets(BUILD_KEY)).expect("started");
+    // Only the frame is hooked; the other three are the real game interface's to call.
+    let hooked: Vec<_> = module
+        .runtime()
+        .hooks
+        .iter()
+        .map(|(_, r)| r.function.as_str())
+        .collect();
+    assert_eq!(hooked, vec!["frame"]);
+    assert!(module.is_hooked(HookPoint::Frame));
+    assert!(!module.is_hooked(HookPoint::PedCreate));
+    for name in REQUIRED_FUNCTIONS {
+        assert!(module.functions().address(name).is_some(), "{name}");
+    }
+    let missing: Vec<_> = module
+        .missing_functions()
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    assert_eq!(missing, optional_functions());
+    assert!(
+        module
+            .missing_functions()
+            .iter()
+            .all(|(_, e)| *e == LookupError::NotInTable)
+    );
+
+    // Frames run, and no single-player switch is called without its function.
+    let mut game = FakeGame::default();
+    let mut core = RecordingCore::default();
+    for _ in 0..3 {
+        module.frame(1.0 / 60.0, &mut game, &mut core).expect("frame");
+    }
+    assert!(game.disabled.is_empty());
+    assert_eq!(core.frames, 3);
+}
+
+#[test]
+fn some_switches_located_turn_only_those_systems_off() {
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.push(SinglePlayerSystem::Police.function());
+    let mut module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    let mut game = FakeGame::default();
+    module
+        .frame(1.0 / 60.0, &mut game, &mut RecordingCore::default())
+        .expect("frame");
+    assert_eq!(game.disabled, vec![SinglePlayerSystem::Police]);
+}
+
+#[test]
+fn a_missing_required_function_stops_the_start() {
+    let table = functions_only(&["frame", "local_player", "ped_spawn"]);
+    let Err((StartError::Functions(ResolveError::Functions(failed)), rt)) =
+        Module::start(runtime(), &table, assets(BUILD_KEY))
+    else {
+        panic!("the start needs every required function");
+    };
+    assert_eq!(
+        failed,
+        vec![("entity_set_pose".to_owned(), LookupError::NotInTable)]
+    );
+    assert!(rt.hooks.is_empty());
+}
+
+#[test]
+fn a_refused_frame_hook_leaves_nothing_installed() {
     let mut rt = runtime();
-    rt.refuse.push(HookPoint::StreamingUpdate.function().into());
+    rt.refuse.push(HookPoint::Frame.function().into());
     let Err((StartError::Runtime(_), rt)) = Module::start(rt, &functions(), assets(BUILD_KEY)) else {
-        panic!("a refused hook stops the start");
+        panic!("a refused frame hook stops the start");
     };
     assert!(rt.hooks.is_empty());
+}
+
+#[test]
+fn a_refused_optional_hook_only_switches_its_events_off() {
+    let mut rt = runtime();
+    rt.refuse.push(HookPoint::StreamingUpdate.function().into());
+    let module = Module::start(rt, &functions(), assets(BUILD_KEY)).expect("started");
+    assert!(!module.is_hooked(HookPoint::StreamingUpdate));
+    assert!(module.is_hooked(HookPoint::PedCreate));
+    let refused: Vec<_> = module.refused_hooks().iter().map(|(p, _)| *p).collect();
+    assert_eq!(refused, vec![HookPoint::StreamingUpdate]);
+}
+
+#[test]
+fn a_runtime_that_drives_frames_needs_no_frame_entry() {
+    let mut rt = runtime();
+    rt.drives_frames = true;
+    let table = functions_only(&["local_player", "ped_spawn", "entity_set_pose"]);
+    let mut module = Module::start(rt, &table, assets(BUILD_KEY)).expect("started");
+    assert!(module.runtime().hooks.is_empty());
+    assert!(!module.is_hooked(HookPoint::Frame));
+    module
+        .frame(
+            1.0 / 60.0,
+            &mut FakeGame::default(),
+            &mut RecordingCore::default(),
+        )
+        .expect("frame");
 }
 
 #[test]
@@ -210,6 +317,9 @@ impl GameApi for ReentrantGame {
     }
     fn local_player(&self) -> Option<GameHandle> {
         self.inner.local_player()
+    }
+    fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset> {
+        self.inner.held_weapon(ped)
     }
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
         self.inner.set_streaming_focus(points);

@@ -11,9 +11,18 @@ use sawgrass_script::Host;
 use crate::TickInfo;
 use crate::net::Roster;
 
-/// The default script budget per tick: a quarter of the 35 ms p99 the tick must keep at 20 Hz
-/// (`docs/implementation-plan.md`), leaving the rest to the world.
+/// The default script budget per tick at 20 Hz: a quarter of the 35 ms p99 the tick must keep
+/// (`docs/implementation-plan.md`), leaving the rest to the world. [`budget_for`] gives it for other rates.
 pub const DEFAULT_BUDGET: Duration = Duration::from_millis(8);
+
+/// The default script budget at `rate_hz`: a quarter of the p99 the tick must keep (70% of its interval), in
+/// whole milliseconds and at least one. 8 ms at 20 Hz, 5 ms at 30 Hz.
+#[must_use]
+pub fn budget_for(rate_hz: u32) -> Duration {
+    let interval_us = 1_000_000 / u64::from(rate_hz.max(1));
+    let quarter_ms = interval_us * 7 / 10 / 4 / 1000;
+    Duration::from_millis(quarter_ms.max(1))
+}
 
 /// The `scripts` tick system.
 #[derive(Debug)]
@@ -113,5 +122,18 @@ impl Scripts {
             lines.extend(r.drain_log().into_iter().map(|l| format!("  [{name}] {l}")));
         }
         lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_budget_follows_the_tick_rate() {
+        assert_eq!(budget_for(20), DEFAULT_BUDGET);
+        assert_eq!(budget_for(30), Duration::from_millis(5));
+        assert_eq!(budget_for(1000), Duration::from_millis(1));
+        assert_eq!(budget_for(0), budget_for(1));
     }
 }

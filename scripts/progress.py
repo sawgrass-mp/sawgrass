@@ -78,7 +78,7 @@ STEPS = (
     {"name": "Fewer bytes, then 30 Hz", "short": "30 Hz", "stage": 1, "phase": 2, "difficulty": "medium",
      "why": "The formats are chosen and measured; delta snapshots against acknowledgements need care, the rest is "
             "plumbing",
-     "covers": "postcard payloads, delta snapshots, visible sets cut to a byte budget, 30 Hz by default",
+     "covers": "Delta snapshots, visible sets cut to a byte budget, 30 Hz by default",
      "gate": "4,096 bots from a second machine: the roadmap's stage 1 gate"},
     {"name": "Reliability of the realtime core", "short": "Reliability", "stage": 1, "phase": 3,
      "difficulty": "medium", "why": "Well-known techniques; the work is covering every abuse case and testing it "
@@ -106,6 +106,7 @@ STEPS = (
                "scripting API",
      "gate": "Starts once two clients see each other in one world (step 7's gate)"},
     {"name": "Sync in the game", "short": "Sync", "stage": 3, "phase": 5, "difficulty": "very hard",
+     "needs_game": True,
      "why": "Game physics and animation the server does not own; animations and ped tasks are the largest piece "
             "of work",
      "covers": "Interpolation and prediction of players, animations and ped tasks, vehicles with owners, weapons "
@@ -181,6 +182,9 @@ def steps_for(plan):
                                 "stage": steps[last]["stage"], "phase": phase,
                                 "covers": "See docs/implementation-plan.md", "generated": True})
     return steps
+
+
+SERVER_READY = "server side ready, waiting for the game"
 
 
 def step_index(task_id, plan, steps, status="done"):
@@ -307,7 +311,9 @@ def step_rows(tasks, plan=None):
 
     The state key is `done`, `current`, `waiting` or `todo`. The current step is the first one that is not done:
     a step with tasks is done when every one of them is merged, a step without tasks only when its `state` says
-    so. So the marker follows what is merged on `main`, not what is planned.
+    so. So the marker follows what is merged on `main`, not what is planned. A step whose gate needs the game
+    (`needs_game`) is never done from its tasks alone: with every task merged it reads "server side ready, waiting
+    for the game".
     """
     steps = steps_for(plan or {})
     rows, current_found = [], False
@@ -315,17 +321,21 @@ def step_rows(tasks, plan=None):
         own = [t for t in tasks if t.get("step") == i]
         _, _, pct = progress(own)
         done = sum(t["status"] == "done" for t in own)
-        finished = s.get("state") == "done" or (bool(own) and done == len(own) and s.get("state") != "waiting")
+        all_merged = bool(own) and done == len(own)
+        server_ready = all_merged and s.get("needs_game", False)
+        finished = s.get("state") == "done" or (all_merged and s.get("state") != "waiting" and not server_ready)
         if finished:
             key, pct = "done", 100
         elif not current_found:
             key, current_found = "current", True
         else:
-            key = "waiting" if s.get("state") == "waiting" else "todo"
+            key = "waiting" if s.get("state") == "waiting" or server_ready else "todo"
         if s.get("state") == "done":
             text = f"{done} of {len(own)} done" if own else "done"
         elif s.get("state") == "waiting":
             text, pct = "waiting for the game", 0
+        elif server_ready:
+            text = SERVER_READY
         elif not own:
             text = "not started"
         else:
@@ -501,7 +511,7 @@ def render_svg(tasks, plan=None):
         label = "c" if key == "current" else "l"
         out.append(f'<text x="{cx:.1f}" y="{bar_y + 38}" class="{label}" text-anchor="middle">'
                    f'{i + 1}. {escape(s["short"])}</text>')
-        small = {"waiting for the game": "waiting"}.get(text, text)
+        small = {"waiting for the game": "waiting", SERVER_READY: "server ready"}.get(text, text)
         out.append(f'<text x="{cx:.1f}" y="{bar_y + 54}" class="{"w" if key == "waiting" else "n"}" '
                    f'text-anchor="middle">{escape(small)}</text>')
         if "difficulty" in s:

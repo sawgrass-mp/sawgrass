@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sawgrass_gateway::{RootCertStore, connect};
-use sawgrass_protocol::game::ServerEvent;
-use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader};
+use sawgrass_protocol::game::{ClientEvent, ServerEvent};
+use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind};
 
-use crate::link::{Datagrams, NetLink, ServerEvents};
+use crate::link::{ClientEvents, Datagrams, NetLink, ServerEvents};
 
 /// How often queued datagrams are sent. Well under a frame, so a state is not held back.
 const SEND_PERIOD: Duration = Duration::from_millis(2);
@@ -63,7 +63,7 @@ impl Connection {
     pub fn start(config: ConnectConfig, link: &NetLink) -> std::io::Result<Self> {
         let status = Arc::new(Mutex::new(Status::Connecting));
         let stop = Arc::new(AtomicBool::new(false));
-        let queues = (link.inbox(), link.outbox(), link.events());
+        let queues = (link.inbox(), link.outbox(), link.events(), link.client_events());
         let (thread_status, thread_stop) = (status.clone(), stop.clone());
         let thread = std::thread::Builder::new()
             .name("sawgrass-connection".into())
@@ -103,7 +103,7 @@ fn set(status: &Mutex<Status>, value: Status) {
 /// Connects and moves bytes until the connection ends or `stop` is set. Returns why it ended.
 async fn run(
     config: ConnectConfig,
-    (inbox, outbox, events): (Datagrams, Datagrams, ServerEvents),
+    (inbox, outbox, events, client_events): (Datagrams, Datagrams, ServerEvents, ClientEvents),
     status: &Mutex<Status>,
     stop: &AtomicBool,
 ) -> String {
@@ -118,8 +118,7 @@ async fn run(
         () = stopped(stop) => return CLOSED.to_owned(),
     };
     set(status, Status::Connected);
-    // The event sender is kept so the stream stays open; the module sends no events yet.
-    let (datagrams, _event_sender, mut event_receiver) = session.split();
+    let (datagrams, mut event_sender, mut event_receiver) = session.split();
 
     let receiver = datagrams.clone();
     let mut datagrams_in = tokio::spawn(async move {
@@ -160,6 +159,12 @@ async fn run(
                         return e.to_string();
                     }
                 }
+                for event in client_events.take() {
+                    if let Err(e) = event_sender.send(&event_packet(&event)).await {
+                        datagrams.close();
+                        return e.to_string();
+                    }
+                }
             }
         }
     };
@@ -169,11 +174,34 @@ async fn run(
     reason
 }
 
+/// A client event as the gateway sends it: an event header, then the payload.
+fn event_packet(event: &ClientEvent) -> Vec<u8> {
+    let mut packet = vec![0; PacketHeader::SIZE];
+    let header = PacketHeader {
+        kind: PacketKind::Event,
+        sequence: 0,
+        tick: 0,
+    };
+    // The buffer holds exactly a header, so encoding cannot fail.
+    let _ = header.encode(&mut packet);
+    event.encode(&mut packet);
+    packet
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sawgrass_netcode::ClientConfig;
     use std::time::Instant;
+
+    #[test]
+    fn client_events_go_out_as_event_packets() {
+        let event = ClientEvent::EnterSeat { vehicle: 7, seat: 1 };
+        let packet = event_packet(&event);
+        let (header, payload) = PacketHeader::decode(&packet).expect("header");
+        assert_eq!(header.kind, PacketKind::Event);
+        assert_eq!(ClientEvent::decode(payload), Ok(event));
+    }
 
     #[test]
     fn dropping_while_connecting_returns_at_once() {

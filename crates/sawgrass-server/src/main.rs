@@ -40,7 +40,8 @@
 //! - `--vehicle-area M`: the edge of that square, in metres (default 1500, the bots' crowded area).
 //! - `--resources DIR`: run every resource in `DIR` (a folder with a `resource.toml`) in the tick. A resource that
 //!   fails to load is reported and left out.
-//! - `--script-budget-ms N`: the time all resources together may take in one tick (default 8).
+//! - `--script-budget-ms N`: the time all resources together may take in one tick (default a quarter of the
+//!   tick's 70% p99 target: 8 at 20 Hz, 5 at 30 Hz).
 //! - `--record FILE`: write every connection's joins, datagrams, events and leaves to `FILE` as they arrive, for
 //!   `sawgrass-bots replay` (task SRV-22). The file is written out every half second, so a killed server loses at
 //!   most that much. It holds what players sent: keep it private and never commit one.
@@ -103,7 +104,8 @@ struct Args {
     vehicles: u32,
     vehicle_area: f32,
     resources: Option<PathBuf>,
-    script_budget: Duration,
+    /// `None`: [`scripts::budget_for`] the tick rate.
+    script_budget: Option<Duration>,
     movement: MovementRules,
     list_players: bool,
     record: Option<PathBuf>,
@@ -137,7 +139,7 @@ fn parse_args() -> Result<Args, String> {
         vehicles: 0,
         vehicle_area: 1500.0,
         resources: None,
-        script_budget: scripts::DEFAULT_BUDGET,
+        script_budget: None,
         movement: MovementRules::default(),
         list_players: false,
         record: None,
@@ -209,7 +211,7 @@ fn parse_args() -> Result<Args, String> {
                 let ms: u64 = value("--script-budget-ms")?
                     .parse()
                     .map_err(|e| format!("--script-budget-ms: {e}"))?;
-                args.script_budget = Duration::from_millis(ms);
+                args.script_budget = Some(Duration::from_millis(ms));
             }
             "--map-min" => {
                 let (x, y) = pair("--map-min", &value("--map-min")?)?;
@@ -486,15 +488,18 @@ fn main() -> ExitCode {
         for e in &errors {
             eprintln!("sawgrass-server: {e}");
         }
+        let budget = args
+            .script_budget
+            .unwrap_or_else(|| scripts::budget_for(args.tick_hz));
         let names: Vec<&str> = host.resources().iter().map(|r| r.name()).collect();
         println!(
             "resources: {} running ({}), {} failed, script budget {:?} per tick",
             names.len(),
             names.join(", "),
             errors.len(),
-            args.script_budget
+            budget
         );
-        let mut scripts = Scripts::new(host, roster.take(), args.script_budget, report_every);
+        let mut scripts = Scripts::new(host, roster.take(), budget, report_every);
         tick_loop.add_system("scripts", move |_, info| scripts.run_tick(info));
     }
 
