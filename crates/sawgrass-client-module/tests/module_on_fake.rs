@@ -321,6 +321,15 @@ impl GameApi for ReentrantGame {
     fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset> {
         self.inner.held_weapon(ped)
     }
+    fn seat(&self, ped: GameHandle) -> Option<(GameHandle, u8)> {
+        self.inner.seat(ped)
+    }
+    fn enter_seat(&mut self, ped: GameHandle, vehicle: GameHandle, seat: u8) -> Result<(), GameError> {
+        self.inner.enter_seat(ped, vehicle, seat)
+    }
+    fn leave_seat(&mut self, ped: GameHandle) -> Result<(), GameError> {
+        self.inner.leave_seat(ped)
+    }
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
         self.inner.set_streaming_focus(points);
     }
