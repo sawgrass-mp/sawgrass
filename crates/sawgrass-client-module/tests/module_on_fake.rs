@@ -7,10 +7,11 @@ use sawgrass_client_module::game::{
 };
 use sawgrass_client_module::hooks::{EventSink, GameEvent, HookPoint};
 use sawgrass_client_module::module::{
-    CoreEvent, Module, NetCore, StartError, World, WorldError, required_functions,
+    CoreEvent, Module, NetCore, REQUIRED_FUNCTIONS, StartError, World, WorldError, all_functions,
+    optional_functions,
 };
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
-use sawgrass_client_module::table::FunctionTable;
+use sawgrass_client_module::table::{FunctionTable, LookupError, ResolveError};
 
 const BUILD_KEY: &str = "victory/1.0.0/00ff";
 const CAR: GameAsset = GameAsset(0xCA);
@@ -22,8 +23,8 @@ fn runtime() -> FakeRuntime {
         image_digest: "00ff".into(),
     };
     // Made-up bytes: function `i` sits at 0x10 * i and starts with 5A i A5 3C.
-    let mut image = vec![0u8; 0x10 * required_functions().len()];
-    for i in 0..required_functions().len() {
+    let mut image = vec![0u8; 0x10 * all_functions().len()];
+    for i in 0..all_functions().len() {
         image[0x10 * i..0x10 * i + 4].copy_from_slice(&[0x5A, i as u8, 0xA5, 0x3C]);
     }
     FakeRuntime::new(build, 0x4000, image)
@@ -31,7 +32,7 @@ fn runtime() -> FakeRuntime {
 
 fn functions() -> FunctionTable {
     let mut text = format!("build = {BUILD_KEY}\n");
-    for (i, name) in required_functions().iter().enumerate() {
+    for (i, name) in all_functions().iter().enumerate() {
         text += &format!("{name} = 5A {i:02X} A5 3C\n");
     }
     FunctionTable::parse(&text).expect("valid table")
@@ -161,6 +162,84 @@ fn installs_one_hook_per_hook_point() {
         .map(|(_, r)| r.function.as_str())
         .collect();
     assert_eq!(hooked, HookPoint::ALL.map(HookPoint::function).to_vec());
+}
+
+/// A table with only these entries, at the same made-up places as [`functions`].
+fn functions_only(names: &[&str]) -> FunctionTable {
+    let mut text = format!("build = {BUILD_KEY}\n");
+    for (i, name) in all_functions().iter().enumerate() {
+        if names.contains(name) {
+            text += &format!("{name} = 5A {i:02X} A5 3C\n");
+        }
+    }
+    FunctionTable::parse(&text).expect("valid table")
+}
+
+#[test]
+fn starts_with_the_four_required_functions_and_switches_the_rest_off() {
+    let mut module =
+        Module::start(runtime(), &functions_only(&REQUIRED_FUNCTIONS), assets(BUILD_KEY)).expect("started");
+    // Only the frame is hooked; the other three are the real game interface's to call.
+    let hooked: Vec<_> = module
+        .runtime()
+        .hooks
+        .iter()
+        .map(|(_, r)| r.function.as_str())
+        .collect();
+    assert_eq!(hooked, vec!["frame"]);
+    assert!(module.is_hooked(HookPoint::Frame));
+    assert!(!module.is_hooked(HookPoint::PedCreate));
+    for name in REQUIRED_FUNCTIONS {
+        assert!(module.functions().address(name).is_some(), "{name}");
+    }
+    let missing: Vec<_> = module
+        .missing_functions()
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    assert_eq!(missing, optional_functions());
+    assert!(
+        module
+            .missing_functions()
+            .iter()
+            .all(|(_, e)| *e == LookupError::NotInTable)
+    );
+
+    // Frames run, and no single-player switch is called without its function.
+    let mut game = FakeGame::default();
+    let mut core = RecordingCore::default();
+    for _ in 0..3 {
+        module.frame(1.0 / 60.0, &mut game, &mut core).expect("frame");
+    }
+    assert!(game.disabled.is_empty());
+    assert_eq!(core.frames, 3);
+}
+
+#[test]
+fn some_switches_located_turn_only_those_systems_off() {
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.push(SinglePlayerSystem::Police.function());
+    let mut module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    let mut game = FakeGame::default();
+    module
+        .frame(1.0 / 60.0, &mut game, &mut RecordingCore::default())
+        .expect("frame");
+    assert_eq!(game.disabled, vec![SinglePlayerSystem::Police]);
+}
+
+#[test]
+fn a_missing_required_function_stops_the_start() {
+    let table = functions_only(&["frame", "local_player", "ped_spawn"]);
+    let Err((StartError::Functions(ResolveError::Functions(failed)), rt)) =
+        Module::start(runtime(), &table, assets(BUILD_KEY))
+    else {
+        panic!("the start needs every required function");
+    };
+    assert_eq!(
+        failed,
+        vec![("entity_set_pose".to_owned(), LookupError::NotInTable)]
+    );
+    assert!(rt.hooks.is_empty());
 }
 
 #[test]
