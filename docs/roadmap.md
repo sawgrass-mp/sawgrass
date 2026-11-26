@@ -58,8 +58,9 @@ with generations, the dense 50 m grid with bitset visible sets, per-player work 
 
 ### 4. Fewer bytes, then 30 Hz
 
-🟡 Medium. Stage 1, plan phase 2. postcard for every payload, delta snapshots against the last acknowledged one,
-visible sets ranked and cut to a byte budget per player, 30 Hz by default.
+🟡 Medium. Stage 1, plan phase 2. Delta snapshots against the last acknowledged one, visible sets ranked and cut
+to a byte budget per player, 30 Hz by default. postcard for every payload (NET-10) was dropped: the delta format
+already writes its varints (#223).
 
 - Depends on: step 3 (dense slots and the parallel tick).
 - Risks: a delta against a baseline the client no longer has; a protocol version bump that every peer follows.
