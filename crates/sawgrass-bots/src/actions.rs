@@ -5,6 +5,10 @@
 //! legs, leaves it, sometimes sits a while in the passenger seat of the same parked vehicle, and walks on. The
 //! server changes owners as it moves, so a run sees seats taken and left and ownership handed over.
 //!
+//! A driver trusts no seat the server has not granted: it drives, and sends its vehicle's state, only once the
+//! server's [`ServerEvent::Seat`](sawgrass_protocol::game::ServerEvent::Seat) answer grants the seat (NET-21), and a
+//! refused request or the server taking it out of its seat sends it on foot again (BOT-11).
+//!
 //! A shooter fires at intact vehicles in the latest snapshot it decoded, at the positions that snapshot gave, so
 //! every hit of an honest bot passes the server's checks and changes something: a wrecked vehicle (body 0) takes
 //! no more damage, so a hit on it would measure only the checks (BOT-9). It hits no player or NPC: the server has no respawn yet, so a
@@ -18,6 +22,7 @@ use sawgrass_protocol::EntityState;
 use sawgrass_protocol::Position;
 use sawgrass_protocol::combat::{Hit, Shot, Zone};
 use sawgrass_protocol::entity::{AssetId, EntityKind, Info};
+use sawgrass_protocol::game::SeatAnswer;
 use sawgrass_protocol::vehicle::VehicleBlock;
 
 use crate::walker::{Rng, Walker};
@@ -80,12 +85,14 @@ pub enum Phase {
     Walking { left: f32 },
     /// Going to `vehicle`, for at most `left` more seconds.
     Approaching { vehicle: u32, left: f32 },
-    /// In the driver's seat of `vehicle`, for `left` more seconds; the bot sends the vehicle's state.
-    Driving { vehicle: u32, left: f32 },
+    /// Asked for the driver's seat of `vehicle`, for `left` more seconds; once the server granted it (`seated`),
+    /// the bot drives and sends the vehicle's state.
+    Driving { vehicle: u32, left: f32, seated: bool },
     /// Out of the driver's seat, about to take the passenger seat of the same vehicle.
     Parked { vehicle: u32 },
-    /// In the passenger seat of the parked `vehicle`, for `left` more seconds; the walker stands still.
-    Riding { vehicle: u32, left: f32 },
+    /// Asked for the passenger seat of the parked `vehicle`, for `left` more seconds, granted once `seated`; the
+    /// walker stands still.
+    Riding { vehicle: u32, left: f32, seated: bool },
 }
 
 /// A driving bot's cycle.
@@ -113,12 +120,40 @@ impl Driver {
         self.phase
     }
 
-    /// The vehicle whose state the bot sends this step, if it drives one.
+    /// The vehicle whose state the bot sends this step, if it drives one: the server granted it the driver's seat.
     #[must_use]
     pub fn driving(&self) -> Option<u32> {
         match self.phase {
-            Phase::Driving { vehicle, .. } => Some(vehicle),
+            Phase::Driving {
+                vehicle,
+                seated: true,
+                ..
+            } => Some(vehicle),
             _ => None,
+        }
+    }
+
+    /// Takes the server's answer about seat `seat` of `vehicle`. A grant of the seat the driver asked for seats it,
+    /// and a driver's walker starts driving; a refusal, or the news that the server took it out of that seat, sends
+    /// it on foot without a leave request. Answers about any other seat, such as the driver's seat a riding bot left
+    /// just before it asked for the passenger seat, change nothing.
+    pub fn answer(&mut self, vehicle: u32, seat: u8, answer: SeatAnswer, walker: &mut Walker) {
+        let (asked, at, seated) = match &mut self.phase {
+            Phase::Driving { vehicle, seated, .. } => (*vehicle, 0, seated),
+            Phase::Riding { vehicle, seated, .. } => (*vehicle, 1, seated),
+            _ => return,
+        };
+        if (vehicle, seat) != (asked, at) {
+            return;
+        }
+        match answer {
+            SeatAnswer::Granted => {
+                *seated = true;
+                if at == 0 {
+                    walker.drive();
+                }
+            }
+            _ => self.walk_on(walker),
         }
     }
 
@@ -159,8 +194,11 @@ impl Driver {
                 match at {
                     Some(at) if distance(me, at) <= ENTER_AT => {
                         let left = self.rng.range(20.0, 60.0);
-                        self.phase = Phase::Driving { vehicle, left };
-                        walker.drive();
+                        self.phase = Phase::Driving {
+                            vehicle,
+                            left,
+                            seated: false,
+                        };
                         Request::Enter { vehicle, seat: 0 }
                     }
                     Some(at) if *left > 0.0 => {
@@ -174,7 +212,7 @@ impl Driver {
                     }
                 }
             }
-            Phase::Driving { vehicle, left } => {
+            Phase::Driving { vehicle, left, .. } => {
                 let vehicle = *vehicle;
                 *left -= dt;
                 if *left > 0.0 && owned.contains(&vehicle) {
@@ -192,7 +230,11 @@ impl Driver {
             Phase::Parked { vehicle } => {
                 let vehicle = *vehicle;
                 let left = self.rng.range(5.0, 15.0);
-                self.phase = Phase::Riding { vehicle, left };
+                self.phase = Phase::Riding {
+                    vehicle,
+                    left,
+                    seated: false,
+                };
                 Request::Enter { vehicle, seat: 1 }
             }
             Phase::Riding { left, .. } => {
@@ -311,6 +353,10 @@ mod tests {
         let mut parked_or_walked = false;
         for _ in 0..20 * 400 {
             let request = driver.step(0.05, &mut walker, &[7], &seen);
+            // The server grants every seat here.
+            if let Request::Enter { vehicle, seat } = request {
+                driver.answer(vehicle, seat, SeatAnswer::Granted, &mut walker);
+            }
             if !driver.holds() {
                 walker.step(0.05);
             }
@@ -346,6 +392,99 @@ mod tests {
             requests.contains(&Request::Enter { vehicle: 7, seat: 1 }),
             "{requests:?}"
         );
+    }
+
+    /// A driver next to vehicle 7, stepped until it asks for the driver's seat.
+    fn at_the_door(index: u64) -> (Driver, Walker, Seen) {
+        let mut walker = Walker::new(Area::default(), index);
+        let seen = Seen {
+            tick: 1,
+            entities: vec![entity(7, walker.position())],
+            infos: vec![car()],
+        };
+        let mut driver = Driver::new(index);
+        for _ in 0..20 * 20 {
+            if driver.step(0.05, &mut walker, &[7], &seen) == (Request::Enter { vehicle: 7, seat: 0 }) {
+                return (driver, walker, seen);
+            }
+        }
+        panic!("no seat request: {:?}", driver.phase());
+    }
+
+    #[test]
+    fn a_driver_drives_only_once_the_server_grants_its_seat() {
+        let (mut driver, mut walker, seen) = at_the_door(5);
+        assert!(matches!(driver.phase(), Phase::Driving { seated: false, .. }));
+        assert_eq!(driver.driving(), None);
+        // An answer about another seat or vehicle is not the one it waits for.
+        driver.answer(7, 1, SeatAnswer::Granted, &mut walker);
+        driver.answer(8, 0, SeatAnswer::Granted, &mut walker);
+        assert_eq!(driver.driving(), None);
+        driver.answer(7, 0, SeatAnswer::Granted, &mut walker);
+        assert_eq!(driver.driving(), Some(7));
+        assert_eq!(driver.step(0.05, &mut walker, &[7], &seen), Request::None);
+        assert_eq!(driver.driving(), Some(7));
+    }
+
+    #[test]
+    fn a_refused_seat_sends_the_driver_on_foot_without_a_leave_request() {
+        for refusal in [
+            SeatAnswer::NotAVehicle,
+            SeatAnswer::NoSuchSeat,
+            SeatAnswer::Taken,
+            SeatAnswer::Locked,
+            SeatAnswer::CannotReach,
+            SeatAnswer::AlreadySeated,
+        ] {
+            let (mut driver, mut walker, seen) = at_the_door(6);
+            driver.answer(7, 0, refusal, &mut walker);
+            assert!(matches!(driver.phase(), Phase::Walking { .. }), "{refusal:?}");
+            assert_eq!(driver.driving(), None);
+            // Not seated, so nothing to leave.
+            assert_eq!(driver.step(0.05, &mut walker, &[7], &seen), Request::None);
+        }
+    }
+
+    #[test]
+    fn a_driver_the_server_takes_out_of_its_seat_walks_on() {
+        let (mut driver, mut walker, seen) = at_the_door(7);
+        driver.answer(7, 0, SeatAnswer::Granted, &mut walker);
+        assert_eq!(driver.driving(), Some(7));
+        driver.answer(7, 0, SeatAnswer::Left, &mut walker);
+        assert!(matches!(driver.phase(), Phase::Walking { .. }));
+        assert_eq!(driver.step(0.05, &mut walker, &[7], &seen), Request::None);
+    }
+
+    #[test]
+    fn a_rider_keeps_its_passenger_seat_when_the_driver_seat_it_left_is_answered() {
+        // Driven until it leaves; half the time it parks and asks for the passenger seat of the same vehicle.
+        let mut rider = None;
+        for index in 8..64 {
+            let (mut d, mut w, s) = at_the_door(index);
+            d.answer(7, 0, SeatAnswer::Granted, &mut w);
+            let mut requests = Vec::new();
+            while requests.len() < 2 {
+                let request = d.step(1.0, &mut w, &[7], &s);
+                if request != Request::None {
+                    requests.push(request);
+                }
+            }
+            if requests == [Request::Leave, Request::Enter { vehicle: 7, seat: 1 }] {
+                rider = Some((d, w));
+                break;
+            }
+        }
+        let (mut rider, mut walker) = rider.expect("a bot that parks and rides");
+        // The answers come in order: the driver's seat it left, then the passenger seat.
+        rider.answer(7, 0, SeatAnswer::Left, &mut walker);
+        assert!(matches!(rider.phase(), Phase::Riding { seated: false, .. }));
+        rider.answer(7, 1, SeatAnswer::Granted, &mut walker);
+        assert!(matches!(rider.phase(), Phase::Riding { seated: true, .. }));
+        assert!(rider.holds());
+        assert_eq!(rider.driving(), None);
+        // Refused or taken out, the rider walks on.
+        rider.answer(7, 1, SeatAnswer::Left, &mut walker);
+        assert!(matches!(rider.phase(), Phase::Walking { .. }));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use sawgrass_protocol::EntityState;
 use sawgrass_protocol::combat::Shot;
 use sawgrass_protocol::delta::{Baseline, Reassembler, baseline_age, decode_delta, decode_delta_with_info};
 use sawgrass_protocol::entity::Info;
-use sawgrass_protocol::game::{ClientEvent, ClientState, OwnedState, PayResult, ServerEvent};
+use sawgrass_protocol::game::{ClientEvent, ClientState, OwnedState, PayResult, SeatAnswer, ServerEvent};
 use sawgrass_protocol::ped::{Motion, PedBlock};
 use sawgrass_protocol::vehicle::VehicleBlock;
 use sawgrass_protocol::{PROTOCOL_VERSION, PacketHeader, PacketKind, Position, Rotation, Velocity};
@@ -74,12 +74,14 @@ pub struct BotConfig {
 /// server's rewind of 500 ms.
 const FRESH: Duration = Duration::from_millis(150);
 
-/// What a driving or shooting bot's tasks share: the vehicles the server says it owns, with their epochs, and
-/// the latest snapshot it decoded, with when it arrived; for a shooter with an aim delay, the snapshots before it
-/// back to the render time, `keep` of them; and the server's tick rate.
+/// What a driving or shooting bot's tasks share: the vehicles the server says it owns, with their epochs; the
+/// server's seat answers the driver has not read yet, in order; the latest snapshot it decoded, with when it
+/// arrived; for a shooter with an aim delay, the snapshots before it back to the render time, `keep` of them; and
+/// the server's tick rate.
 #[derive(Debug, Default)]
 struct Shared {
     owned: Mutex<Vec<(u32, u8)>>,
+    seats: Mutex<Vec<(u32, u8, SeatAnswer)>>,
     seen: Mutex<(Option<Instant>, Seen)>,
     past: Mutex<VecDeque<Seen>>,
     keep: usize,
@@ -195,6 +197,21 @@ pub async fn run(
                         *slot = Some(stats);
                     }
                 }
+                Ok(ServerEvent::Seat {
+                    vehicle,
+                    seat,
+                    answer,
+                }) => {
+                    let counter = match answer {
+                        SeatAnswer::Granted => &events_counters.seats_granted,
+                        SeatAnswer::Left => &events_counters.seats_left,
+                        _ => &events_counters.seats_refused,
+                    };
+                    Counters::add(counter, 1);
+                    if let Ok(mut seats) = events_shared.seats.lock() {
+                        seats.push((vehicle, seat, answer));
+                    }
+                }
                 Ok(ServerEvent::Ownership { entity, epoch, yours }) => {
                     if let Ok(mut owned) = events_shared.owned.lock() {
                         owned.retain(|(id, _)| *id != entity);
@@ -305,6 +322,12 @@ async fn send_states(
         }
         let mut vehicle = None;
         if let Some(driver) = driver.as_mut() {
+            // The answers to its earlier requests first, so it drives only a seat the server granted.
+            if let Ok(mut seats) = shared.seats.lock() {
+                for (vehicle, seat, answer) in seats.drain(..) {
+                    driver.answer(vehicle, seat, answer, &mut walker);
+                }
+            }
             let ids: Vec<u32> = owned.iter().map(|(id, _)| *id).collect();
             let event = match driver.step(dt, &mut walker, &ids, &seen) {
                 Request::None => None,
