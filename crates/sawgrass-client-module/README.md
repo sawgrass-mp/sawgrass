@@ -12,7 +12,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 | Part | Where | State |
 |---|---|---|
 | Runtime boundary, build identity | `runtime.rs` | done |
-| VIctory adapter | `victory.rs` | stub: reports the missing upstream module-loading and hook API |
+| VIctory adapter | `victory.rs` | done against the mod loader's ABI 1 (a local VIctory branch, proposed upstream): loads, reads the tables, hooks, counts frames; the build's `GameApi` and hook detours wait for the game's functions |
 | Functions located by pattern, per game build | `pattern.rs`, `table.rs` | done; tables live outside the repository |
 | Hook points and their events, an event queue that hooks may push into from any thread | `hooks.rs` | done |
 | `GameApi`: every change the module makes to the game, handles with generations | `game.rs` | trait and fake done; the real one waits for the game |
@@ -31,7 +31,8 @@ the real server over loopback and each shows the other player's ped where that p
 None of this can be in the repository; it comes from a maintainer with the game:
 
 1. A VIctory build that loads the module and installs hooks: the upstream API from ADR 0004, or a local build of
-   VIctory until it lands. `VictoryRuntime` is written against it.
+   VIctory until it lands. `VictoryRuntime` is written against the local mod loader's ABI 1; see "Running under
+   VIctory" below.
 2. A function table for the exact game build. Four entries are enough to start, `module::REQUIRED_FUNCTIONS`:
    `frame` (hooked once a frame), `local_player` (where the local player's ped is kept), `ped_spawn` (creates a
    ped) and `entity_set_pose` (puts an entity at a position). A runtime that calls the module once a frame by
@@ -48,6 +49,21 @@ None of this can be in the repository; it comes from a maintainer with the game:
 
 Then the real `GameApi` and the hooks' argument reading are written per build, and the milestone is two players who
 see each other in the game.
+
+## Running under VIctory
+
+Build the module (`cargo build --release -p sawgrass-client-module` on Windows gives `sawgrass_client_module.dll`;
+the Windows build is not checked by CI yet, and the first run in the game is still to come) and start the game with
+three variables set:
+
+- `VICTORY_MODS`: the path of that DLL, for VIctory's mod loader.
+- `SAWGRASS_FUNCTION_TABLE` and `SAWGRASS_ASSET_TABLE`: the paths of the two tables on this machine.
+
+VIctory's log then shows `sawgrass: running build victory/<version>/<hash>` (the key for the tables' `build`
+lines), `sawgrass: started, N functions located`, one `off until found` line per optional function the table does
+not locate yet, and `sawgrass: N frames` every 600 frames. A table for another build, or a required entry missing,
+shows `sawgrass: not started` with the reason, and nothing is hooked. Take patterns from the running process, not
+from the executable file: VIctory rewrites code before the module sees it.
 
 ## Table formats
 
