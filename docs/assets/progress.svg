@@ -15,7 +15,7 @@
 <rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="103.5" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
 <text x="138.2" y="170" class="l" text-anchor="middle">2. Prototype</text>
-<text x="138.2" y="186" class="n" text-anchor="middle">44 of 44 done</text>
+<text x="138.2" y="186" class="n" text-anchor="middle">43 of 43 done</text>
 <text x="138.2" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
 <rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <rect x="178.9" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
@@ -49,10 +49,10 @@
 <text x="590.9" y="170" class="l" text-anchor="middle">8. Roleplay</text>
 <text x="590.9" y="186" class="w" text-anchor="middle">waiting</text>
 <text x="590.9" y="202" class="d" fill="#f5d547" text-anchor="middle">medium</text>
-<rect x="631.6" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
+<rect x="632.1" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
 <rect x="631.6" y="132" width="69.5" height="18" rx="5" fill="url(#g)"/>
 <text x="666.4" y="170" class="l" text-anchor="middle">9. Sync</text>
-<text x="666.4" y="186" class="n" text-anchor="middle">11 of 11 done</text>
+<text x="666.4" y="186" class="w" text-anchor="middle">server ready</text>
 <text x="666.4" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
 <rect x="707.1" y="132" width="69.5" height="18" rx="5" fill="#13201b"/>
 <text x="741.8" y="170" class="l" text-anchor="middle">10. Launcher</text>
