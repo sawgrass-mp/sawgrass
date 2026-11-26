@@ -1212,13 +1212,21 @@ impl Players {
         Ok(())
     }
 
-    /// Takes the player in slot `player` out of its seat, if it sits in one, and starts its movement checks from
-    /// where the vehicle is, so its first state outside is checked from there.
-    /// Tells the player it left (NET-21); returns whether it sat anywhere.
+    /// Takes the player in slot `player` out of its seat, as [`Players::take_out_of_seat`] does, and tells it it
+    /// left (NET-21); returns whether it sat anywhere.
     fn leave_seat(&mut self, player: u32) -> bool {
-        let Some((vehicle, seat)) = self.seats.leave(player) else {
+        let Some((vehicle, seat)) = self.take_out_of_seat(player) else {
             return false;
         };
+        self.tell_seat(player, vehicle, seat, SeatAnswer::Left);
+        true
+    }
+
+    /// Takes the player in slot `player` out of its seat, if it sits in one, and starts its movement checks from
+    /// where the vehicle is, so its first state outside is checked from there. Returns the vehicle's entity id
+    /// and the seat, telling nobody: a player that disconnects is not sent an answer.
+    fn take_out_of_seat(&mut self, player: u32) -> Option<(u32, u8)> {
+        let (vehicle, seat) = self.seats.leave(player)?;
         if seat == 0 {
             self.ownership.set_driver(vehicle, None);
         }
@@ -1229,8 +1237,7 @@ impl Players {
             .copied()
             .flatten()
             .map_or(0, |s| s.id);
-        self.tell_seat(player, id, seat, SeatAnswer::Left);
-        true
+        Some((id, seat))
     }
 
     /// Sends the player in slot `player` a [`ServerEvent::Seat`]; one that finds its queue full is counted.
@@ -1554,7 +1561,8 @@ impl Players {
                     let Some(slot) = self.by_connection.remove(&id) else {
                         continue;
                     };
-                    self.leave_seat(slot.index);
+                    // Its queue is closing: an answer would only be counted as lost.
+                    self.take_out_of_seat(slot.index);
                     if let Some(money) = &self.money {
                         money.unregister(slot.wire_id());
                     }

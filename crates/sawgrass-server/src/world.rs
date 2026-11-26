@@ -67,13 +67,26 @@ impl WorldState {
         self.transition = transition;
     }
 
-    /// The clock and the weather as of `tick`.
+    /// The clock and the weather as of `tick`. The wire carries whole minutes, so the event is stamped with the
+    /// latest tick at or before `tick` at which the clock had just reached that minute (SRV-25). A client clock
+    /// run from it is then behind the server's by less than one tick's worth, instead of by the cut fraction of a
+    /// minute. Within the first minute after [`WorldState::set_clock`] the stamp can go no earlier than the
+    /// setting, so a clock set to a fractional minute shows the whole one until the next.
     #[must_use]
     pub fn environment(&self, tick: u32, dt: Duration) -> Environment {
+        let minute = self.minute_at(tick, dt);
+        let whole = minute.floor();
+        let stamp = if self.rate > 0.0 {
+            // Ticks since the minute began, rounded down so the stamp is never before it.
+            let back = ((minute - whole) / self.rate / dt.as_secs_f64().max(1e-9)).floor() as u32;
+            tick.saturating_sub(back).max(self.since.min(tick))
+        } else {
+            tick
+        };
         // Below MINUTES_PER_DAY and within u16 after the wrap and the clamp above.
         Environment {
-            tick,
-            minute: (self.minute_at(tick, dt) as u16).min(MINUTES_PER_DAY - 1),
+            tick: stamp,
+            minute: (whole as u16).min(MINUTES_PER_DAY - 1),
             rate: (self.rate * 100.0).round() as u16,
             weather: self.weather,
             next_weather: self.next_weather,
@@ -120,6 +133,35 @@ mod tests {
         assert_eq!((e.tick, e.minute, e.rate), (120, 1, 200));
         world.set_clock(120, 600.0, 0.0);
         assert_eq!(world.environment(10_000, DT).minute, 600);
+    }
+
+    #[test]
+    fn the_stamp_is_the_tick_the_whole_minute_began() {
+        let mut world = WorldState::default();
+        world.set_clock(100, 600.0, 2.0);
+        // 25 ticks on, the clock shows 602.5: minute 602 began 5 ticks earlier.
+        let e = world.environment(125, DT);
+        assert_eq!((e.tick, e.minute), (120, 602));
+        // A client clock run from any resend is never ahead, and behind by less than one tick's worth.
+        let day = f64::from(MINUTES_PER_DAY);
+        for tick in 100..2000 {
+            let e = world.environment(tick, DT);
+            assert!(e.tick <= tick);
+            let client = f64::from(e.minute) + f64::from(tick - e.tick) * DT.as_secs_f64() * 2.0;
+            let behind = (world.minute_at(tick, DT) - client).rem_euclid(day);
+            assert!(
+                behind < 2.0 * DT.as_secs_f64() + 1e-6,
+                "tick {tick}: behind by {behind}"
+            );
+        }
+        // Across midnight: 1439.5 plus a game minute is 0.5, and minute 0 began 5 ticks earlier.
+        world.set_clock(0, 1439.5, 2.0);
+        let e = world.environment(10, DT);
+        assert_eq!((e.tick, e.minute), (5, 0));
+        // A stopped clock is stamped when it is sent.
+        world.set_clock(0, 600.5, 0.0);
+        let e = world.environment(300, DT);
+        assert_eq!((e.tick, e.minute), (300, 600));
     }
 
     #[test]
