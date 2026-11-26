@@ -11,7 +11,7 @@ use sawgrass_client_module::connection::{ConnectConfig, Connection, Status};
 use sawgrass_client_module::fake::FakeRuntime;
 use sawgrass_client_module::game::{EntityKind, FakeGame, GameAsset, Pose};
 use sawgrass_client_module::link::NetLink;
-use sawgrass_client_module::module::{Module, required_functions};
+use sawgrass_client_module::module::{Module, all_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::FunctionTable;
 use sawgrass_gateway::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -39,7 +39,7 @@ fn module() -> Module<FakeRuntime> {
         title_version: "1.0.0".into(),
         image_digest: "00ff".into(),
     };
-    let names = required_functions();
+    let names = all_functions();
     let mut image = vec![0u8; 0x10 * names.len()];
     let mut table = format!("build = {BUILD_KEY}\n");
     for (i, name) in names.iter().enumerate() {

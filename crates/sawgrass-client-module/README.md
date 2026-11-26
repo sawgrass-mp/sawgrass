@@ -33,10 +33,14 @@ None of this can be in the repository; it comes from a maintainer with the game:
 
 1. A VIctory build that loads the module and installs hooks: the upstream API from ADR 0004, or a local build of
    VIctory until it lands. `VictoryRuntime` is written against it.
-2. A function table for the exact game build: one pattern for each function `module::required_functions()` lists
-   (the frame, creation and removal of peds, vehicles and objects, input, camera, streaming, weapon fire, seat
-   enter and leave, five single-player switches). The module refuses to start without it, and refuses a table for
-   another build.
+2. A function table for the exact game build. Four entries are enough to start, `module::REQUIRED_FUNCTIONS`:
+   `frame` (hooked once a frame), `local_player` (where the local player's ped is kept), `ped_spawn` (creates a
+   ped) and `entity_set_pose` (puts an entity at a position). A runtime that calls the module once a frame by
+   itself, as VIctory's loader does, makes `frame` unneeded. The module refuses to start without them, and refuses a
+   table for another build. Every other entry (`module::optional_functions()`: creation and removal of peds,
+   vehicles and objects, input, camera, streaming, weapon fire, seat enter and leave, the five single-player
+   switches) is used when it is there and switches its feature off when it is not, as does a hook the runtime
+   refuses; `Module::missing_functions` and `Module::refused_hooks` list what is still to find.
 3. An asset table for that build, with at least the `ped` line (the model players are shown with) and one vehicle,
    plus each weapon the server's resources allow (a shot with a weapon missing from it is not reported) and a line
    for each weather and each door they name (ADR 0006, assumption A4).
@@ -51,10 +55,14 @@ see each other in the game.
 Function table:
 
 ```text
-build = victory/1.0.0/0123abcd
+build = victory/1.0.2.1/0123abcd
 ped_create = 0A ?? 0C 0D
 vehicle_create = 1A 1B ?? ?? ?? ?? ; offset=2 ; rel32=1,5
+local_player = @0x2A41F80      # an offset from the image base, as a debugger shows it
 ```
+
+An `@` entry holds only for the build on the `build` line; a pattern usually survives a small patch, so an offset
+found first is best replaced by a pattern once one is known.
 
 Asset table:
 

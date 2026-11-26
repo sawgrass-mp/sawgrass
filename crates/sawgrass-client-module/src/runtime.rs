@@ -107,4 +107,9 @@ pub trait Runtime {
     fn code_image(&self) -> Result<CodeImage<'_>, RuntimeError>;
     fn install_hook(&mut self, request: HookRequest) -> Result<HookHandle, RuntimeError>;
     fn remove_hook(&mut self, handle: HookHandle) -> Result<(), RuntimeError>;
+    /// Whether the runtime calls the module once a frame by itself, as VIctory's frame callback does. Then the
+    /// module needs no `frame` entry in its table and hooks no frame function.
+    fn drives_frames(&self) -> bool {
+        false
+    }
 }
