@@ -33,8 +33,9 @@ pub use quant::{Position, Rotation, Velocity};
 /// players ([`game::ClientEvent::Pay`], [`game::ServerEvent::Paid`]). Version 10 adds the shot report
 /// ([`game::ClientEvent::Shot`], [`combat`]). Version 11 adds the seat requests
 /// ([`game::ClientEvent::EnterSeat`], [`game::ClientEvent::LeaveSeat`]). Version 12 adds the world state events
-/// ([`world`]). Version 13 answers seat requests ([`game::ServerEvent::Seat`]).
-pub const PROTOCOL_VERSION: u32 = 13;
+/// ([`world`]). Version 13 answers seat requests ([`game::ServerEvent::Seat`]). Version 14 gives a shot the
+/// client's render time between two snapshot ticks ([`combat::Shot::frac`]).
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// Whether a peer speaking `theirs` can talk to one speaking [`PROTOCOL_VERSION`].
 ///

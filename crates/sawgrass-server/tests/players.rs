@@ -1623,7 +1623,7 @@ fn a_checked_hit_damages_and_kills() {
     assert_eq!(b_ped(&players).health, 75);
     // A weapon A does not hold, a tick past the rewind limit, and a shot from 10 m off where A is: refused whole.
     fire(&mut tick_loop, AssetId(8), 1, 10.0, 20.0, Zone::Torso, 1);
-    fire(&mut tick_loop, gun, 10, 10.0, 20.0, Zone::Torso, 1);
+    fire(&mut tick_loop, gun, 11, 10.0, 20.0, Zone::Torso, 1);
     fire(&mut tick_loop, gun, 1, 0.0, 20.0, Zone::Torso, 1);
     assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), 3);
     // More hits than the weapon has pellets: sixteen head hits from one pull of the trigger are refused whole.
@@ -1652,4 +1652,155 @@ fn a_checked_hit_damages_and_kills() {
         tick_loop.run_tick();
     }
     assert_eq!(b_ped(&players).motion, Motion::Dead);
+}
+
+/// NET-22, ADR 0006 section 5: a client aims at targets where it draws them, interpolated between two snapshot
+/// ticks some ticks behind the newest. The server checks a hit there, so an honest hit on a fast target passes;
+/// the same hit checked at the shot's tick alone, or at the newest tick, is refused, and so is a shot past the
+/// rewind cap.
+#[test]
+fn a_hit_on_a_moving_target_is_checked_where_the_client_drew_it() {
+    use sawgrass_protocol::combat::{Hit, Shot, Zone};
+    use sawgrass_protocol::entity::AssetId;
+    use sawgrass_protocol::game::ClientEvent;
+    use sawgrass_protocol::ped::PedBlock;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (addr, roots, players) = {
+        let _guard = runtime.enter();
+        let (gateway, roots) = gateway();
+        let addr = gateway.local_addr().expect("addr");
+        (addr, roots, net::listen(gateway, ListenConfig::default()))
+    };
+    let traffic = players.traffic();
+    let players = Arc::new(Mutex::new(players));
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    let system = players.clone();
+    tick_loop.add_system("net", move |world, info| {
+        system.lock().expect("players").run_tick(world, info);
+    });
+    let join = |tick_loop: &mut TickLoop| {
+        let mut session = runtime
+            .block_on(connect(addr, "localhost", roots.clone(), PROTOCOL_VERSION))
+            .expect("connects");
+        let id = std::thread::scope(|scope| {
+            let id = scope.spawn(|| runtime.block_on(joined(&mut session)));
+            tick_until(tick_loop, |_| id.is_finished());
+            id.join().expect("joined")
+        });
+        (session, id)
+    };
+    let (mut a, _) = join(&mut tick_loop);
+    let (b, id_b) = join(&mut tick_loop);
+    let at = |x: f32| Position::from_metres([x, 5.0, 30.0]).expect("position");
+    let gun = AssetId(9);
+    let send = |session: &Session, x: f32, weapon: AssetId| {
+        let state = ClientState {
+            position: at(x),
+            velocity: Velocity::from_metres_per_second([0.0; 3]).expect("velocity"),
+            rotation: Rotation::from_quaternion([0.0, 0.0, 0.0, 1.0]).expect("rotation"),
+        };
+        let mut packet = vec![0; PacketHeader::SIZE];
+        PacketHeader {
+            kind: PacketKind::ClientState,
+            sequence: 0,
+            tick: 0,
+        }
+        .encode(&mut packet)
+        .expect("header");
+        let ped = PedBlock {
+            weapon,
+            ..PedBlock::default()
+        };
+        state.encode_with_ped(&ped, &mut packet).expect("state");
+        session.send_datagram(Bytes::from(packet)).expect("send");
+    };
+    fn lock(players: &Mutex<net::Players>) -> std::sync::MutexGuard<'_, net::Players> {
+        players.lock().expect("players")
+    }
+    send(&a, 10.0, gun);
+    send(&b, 20.0, AssetId::NONE);
+    assert!(tick_until(&mut tick_loop, |_| lock(&players)
+        .entity(id_b)
+        .is_some_and(|(_, s)| s.position.to_metres()[0] == 20.0)));
+    // B runs back and forth at 120 m/s (6 m a tick, within the movement rules' 150 m/s), and where the server
+    // had it is noted after every tick.
+    let mut seen_at: HashMap<u32, f32> = HashMap::new();
+    let mut k = 0u32;
+    let mut step = |tick_loop: &mut TickLoop, seen_at: &mut HashMap<u32, f32>| {
+        k += 1;
+        let leg = k % 30;
+        let x = 20.0 + 6.0 * if leg < 15 { leg as f32 } else { (30 - leg) as f32 };
+        send(&b, x, AssetId::NONE);
+        // Paced like real ticks, so the movement checks see 120 m/s.
+        std::thread::sleep(Duration::from_millis(50));
+        tick_loop.run_tick();
+        let players = lock(&players);
+        if let Some((_, s)) = players.entity(id_b) {
+            seen_at.insert(players.tick(), s.position.to_metres()[0]);
+        }
+    };
+    for _ in 0..30 {
+        step(&mut tick_loop, &mut seen_at);
+    }
+    // Fires at B where a client 4 ticks behind the newest, halfway to the next tick, draws it; `tick` and `frac`
+    // say what the shot names, `point` where it aims.
+    let mut fire =
+        |tick_loop: &mut TickLoop, seen_at: &mut HashMap<u32, f32>, named: &dyn Fn(u32, u32) -> (u32, u8)| {
+            // Past the fire interval, with B still running.
+            for _ in 0..2 {
+                step(tick_loop, seen_at);
+            }
+            let newest = lock(&players).tick();
+            let render = (newest - 6..newest - 3)
+                .find(|t| match (seen_at.get(t), seen_at.get(&(t + 1))) {
+                    (Some(a), Some(b)) => (b - a).abs() >= 5.0,
+                    _ => false,
+                })
+                .expect("B moved between two recent ticks");
+            let drawn = (seen_at[&render] + seen_at[&(render + 1)]) / 2.0;
+            let (tick, frac) = named(render, newest);
+            let mut shot = Shot::new(tick, gun, at(10.0));
+            shot.frac = frac;
+            assert!(shot.push(Hit {
+                target: id_b,
+                zone: Zone::Torso,
+                point: at(drawn),
+            }));
+            let mut packet = vec![0; PacketHeader::SIZE];
+            PacketHeader {
+                kind: PacketKind::Event,
+                sequence: 0,
+                tick: 0,
+            }
+            .encode(&mut packet)
+            .expect("header");
+            ClientEvent::Shot(Box::new(shot)).encode(&mut packet);
+            let seen = traffic.shots_received.load(Ordering::Relaxed) + 1;
+            runtime.block_on(a.send_event(&packet)).expect("send");
+            assert!(wait_for(&traffic.shots_received, seen, || {
+                step(tick_loop, seen_at);
+            }));
+            step(tick_loop, seen_at);
+        };
+    // At the render time, between two ticks: accepted.
+    fire(&mut tick_loop, &mut seen_at, &|render, _| (render, 128));
+    assert_eq!(traffic.hits_accepted.load(Ordering::Relaxed), 1);
+    // The same aim, named at the render tick alone: 3 m from where B was, refused.
+    let refused = traffic.hits_refused.load(Ordering::Relaxed);
+    fire(&mut tick_loop, &mut seen_at, &|render, _| (render, 0));
+    assert_eq!(traffic.hits_refused.load(Ordering::Relaxed), refused + 1);
+    // Named at the newest tick, as before NET-22: refused.
+    fire(&mut tick_loop, &mut seen_at, &|_, newest| (newest, 0));
+    assert_eq!(traffic.hits_refused.load(Ordering::Relaxed), refused + 2);
+    // Past the rewind cap of 500 ms (10 ticks): the shot is refused whole.
+    let shots_refused = traffic.shots_refused.load(Ordering::Relaxed);
+    fire(&mut tick_loop, &mut seen_at, &|_, newest| (newest - 11, 128));
+    assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), shots_refused + 1);
+    // The last tick there is, with a fraction toward one past it: refused whole, and the tick loop runs on.
+    fire(&mut tick_loop, &mut seen_at, &|_, _| (u32::MAX, 1));
+    assert_eq!(traffic.shots_refused.load(Ordering::Relaxed), shots_refused + 2);
+    assert_eq!(traffic.hits_accepted.load(Ordering::Relaxed), 1);
 }

@@ -610,6 +610,7 @@ mod game_payloads {
         use crate::entity::AssetId;
         let at = |x: f32| Position::from_metres([x, 2.0, 3.0]).expect("position");
         let mut shot = Shot::new(77, AssetId(9), at(1.0));
+        shot.frac = 200;
         for (i, zone) in [Zone::Head, Zone::Torso, Zone::Arm, Zone::Leg, Zone::Other]
             .into_iter()
             .cycle()
@@ -625,7 +626,8 @@ mod game_payloads {
         assert!(!shot.push(Hit::default()));
         let mut out = Vec::new();
         ClientEvent::Shot(Box::new(shot)).encode(&mut out);
-        assert_eq!(out.len(), 1 + 4 + 4 + 9 + 1 + MAX_HITS * 14);
+        assert_eq!(out.len(), 1 + 4 + 1 + 4 + 9 + 1 + MAX_HITS * 14);
+        assert_eq!(out[5], 200);
         assert_eq!(ClientEvent::decode(&out), Ok(ClientEvent::Shot(Box::new(shot))));
         for cut in [1, 10, out.len() - 1] {
             assert_eq!(
@@ -635,10 +637,10 @@ mod game_payloads {
             );
         }
         let mut more = out.clone();
-        more[18] = MAX_HITS as u8 + 1;
+        more[19] = MAX_HITS as u8 + 1;
         assert_eq!(ClientEvent::decode(&more), Err(DecodeError::OutOfRange));
         let mut bad_zone = out.clone();
-        bad_zone[19 + 4] = 5;
+        bad_zone[20 + 4] = 5;
         assert_eq!(ClientEvent::decode(&bad_zone), Err(DecodeError::OutOfRange));
         let mut empty = Vec::new();
         ClientEvent::Shot(Box::new(Shot::new(1, AssetId(9), at(0.0)))).encode(&mut empty);
