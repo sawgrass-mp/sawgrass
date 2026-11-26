@@ -39,7 +39,9 @@ pub enum HookPoint {
     ///
     /// ASSUMPTION: for the local player the adapter refuses the game's own entry (it does not call the original),
     /// since the server decides who sits where; the module seats the player when the server grants it. Other
-    /// peds are seated by the module only.
+    /// peds are seated by the module only. If [`GameApi::enter_seat`](crate::game::GameApi::enter_seat) goes
+    /// through the hooked function, the detour lets the module's own call through, or a grant would be refused by
+    /// the module's own hook.
     SeatEnter,
     /// Where a ped leaves a vehicle seat, by itself or thrown out by the vehicle's physics, reported as
     /// [`GameEvent::SeatLeft`]. The game goes ahead: the server always grants leaving.

@@ -95,7 +95,9 @@ ped = 0x2000      # the ped model for players and peds with no model
 - The game has no generation for its entity handles; the adapter counts them (`game::Generations`).
 - Each single-player system is switched off by one game function.
 - The enter-seat hook can keep the game from seating the local player, so that the server decides; the module
-  then seats it with `GameApi::enter_seat` on the server's grant.
+  then seats it with `GameApi::enter_seat` on the server's grant. The detour must let that call through. Only one
+  seat request waits for the server at a time, so a game that calls the entry function every frame does not flood
+  the server.
 - One game function resolves a pull of the trigger with all of its hits, a shotgun's pellets included.
 - Until the game's ped and vehicle state is read, the player is sent as a standing ped holding the weapon
   `GameApi::held_weapon` reports, and an owned entity's block is sent back as the server last sent it. The server

@@ -7,7 +7,7 @@ use sawgrass_client_module::game::{
     DoorState, EntityKind, FakeGame, GameApi, GameAsset, GameHandle, GameHit, GameShot, Pose, WeatherState,
 };
 use sawgrass_client_module::hooks::GameEvent;
-use sawgrass_client_module::link::{MAX_QUEUED, NetLink};
+use sawgrass_client_module::link::{MAX_QUEUED, NetLink, SEAT_REQUEST_TIMEOUT};
 use sawgrass_client_module::module::{Module, all_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::FunctionTable;
@@ -769,4 +769,68 @@ fn the_server_decides_the_local_players_seat() {
     frames(1, &mut module, &mut game, &mut link);
     assert!(sent.take().is_empty());
     assert_eq!(link.world_errors, 0);
+}
+
+#[test]
+fn one_seat_request_waits_for_the_server_at_a_time() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    let (inbox, events, sent) = (link.inbox(), link.events(), link.client_events());
+    let mut encoder = DeltaEncoder::default();
+    let mut tick = 0;
+    let mut frames = |n: u32, module: &mut Module<FakeRuntime>, game: &mut FakeGame, link: &mut NetLink| {
+        for _ in 0..n {
+            for d in snapshot(&mut encoder, tick, &[state(1, 2.0), state(LOCAL, 0.0)]) {
+                inbox.push(d);
+            }
+            tick += 1;
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+        }
+    };
+    frames(10, &mut module, &mut game, &mut link);
+    let car = module.entities().handle(1).expect("shown");
+    let hooks = module.event_sink();
+    let request = GameEvent::SeatRequested {
+        ped: me,
+        vehicle: car,
+        seat: 0,
+    };
+    let enter = ClientEvent::EnterSeat { vehicle: 1, seat: 0 };
+
+    // The game asks every frame for a second while the key is held: one request goes.
+    for _ in 0..60 {
+        hooks.push(request.clone());
+        frames(1, &mut module, &mut game, &mut link);
+    }
+    assert_eq!(sent.take(), vec![enter.clone()]);
+    assert_eq!(link.seat_requests_held, 59);
+
+    // The answer frees the next request.
+    events.push(ServerEvent::Seat {
+        vehicle: 1,
+        seat: 0,
+        answer: SeatAnswer::Taken,
+    });
+    frames(1, &mut module, &mut game, &mut link);
+    hooks.push(request.clone());
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(sent.take(), vec![enter.clone()]);
+
+    // An answer that never comes, as when the server's budget dropped the request, holds the next one only until
+    // the timeout.
+    let overdue = (SEAT_REQUEST_TIMEOUT * f64::from(FRAME_HZ)) as u32 + 1;
+    frames(overdue, &mut module, &mut game, &mut link);
+    hooks.push(request);
+    frames(1, &mut module, &mut game, &mut link);
+    assert_eq!(sent.take(), vec![enter]);
 }
