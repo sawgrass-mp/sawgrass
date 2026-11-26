@@ -150,6 +150,28 @@ impl fmt::Display for GameError {
 
 impl std::error::Error for GameError {}
 
+pub use sawgrass_protocol::combat::Zone;
+
+/// One hit of a shot, as the game resolved it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GameHit {
+    pub target: GameHandle,
+    /// Where on a ped; [`Zone::Other`] for anything else.
+    pub zone: Zone,
+    pub point: [f32; 3],
+}
+
+/// One pull of a trigger, as the fire hook saw it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GameShot {
+    pub shooter: GameHandle,
+    pub weapon: GameAsset,
+    /// Where the shooter was.
+    pub from: [f32; 3],
+    /// What it hit, in the order the game resolved them; empty for a miss.
+    pub hits: Vec<GameHit>,
+}
+
 /// Every change the module makes to the game.
 pub trait GameApi {
     fn spawn(&mut self, kind: EntityKind, asset: GameAsset, pose: Pose) -> Result<GameHandle, GameError>;
@@ -158,6 +180,8 @@ pub trait GameApi {
     fn set_pose(&mut self, handle: GameHandle, pose: Pose) -> Result<(), GameError>;
     /// The local player's ped, once the game has one.
     fn local_player(&self) -> Option<GameHandle>;
+    /// The weapon in a ped's hand; `None` unarmed or for no such ped.
+    fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset>;
     /// Keeps the world loaded around these points, the positions of remote players, besides the camera.
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]);
     fn disable(&mut self, system: SinglePlayerSystem) -> Result<(), GameError>;
@@ -195,6 +219,8 @@ pub struct FakeGame {
     pub local_player: Option<GameHandle>,
     pub streaming_focus: Vec<[f32; 3]>,
     pub disabled: Vec<SinglePlayerSystem>,
+    /// The weapon in each armed ped's hand.
+    pub weapons: BTreeMap<GameHandle, GameAsset>,
     /// The minute of the day last set.
     pub clock: Option<f32>,
     pub weather: Option<WeatherState>,
@@ -246,6 +272,13 @@ impl GameApi for FakeGame {
 
     fn local_player(&self) -> Option<GameHandle> {
         self.local_player
+    }
+
+    fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset> {
+        self.entities
+            .contains_key(&ped)
+            .then(|| self.weapons.get(&ped).copied())
+            .flatten()
     }
 
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {

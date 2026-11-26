@@ -3,15 +3,19 @@
 
 use sawgrass_client_module::assets::{AssetId, AssetTable};
 use sawgrass_client_module::fake::FakeRuntime;
-use sawgrass_client_module::game::{DoorState, EntityKind, FakeGame, GameApi, GameAsset, Pose, WeatherState};
+use sawgrass_client_module::game::{
+    DoorState, EntityKind, FakeGame, GameApi, GameAsset, GameHandle, GameHit, GameShot, Pose, WeatherState,
+};
+use sawgrass_client_module::hooks::GameEvent;
 use sawgrass_client_module::link::{MAX_QUEUED, NetLink};
 use sawgrass_client_module::module::{Module, all_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::FunctionTable;
 use sawgrass_netcode::{Client, ClientConfig};
+use sawgrass_protocol::combat::Zone;
 use sawgrass_protocol::delta::{DeltaEncoder, fragments};
 use sawgrass_protocol::entity::{EntityKind as NetKind, Info};
-use sawgrass_protocol::game::{ClientState, OwnedState, ServerEvent};
+use sawgrass_protocol::game::{ClientEvent, ClientState, OwnedState, ServerEvent};
 use sawgrass_protocol::world::{Door, Environment};
 use sawgrass_protocol::{EntityState, PacketHeader, PacketKind, Position, Rotation, Velocity};
 
@@ -35,7 +39,7 @@ fn module() -> Module<FakeRuntime> {
     }
     let functions = FunctionTable::parse(&table).expect("functions");
     let assets = AssetTable::parse(&format!(
-        "build = {BUILD_KEY}\n5 = 0xCA\n6 = 0xCB\n7 = 0xD0\n8 = 0xD1\n"
+        "build = {BUILD_KEY}\n5 = 0xCA\n6 = 0xCB\n7 = 0xD0\n8 = 0xD1\n9 = 0xE0\n"
     ))
     .expect("assets");
     let Ok(module) = Module::start(FakeRuntime::new(build, 0x4000, image), &functions, assets) else {
@@ -496,6 +500,96 @@ fn a_second_join_starts_the_session_over() {
     );
     assert!(game.entities.contains_key(&me), "the local player stays");
     assert_eq!(link.world_errors, 0);
+}
+
+#[test]
+fn the_local_players_shots_and_weapon_go_to_the_server() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    game.weapons.insert(me, GameAsset(0xE0));
+    let stranger = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [3.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    let (inbox, sent) = (link.inbox(), link.client_events());
+    let mut encoder = DeltaEncoder::default();
+    for frame in 0..30u32 {
+        if frame % 3 == 0 {
+            for d in snapshot(&mut encoder, frame / 3, &[state(1, 2.0), state(LOCAL, 0.0)]) {
+                inbox.push(d);
+            }
+        }
+        module.frame(1.0 / FRAME_HZ, &mut game, &mut link).expect("frame");
+    }
+    // The weapon in hand goes with the player's state, as the server checks shots against it.
+    let datagrams = link.outbox().take();
+    let mut owned = Vec::new();
+    let (_, ped) =
+        ClientState::decode_with_owned(&datagrams.last().expect("sent")[PacketHeader::SIZE..], &mut owned)
+            .expect("decodes");
+    assert_eq!(ped.map(|p| p.weapon), Some(AssetId(9)));
+
+    let car = module.entities().handle(1).expect("shown");
+    let shot = |shooter: GameHandle, weapon: u64| {
+        GameEvent::Shot(GameShot {
+            shooter,
+            weapon: GameAsset(weapon),
+            from: [0.0, 5.0, 31.0],
+            hits: vec![
+                GameHit {
+                    target: car,
+                    zone: Zone::Other,
+                    point: [2.0, 0.5, 30.5],
+                },
+                // A ped the server does not know of is left out.
+                GameHit {
+                    target: stranger,
+                    zone: Zone::Head,
+                    point: [3.0, 5.0, 31.5],
+                },
+            ],
+        })
+    };
+    // The player fires at what the last frame drew: that frame's render time.
+    let render = link.client().expect("joined").render_tick().expect("drawn");
+    let hooks = module.event_sink();
+    hooks.push(shot(me, 0xE0));
+    // Another ped's shot is not this client's to report, and one with a weapon the table does not know is dropped.
+    hooks.push(shot(stranger, 0xE0));
+    hooks.push(shot(me, 0xEE));
+    module.frame(1.0 / FRAME_HZ, &mut game, &mut link).expect("frame");
+    assert_eq!(module.shots_dropped, 1);
+
+    let events = sent.take();
+    let [ClientEvent::Shot(shot)] = events.as_slice() else {
+        panic!("one shot, not {events:?}");
+    };
+    // The render time trails the newest snapshot.
+    assert_eq!(shot.tick, render.floor() as u32);
+    assert_eq!(shot.frac, (render.fract() * 256.0) as u8);
+    assert!(shot.tick < link.client().expect("joined").ack());
+    assert_eq!(shot.weapon, AssetId(9));
+    assert_eq!(shot.from.to_metres(), [0.0, 5.0, 31.0]);
+    let hits: Vec<_> = shot
+        .hits()
+        .iter()
+        .map(|h| (h.target, h.zone, h.point.to_metres()))
+        .collect();
+    assert_eq!(hits, vec![(1, Zone::Other, [2.0, 0.5, 30.5])]);
 }
 
 #[test]
