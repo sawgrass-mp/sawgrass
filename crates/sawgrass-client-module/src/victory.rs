@@ -25,6 +25,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_void};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::assets::AssetTable;
@@ -86,6 +87,7 @@ pub mod abi {
     }
 }
 
+const IMAGE_CLOSED: &str = "the image is read only during the start, before the title runs";
 const NOT_VICTORY: &str = "no VIctory host, or one with another ABI version";
 
 /// The module's side of a running VIctory.
@@ -94,15 +96,22 @@ pub struct VictoryRuntime {
     host: &'static abi::Host,
     build: GameBuild,
     base: u64,
-    image: &'static [u8],
+    /// `SizeOfImage`. The image is not kept as a slice: it covers data the game writes every frame and code the
+    /// hooks rewrite, so a long-lived shared reference to it would be unsound. [`Runtime::code_image`] lends one
+    /// only for the start, before any title code runs.
+    len: usize,
+    /// Whether [`Runtime::code_image`] may still lend the image: until the first hook is installed or the frame
+    /// callback registered, which is when the start ends.
+    image_open: AtomicBool,
     /// The detour for each hooked function, registered by the build's game layer before the module starts.
     detours: BTreeMap<String, u64>,
     /// Where to call each hooked function's original code.
     originals: BTreeMap<String, u64>,
 }
 
-// SAFETY: the host and the image stay valid and unchanged for the whole run (the loader's contract), and the
-// runtime is used from one thread at a time: the module behind it sits in a mutex.
+// SAFETY: the runtime holds the host, which stays valid for the whole run (the loader's contract), and two
+// integers; it reads the image only through `code_image` during the start. It is used from one thread at a time:
+// the module behind it sits in a mutex.
 unsafe impl Send for VictoryRuntime {}
 
 impl VictoryRuntime {
@@ -127,8 +136,6 @@ impl VictoryRuntime {
                 .into_owned()
         };
         let len = usize::try_from(host.title_size).map_err(|_| RuntimeError::Unavailable(NOT_VICTORY))?;
-        // SAFETY: the caller's contract: the image is readable in place for `title_size` bytes for the run.
-        let image = unsafe { std::slice::from_raw_parts(host.title_base as *const u8, len) };
         Ok(Self {
             host,
             build: GameBuild {
@@ -141,7 +148,8 @@ impl VictoryRuntime {
                 image_digest: hex(&host.title_hash),
             },
             base: host.title_base,
-            image,
+            len,
+            image_open: AtomicBool::new(true),
             detours: BTreeMap::new(),
             originals: BTreeMap::new(),
         })
@@ -167,6 +175,7 @@ impl VictoryRuntime {
     /// Has the host call `callback` at every present. The callback finds the module in a static, so no user
     /// pointer is passed.
     fn on_frame(&self, callback: abi::FrameFn) -> Result<(), RuntimeError> {
+        self.image_open.store(false, Ordering::Relaxed);
         // SAFETY: the host takes any callback of this type, and hands the null user pointer back untouched.
         let status = unsafe { (self.host.on_frame)(callback, std::ptr::null_mut()) };
         if status == 0 {
@@ -204,13 +213,21 @@ impl Runtime for VictoryRuntime {
     }
 
     fn code_image(&self) -> Result<CodeImage<'_>, RuntimeError> {
+        if !self.image_open.load(Ordering::Relaxed) {
+            return Err(RuntimeError::Unavailable(IMAGE_CLOSED));
+        }
+        // SAFETY: the loader maps the image readable for `len` bytes at `base` for the run. It is lent only until
+        // the first hook or the frame callback, that is while `Module::start` resolves the table inside
+        // `victory_mod_init`, before any title code runs, so nothing writes the image while it is borrowed.
+        let bytes = unsafe { std::slice::from_raw_parts(self.base as *const u8, self.len) };
         Ok(CodeImage {
             base: self.base,
-            bytes: self.image,
+            bytes,
         })
     }
 
     fn install_hook(&mut self, request: HookRequest) -> Result<HookHandle, RuntimeError> {
+        self.image_open.store(false, Ordering::Relaxed);
         let refused = |reason: &str| RuntimeError::HookRefused {
             function: request.function.clone(),
             reason: reason.into(),
@@ -353,7 +370,7 @@ pub unsafe extern "C" fn victory_mod_init(host: *const abi::Host) -> i32 {
 mod tests {
     use super::*;
     use std::ffi::c_char;
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize};
 
     /// What the test host was asked, in order.
     static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -438,6 +455,7 @@ mod tests {
         assert_eq!(build.key(), format!("victory/1.0.2.1/{digest}"));
         let image = runtime.code_image().expect("image");
         assert_eq!((image.base, image.bytes.len()), (host.title_base, 0x100));
+        assert_eq!(image.bytes[0x40..0x44], [0x5A, 0xA5, 0x3C, 0xC3]);
         assert!(runtime.drives_frames());
 
         // A hook without a detour is refused before the host is asked; one with a detour goes to the host.
@@ -461,6 +479,11 @@ mod tests {
         };
         assert!(reason.starts_with("PatchedByVictory"), "{reason}");
         runtime.remove_hook(handle).expect("removed");
+        // A hook ends the start: the image, which the game writes once it runs, is no longer lent.
+        assert_eq!(
+            runtime.code_image().err(),
+            Some(RuntimeError::Unavailable(IMAGE_CLOSED))
+        );
         let base = host.title_base;
         assert_eq!(
             calls(),
@@ -477,6 +500,8 @@ mod tests {
             "build = {key}\nlocal_player = @0x80\nped_spawn = @0x40\nentity_set_pose = 5A A5 3C C3 ; offset=1\n"
         );
         let assets = format!("build = {key}\nped = 0x2000\n");
+        // SAFETY: the same host, as VIctory would pass it to a fresh start.
+        let runtime = unsafe { VictoryRuntime::from_host(host) }.expect("runtime");
         start(runtime, &functions, &assets).expect("started");
         assert_eq!(FRAME_CALLBACKS.load(Ordering::Relaxed), 1);
         let log = calls();
