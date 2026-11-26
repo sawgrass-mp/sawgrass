@@ -150,9 +150,11 @@ core decodes, so they land in this order.
 | SRV-14 | Owners for vehicles and NPCs: the four rules, epochs and the ownership event | SRV-13, NET-17 |
 | SRV-19 | Owned states taken from their owner only, with the right epoch, checked for bounds, speed and distance; an owner's damage values taken only for NPCs and vehicles nobody owns as property, and only as decreases | SRV-14 |
 | SRV-15 | Seats: enter and leave requests, decided by the server | SRV-14, NET-16 |
+| NET-21 | Every seat request answered with granted or the reason it was refused | SRV-15 |
 | SRV-16 | Hit reports checked against the snapshot history; health, armour and death on the server | NET-16 |
 | SRV-17 | World state: time, weather, doors and routing buckets, sent on join and on change | NET-15 |
 | BOT-5 | Bots that drive, change seats and owners and shoot, as a load-test scenario with bytes per player | SRV-19, SRV-15, SRV-16 |
+| BOT-9 | Bots shoot only intact vehicles, keep driving speed and check their seat | BOT-5, NET-21 |
 
 Gate: the BOT-5 scenario at 3,000 bots in the 1.5 km square, with phase 1's tick budget, no refused state from a
 well-behaved bot, and the bytes per player reported against architecture.md's budget.
