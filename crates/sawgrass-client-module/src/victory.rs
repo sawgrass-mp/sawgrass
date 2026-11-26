@@ -33,6 +33,8 @@ use crate::module::Module;
 use crate::runtime::{CodeImage, GameBuild, HookHandle, HookRequest, Runtime, RuntimeError, RuntimeKind};
 use crate::table::FunctionTable;
 
+pub mod natives;
+
 /// The loader's C ABI, mirrored from VIctory's `victory-mod-api` crate (version 1). It is not a dependency: that
 /// crate lives in a local VIctory branch, and this repository takes no git or path dependency outside itself.
 pub mod abi {
@@ -74,6 +76,24 @@ pub mod abi {
     #[cfg(target_pointer_width = "64")]
     const _: () = assert!(std::mem::size_of::<Host>() == 96);
 
+    /// The calling thread's block of the title's static TLS: the first field added to ABI 1, right after
+    /// [`Host`]'s, present when `size` is at least [`SIZE_WITH_TITLE_TLS`]. It is not a field of [`Host`], since an
+    /// older host fills in only the first 96 bytes.
+    pub type TitleTlsFn = super::natives::TitleTls;
+
+    /// A host's `size` when it gives `title_tls`.
+    pub const SIZE_WITH_TITLE_TLS: usize = std::mem::size_of::<Host>() + std::mem::size_of::<TitleTlsFn>();
+
+    /// The host's `title_tls`, if it is new enough to give one.
+    pub fn title_tls(host: &Host) -> Option<TitleTlsFn> {
+        if (host.size as usize) < SIZE_WITH_TITLE_TLS {
+            return None;
+        }
+        // SAFETY: a host that says it is this large filled in the field right after the ABI 1 fields, at an
+        // 8-aligned offset (96), with the host's function.
+        Some(unsafe { std::ptr::from_ref(host).add(1).cast::<TitleTlsFn>().read() })
+    }
+
     /// The name of a status code the host returns (negated, for `hook`).
     pub fn status_name(code: i64) -> &'static str {
         match code.unsigned_abs() {
@@ -112,6 +132,8 @@ pub struct VictoryRuntime {
     detours: BTreeMap<String, u64>,
     /// Where to call each hooked function's original code.
     originals: BTreeMap<String, u64>,
+    /// The host's `title_tls`, which script natives need; `None` from a VIctory that does not give it yet.
+    title_tls: Option<abi::TitleTlsFn>,
 }
 
 // SAFETY: the runtime holds the host, which stays valid for the whole run (the loader's contract), and two
@@ -157,6 +179,7 @@ impl VictoryRuntime {
             image_open: AtomicBool::new(true),
             detours: BTreeMap::new(),
             originals: BTreeMap::new(),
+            title_tls: abi::title_tls(host),
         })
     }
 
@@ -169,6 +192,11 @@ impl VictoryRuntime {
     /// Where a hooked function's original code is called, for its detour.
     pub fn original(&self, function: &str) -> Option<u64> {
         self.originals.get(function).copied()
+    }
+
+    /// The host's `title_tls`, for [`natives::ScriptScope::enter`]; `None` when this VIctory cannot run natives.
+    pub fn title_tls(&self) -> Option<abi::TitleTlsFn> {
+        self.title_tls
     }
 
     /// Writes a line to VIctory's log.
@@ -303,6 +331,12 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
             module.functions().addresses.len()
         ),
     );
+    if runtime.title_tls().is_none() {
+        runtime.log(
+            abi::LOG_WARN,
+            "sawgrass: this VIctory gives no title_tls, so script natives cannot be called",
+        );
+    }
     for (name, why) in module.missing_functions() {
         runtime.log(
             abi::LOG_WARN,
@@ -437,6 +471,31 @@ mod tests {
             unhook,
             on_frame,
         }))
+    }
+
+    unsafe extern "C" fn test_tls() -> *mut c_void {
+        std::ptr::dangling_mut()
+    }
+
+    #[test]
+    fn title_tls_is_read_only_from_a_host_that_gives_it() {
+        #[repr(C)]
+        struct Newer {
+            host: abi::Host,
+            title_tls: abi::TitleTlsFn,
+        }
+        assert_eq!(abi::SIZE_WITH_TITLE_TLS, std::mem::size_of::<Newer>());
+        let old = host(abi::ABI_VERSION);
+        assert!(abi::title_tls(old).is_none());
+        // SAFETY: a copy of the old host's fields, which are plain values and functions.
+        let mut newer = Newer {
+            host: unsafe { std::ptr::read(old) },
+            title_tls: test_tls,
+        };
+        newer.host.size = abi::SIZE_WITH_TITLE_TLS as u32;
+        let tls = abi::title_tls(&newer.host).expect("given");
+        // SAFETY: the test's function.
+        assert_eq!(unsafe { tls() }, std::ptr::dangling_mut());
     }
 
     #[test]

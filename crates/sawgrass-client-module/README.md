@@ -13,6 +13,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 |---|---|---|
 | Runtime boundary, build identity | `runtime.rs` | done |
 | VIctory adapter | `victory.rs` | done against the mod loader's ABI 1 (a local VIctory branch, proposed upstream): loads, reads the tables, hooks, counts frames; the build's `GameApi` and hook detours wait for the game's functions |
+| Script natives | `victory/natives.rs` | calls a handler checked against its hash, with a script context current; the frame on a script thread and the table entries for it come next |
 | Functions located by pattern, per game build | `pattern.rs`, `table.rs` | done; tables live outside the repository |
 | Hook points and their events, an event queue that hooks may push into from any thread | `hooks.rs` | done |
 | `GameApi`: every change the module makes to the game, handles with generations | `game.rs` | trait and fake done; the real one waits for the game |
@@ -54,7 +55,8 @@ see each other in the game.
 ## Running under VIctory
 
 Build the module (`cargo build --release -p sawgrass-client-module` on Windows gives `sawgrass_client_module.dll`;
-the Windows build is not checked by CI yet, and the first run in the game is still to come) and start the game with
+the Windows build is not checked by CI yet; the first run in the game, on 1.0.2.1, loaded it and refused to start
+at the empty tables, as it should) and start the game with
 three variables set:
 
 - `VICTORY_MODS`: the path of that DLL, for VIctory's mod loader.
@@ -65,6 +67,18 @@ lines), `sawgrass: started, N functions located`, one `off until found` line per
 not locate yet, and `sawgrass: N frames` every 600 frames. A table for another build, or a required entry missing,
 shows `sawgrass: not started` with the reason, and nothing is hooked. Take patterns from the running process, not
 from the executable file: VIctory rewrites code before the module sees it.
+
+### Script natives
+
+The game layer will mostly call the title's script natives rather than its internal functions: a native is a
+handler the title's own scripts call, so it keeps its meaning across builds. `victory/natives.rs` calls them the
+way the title does, on a script thread with that thread's execution context current in the title's TLS (through
+the host's `title_tls`, added to ABI 1 at host size 104; a warning in the log says when the VIctory in use lacks
+it). Before a handler is used it is checked against its native's hash: the identity it writes for a negative
+argument count, `!rotl64(hash, 32)`, is read from its code, so a wrong address in the table is refused instead
+of called. Handler addresses, hashes and the script-thread offsets all come from the table on the player's
+machine; none are in this repository. Running the module's frame on a script thread, and the table entries for
+it, come in the next task.
 
 ## Table formats
 
