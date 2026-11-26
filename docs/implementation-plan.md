@@ -107,6 +107,11 @@ Result so far (2026-11-25, [two-machine load](research/two-machine-load/README.m
 of the 4,096 bots on the server's machine, 4,096 bots ran with no overrun. On two server cores the gateway is the limit: with one gateway thread, tick p99
 28 to 30 ms and 7 to 12% of snapshots dropped; with two, every snapshot delivered and p99 38 to 39 ms.
 
+Step 4 closes with SRV-8 by the maintainer's decision (2026-11-26), with this gate still open. 20 Hz stays the
+default, and 30 Hz is ready behind `--tick-hz 30`. With a gateway thread on a core of its own, 30 Hz delivered every
+snapshot at 2,700 players with tick p99 15 to 16 ms. Neither 4,096 at 30 Hz nor 4,096 with two gateway threads on
+their own cores can be measured on the two machines available. The gate is measured again when a larger rig exists.
+
 ### Phase 3: reliability of the realtime core
 
 | ID | Task |
