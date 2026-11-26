@@ -358,6 +358,12 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
             module.functions().addresses.len()
         ),
     );
+    if !module.moves_entities() {
+        runtime.log(
+            abi::LOG_WARN,
+            "sawgrass: entity_set_pose not located: no entity is moved, and the server cannot correct the player",
+        );
+    }
     if !module.shows_remote_peds() {
         runtime.log(
             abi::LOG_WARN,

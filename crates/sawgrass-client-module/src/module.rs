@@ -71,6 +71,8 @@ pub enum WorldError {
     Game(GameError),
     /// The table does not locate `ped_spawn` yet, so remote peds are not shown.
     NoPedSpawn,
+    /// The table does not locate `entity_set_pose` yet, so the module moves no entity.
+    NoSetPose,
 }
 
 /// The game as the network core sees it: entities by server id, assets by protocol id.
@@ -80,6 +82,8 @@ pub struct World<'a> {
     assets: &'a AssetTable,
     /// Whether the table located `ped_spawn`.
     peds_spawn: bool,
+    /// Whether the table located `entity_set_pose`.
+    sets_pose: bool,
 }
 
 impl fmt::Debug for World<'_> {
@@ -127,6 +131,9 @@ impl World<'_> {
 
     pub fn set_pose(&mut self, net: NetId, pose: Pose) -> Result<(), WorldError> {
         let handle = self.pool.handle(net).ok_or(WorldError::UnknownEntity(net))?;
+        if !self.sets_pose {
+            return Err(WorldError::NoSetPose);
+        }
         self.game.set_pose(handle, pose).map_err(WorldError::Game)
     }
 
@@ -166,6 +173,9 @@ impl World<'_> {
     /// Moves the local player, to apply a correction from the server.
     pub fn set_local_player_pose(&mut self, pose: Pose) -> Result<(), WorldError> {
         let handle = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
+        if !self.sets_pose {
+            return Err(WorldError::NoSetPose);
+        }
         self.game.set_pose(handle, pose).map_err(WorldError::Game)
     }
 
@@ -236,19 +246,22 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// What the module cannot start without; it does not start unless the table locates all of them:
+/// What the module cannot start without; it does not start unless the table locates both:
 ///
 /// - `frame`: the game's frame, hooked to run [`Module::frame`].
-/// - `local_player`: where the game keeps the local player's ped, whose position is read and sent.
-/// - `entity_set_pose`: the game's function that puts an entity at a position, to move remote players.
+/// - `local_player`: where the game keeps the local player's ped (or the native that names it), whose position is
+///   read and sent.
 ///
-/// The last two are used by the real [`GameApi`] for the build, which takes their addresses from
-/// [`Module::functions`]. Two players who see each other also need [`PED_SPAWN`]; until the table locates it the
-/// module starts anyway, sends the local player, and shows no remote peds.
-pub const REQUIRED_FUNCTIONS: [&str; 3] = ["frame", "local_player", "entity_set_pose"];
+/// Two players who see each other also need [`PED_SPAWN`] and [`ENTITY_SET_POSE`]. Until the table locates them the
+/// module starts anyway and sends the local player, but shows no remote peds and moves no entity. The real
+/// [`GameApi`] for the build takes all their addresses from [`Module::functions`].
+pub const REQUIRED_FUNCTIONS: [&str; 2] = ["frame", "local_player"];
 
 /// The game's function that creates a ped, for remote players: optional while it is still being found.
 pub const PED_SPAWN: &str = "ped_spawn";
+/// The game's function that puts an entity at a position, to move remote players and correct the local one:
+/// optional while it is still being found.
+pub const ENTITY_SET_POSE: &str = "entity_set_pose";
 
 /// The functions the module cannot start without: [`REQUIRED_FUNCTIONS`].
 pub fn required_functions() -> Vec<&'static str> {
@@ -268,7 +281,8 @@ fn required_on(runtime: &impl Runtime) -> Vec<&'static str> {
 /// single-player switch missing leaves that system running, the input or camera hook missing leaves the network
 /// core without those events.
 pub fn optional_functions() -> Vec<&'static str> {
-    std::iter::once(PED_SPAWN)
+    [PED_SPAWN, ENTITY_SET_POSE]
+        .into_iter()
         .chain(HookPoint::ALL.iter().map(|h| h.function()))
         .chain(SinglePlayerSystem::ALL.iter().map(|s| s.function()))
         .filter(|name| !REQUIRED_FUNCTIONS.contains(name))
@@ -404,6 +418,11 @@ impl<R: Runtime> Module<R> {
         &self.functions
     }
 
+    /// Whether entities can be moved: the table located [`ENTITY_SET_POSE`].
+    pub fn moves_entities(&self) -> bool {
+        self.functions.address(ENTITY_SET_POSE).is_some()
+    }
+
     /// Whether remote peds can be shown: the table located [`PED_SPAWN`].
     pub fn shows_remote_peds(&self) -> bool {
         self.functions.address(PED_SPAWN).is_some()
@@ -490,11 +509,13 @@ impl<R: Runtime> Module<R> {
             }
         }
         let peds_spawn = self.shows_remote_peds();
+        let sets_pose = self.moves_entities();
         let mut world = World {
             game,
             pool: &mut self.pool,
             assets: &self.assets,
             peds_spawn,
+            sets_pose,
         };
         core.on_frame(dt, &mut world);
         Ok(())

@@ -35,12 +35,13 @@ None of this can be in the repository; it comes from a maintainer with the game:
 1. A VIctory build that loads the module and installs hooks: the upstream API from ADR 0004, or a local build of
    VIctory until it lands. `VictoryRuntime` is written against the local mod loader's ABI 1; see "Running under
    VIctory" below.
-2. A function table for the exact game build. Three entries are enough to start, `module::REQUIRED_FUNCTIONS`:
-   `frame` (hooked once a frame), `local_player` (where the local player's ped is kept) and `entity_set_pose`
-   (puts an entity at a position). A runtime that calls the module once a frame by itself, as VIctory's loader
-   does, makes `frame` unneeded. `ped_spawn` (creates a ped) is needed for two players to see each other, but
-   while it is still being found the module starts without it: it sends the local player, shows no remote peds,
-   and says so in the log (`Module::shows_remote_peds`). The module refuses to start without the required ones, and refuses a
+2. A function table for the exact game build. Two entries are enough to start, `module::REQUIRED_FUNCTIONS`:
+   `frame` (hooked once a frame) and `local_player` (where the local player's ped is kept, or the native that
+   names it). A runtime that calls the module once a frame by itself, as VIctory's loader does, makes `frame`
+   unneeded. Two players who see each other also need `ped_spawn` (creates a ped) and `entity_set_pose` (puts an
+   entity at a position), but while those are still being found the module starts without them: it sends the
+   local player, shows no remote peds, moves no entity, and says so in the log (`Module::shows_remote_peds`,
+   `Module::moves_entities`). The module refuses to start without the required ones, and refuses a
    table for another build. Every other entry (`module::optional_functions()`: creation and removal of peds,
    vehicles and objects, input, camera, streaming, weapon fire, seat enter and leave, the five single-player
    switches) is used when it is there and switches its feature off when it is not, as does a hook the runtime
