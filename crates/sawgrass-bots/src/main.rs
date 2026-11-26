@@ -31,7 +31,7 @@ const USAGE: &str = "usage:
                     [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
                     [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]
                     [--decoders N] [--sockets N] [--pay-every SECS] [--drivers N] [--shooters N]
-                    [--shot-hz N] [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]
+                    [--shot-hz N] [--aim-delay TICKS] [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]
   sawgrass-bots replay --file FILE --server ADDR --cert FILE [--name NAME] [--speed X]";
 
 struct RunArgs {
@@ -54,6 +54,7 @@ struct RunArgs {
     drivers: u64,
     shooters: u64,
     shot_hz: u32,
+    aim_delay: u32,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, value: Option<String>) -> Result<T, String>
@@ -88,6 +89,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
         drivers: 0,
         shooters: 0,
         shot_hz: 2,
+        aim_delay: 0,
     };
     while let Some(flag) = args.next() {
         let value = args.next();
@@ -115,6 +117,10 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--shooters" => run.shooters = parse(&flag, value)?,
             // Below the placeholder weapon's 15 shots a second, so send jitter never makes an honest shot early.
             "--shot-hz" => run.shot_hz = parse::<u32>(&flag, value)?.clamp(1, 12),
+            // Within the server's rewind, with room for the shot's transit.
+            "--aim-delay" => {
+                run.aim_delay = parse::<u32>(&flag, value)?.min(sawgrass_bots::actions::MAX_AIM_DELAY)
+            }
             "--misbehave" => run.misbehave = misbehave::parse(&value.ok_or("--misbehave needs a value")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -228,6 +234,7 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         drivers: args.drivers,
         shooters: args.shooters,
         shot_hz: args.shot_hz,
+        aim_delay: args.aim_delay,
     });
     let counters = Arc::new(Counters::default());
     let ctx = Context {

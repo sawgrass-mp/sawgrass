@@ -9,6 +9,10 @@
 //! every hit of an honest bot passes the server's checks and changes something: a wrecked vehicle (body 0) takes
 //! no more damage, so a hit on it would measure only the checks (BOT-9). It hits no player or NPC: the server has no respawn yet, so a
 //! killed bot would stay dead and its later shots would be refused.
+//!
+//! With an aim delay (BOT-10), a shooter aims as a game client does: where it draws its targets, interpolated
+//! between two snapshot ticks some ticks behind the newest, and names that render time in the shot
+//! ([`Shot::frac`], NET-22). A driven vehicle moves between ticks, so this exercises the server's rewind.
 
 use sawgrass_protocol::EntityState;
 use sawgrass_protocol::Position;
@@ -210,31 +214,60 @@ impl Driver {
     }
 }
 
-/// A shot from `from` at up to [`HITS_PER_SHOT`] of the nearest intact vehicles in `seen` within [`SHOT_RANGE`], each hit
-/// at the position the snapshot gave; `None` when there is nothing to hit.
+/// Most ticks a shooter's render time may be behind the newest snapshot: the server rewinds at most 10 ticks
+/// (500 ms), and the shot takes a tick or two to arrive.
+pub const MAX_AIM_DELAY: u32 = 8;
+
+/// The render time of a client `delay` ticks behind the newest snapshot, `newest`, which arrived `elapsed` ticks
+/// ago: a tick and the fraction toward the next, out of 256. The render time never passes `newest`.
 #[must_use]
-pub fn shot_at_vehicles(seen: &Seen, from: [f32; 3]) -> Option<Shot> {
-    let mut targets: Vec<(f32, &EntityState)> = seen
+pub fn render_time(newest: u32, elapsed: f32, delay: u32) -> (u32, u8) {
+    let delay = delay.min(newest);
+    let ahead = elapsed.clamp(0.0, delay as f32);
+    let whole = ahead.floor();
+    let frac = ((ahead - whole) * 256.0) as u8;
+    (newest - delay + whole as u32, frac)
+}
+
+/// A shot from `from` at up to [`HITS_PER_SHOT`] of the nearest intact vehicles in `then` within [`SHOT_RANGE`].
+/// Each hit is where the shooter draws the target: `frac` of the way from its position in `then` to its position
+/// in `next`, the snapshot of the tick after. A target missing from `next` is not aimed at, and with `frac` 0 `next`
+/// is not needed. `None` when there is nothing to hit.
+#[must_use]
+pub fn shot_at_vehicles(then: &Seen, next: Option<&Seen>, frac: u8, from: [f32; 3]) -> Option<Shot> {
+    let drawn = |e: &EntityState| -> Option<Position> {
+        if frac == 0 {
+            return Some(e.position);
+        }
+        let (a, b) = (e.position.to_metres(), next?.position(e.id)?);
+        let t = f32::from(frac) / 256.0;
+        Position::from_metres(std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)).ok()
+    };
+    let mut targets: Vec<(f32, u32, Position)> = then
         .entities
         .iter()
-        .zip(&seen.infos)
+        .zip(&then.infos)
         .filter(|(_, info)| {
             info.kind == EntityKind::Vehicle
                 && VehicleBlock::from_fields(info.fields()).is_ok_and(|v| v.body > 0)
         })
-        .map(|(e, _)| (distance(from, e.position.to_metres()), e))
-        .filter(|(d, _)| *d <= SHOT_RANGE)
+        .filter_map(|(e, _)| {
+            let at = drawn(e)?;
+            Some((distance(from, at.to_metres()), e.id, at))
+        })
+        .filter(|(d, _, _)| *d <= SHOT_RANGE)
         .collect();
     if targets.is_empty() {
         return None;
     }
     targets.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut shot = Shot::new(seen.tick, WEAPON, Position::from_metres(from).ok()?);
-    for (_, target) in targets.into_iter().take(HITS_PER_SHOT) {
+    let mut shot = Shot::new(then.tick, WEAPON, Position::from_metres(from).ok()?);
+    shot.frac = frac;
+    for (_, target, point) in targets.into_iter().take(HITS_PER_SHOT) {
         shot.push(Hit {
-            target: target.id,
+            target,
             zone: Zone::Other,
-            point: target.position,
+            point,
         });
     }
     Some(shot)
@@ -359,9 +392,9 @@ mod tests {
         .expect("info");
         let mut wrecked = seen.clone();
         wrecked.infos[0] = wreck;
-        let shot = shot_at_vehicles(&wrecked, [0.0, 0.0, 30.0]).expect("a shot");
+        let shot = shot_at_vehicles(&wrecked, None, 0, [0.0, 0.0, 30.0]).expect("a shot");
         assert_eq!(shot.hits()[0].target, 4);
-        let shot = shot_at_vehicles(&seen, [0.0, 0.0, 30.0]).expect("a shot");
+        let shot = shot_at_vehicles(&seen, None, 0, [0.0, 0.0, 30.0]).expect("a shot");
         assert_eq!(shot.tick, 42);
         assert_eq!(shot.weapon, WEAPON);
         let hits: Vec<u32> = shot.hits().iter().map(|h| h.target).collect();
@@ -372,6 +405,47 @@ mod tests {
             infos: vec![car()],
             ..seen
         };
-        assert!(shot_at_vehicles(&far, [0.0, 0.0, 30.0]).is_none());
+        assert!(shot_at_vehicles(&far, None, 0, [0.0, 0.0, 30.0]).is_none());
+    }
+
+    #[test]
+    fn the_render_time_is_the_delay_behind_the_newest_tick_and_moves_on_between_snapshots() {
+        assert_eq!(render_time(100, 0.0, 0), (100, 0));
+        assert_eq!(render_time(100, 0.7, 0), (100, 0));
+        assert_eq!(render_time(100, 0.0, 4), (96, 0));
+        assert_eq!(render_time(100, 1.5, 4), (97, 128));
+        // A late snapshot does not carry the render time past the newest tick.
+        assert_eq!(render_time(100, 9.0, 4), (100, 0));
+        assert_eq!(render_time(2, 0.0, 4), (0, 0));
+    }
+
+    #[test]
+    fn a_delayed_shot_hits_a_moving_vehicle_where_it_is_drawn_between_two_ticks() {
+        let then = Seen {
+            tick: 96,
+            entities: vec![entity(1, [10.0, 0.0, 30.0]), entity(2, [40.0, 0.0, 30.0])],
+            infos: vec![car(), car()],
+        };
+        let next = Seen {
+            tick: 97,
+            entities: vec![entity(1, [16.0, 0.0, 30.0])],
+            infos: vec![car()],
+        };
+        let shot = shot_at_vehicles(&then, Some(&next), 128, [0.0, 0.0, 30.0]).expect("a shot");
+        assert_eq!((shot.tick, shot.frac), (96, 128));
+        assert_eq!(shot.hits()[0].target, 1);
+        let x = shot.hits()[0].point.to_metres()[0];
+        assert!((x - 13.0).abs() < 0.02, "{x}");
+        // Vehicle 2 left the next snapshot, so it cannot be drawn and is not aimed at.
+        let gone = Seen {
+            entities: vec![then.entities[1]],
+            infos: vec![car()],
+            ..then.clone()
+        };
+        assert!(shot_at_vehicles(&gone, Some(&next), 128, [0.0, 0.0, 30.0]).is_none());
+        assert!(shot_at_vehicles(&then, None, 128, [0.0, 0.0, 30.0]).is_none());
+        // At a whole tick the next snapshot is not needed.
+        let shot = shot_at_vehicles(&gone, None, 0, [0.0, 0.0, 30.0]).expect("a shot");
+        assert_eq!(shot.hits()[0].target, 2);
     }
 }
