@@ -3,8 +3,7 @@ name = "sawgrass-db"
 description = "PostgreSQL storage for Sawgrass: characters, wallets and the money ledger."
 version.workspace = true
 edition.workspace = true
-# sqlx 0.9 needs Rust 1.94; the rest of the workspace keeps its 1.85 minimum.
-rust-version = "1.94"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
