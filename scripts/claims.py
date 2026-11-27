@@ -17,6 +17,10 @@ Rules (CONTRIBUTING.md):
   at merge time which pull requests touch CI, rules or the client.
 - A claim with no open pull request by the assignee that links the issue (`Closes #N`) after CLAIM_HOURS is released.
 - `/unclaim` works for the assignee and for maintainers.
+- A task a maintainer also labels `race` takes a claim from every contributor, up to MAX_ASSIGNEES: each one is
+  added as an assignee, and the first pull request that lands closes the task. A racer's `/unclaim` and the
+  expiry release only that racer, timed from their own assignment; `claimed` goes when the last one leaves. A
+  maintainer who is not racing releases them all with `/unclaim`.
 
 The comment text is untrusted input: it is only compared with the two commands, never run or interpolated
 into anything but a reply.
@@ -36,6 +40,9 @@ import policy  # noqa: E402
 API = "https://api.github.com"
 READY = "ready"
 CLAIMED = "claimed"
+RACE = "race"
+# GitHub keeps at most ten assignees on an issue.
+MAX_ASSIGNEES = 10
 MAX_CLAIMS = 2
 CLAIM_HOURS = 72
 PROTECTED = "protected"
@@ -55,14 +62,25 @@ def parse_command(body):
 
 def decide_claim(labels, assignees, user, open_claims, maintainer=False):
     """(ok, reply) for `user` claiming an issue with these label names and assignee logins."""
-    if CLAIMED in labels:
+    race = RACE in labels
+    if CLAIMED in labels and not race:
         holders = ", ".join(f"@{a}" for a in assignees) or "someone"
         return False, f"This task is already claimed by {holders}. Pick another one from the `{READY}` list."
     if READY not in labels:
         return False, f"Only issues labelled `{READY}` can be claimed. A maintainer adds that label after triage."
+    if race and user in assignees:
+        return False, f"@{user} already races on this task."
+    if race and len(assignees) >= MAX_ASSIGNEES:
+        return False, f"This task already has {MAX_ASSIGNEES} racers, as many as GitHub can assign. Pick another one."
     if open_claims >= MAX_CLAIMS and not maintainer:
         return False, (f"@{user} already holds {open_claims} claims (the limit is {MAX_CLAIMS}). "
                        "Finish or `/unclaim` one first.")
+    if race:
+        others = ", ".join(f"@{a}" for a in assignees if a != user)
+        return True, (f"@{user} joins the race" + (f" with {others}" if others else "") + ". The first pull "
+                      "request that works is merged; the others rebase onto it or close. Open a draft pull request "
+                      f"with `Closes #ISSUE` in its description within {CLAIM_HOURS} hours, or your claim is "
+                      "released.")
     return True, (f"Claimed by @{user}. Open a draft pull request with `Closes #ISSUE` in its description "
                   f"within {CLAIM_HOURS} hours, or the claim is released.")
 
@@ -72,6 +90,21 @@ def decide_unclaim(assignees, user, association):
     if user in assignees or association in MAINTAINER_ASSOCIATIONS:
         return True, "Claim released; the task is open for others."
     return False, "Only the person who claimed this task or a maintainer can release it."
+
+
+def unclaim_targets(labels, assignees, user):
+    """Whom an allowed `/unclaim` by `user` releases: on a `race` task a racer releases only themself."""
+    if RACE in labels and user in assignees:
+        return [user]
+    return list(assignees)
+
+
+def expired_racers(number, assigned, now, open_prs):
+    """The racers of task `number` to release: `assigned` maps each assignee to when they were assigned (or None),
+    `open_prs` is (author, body) for every open pull request."""
+    linked = {author for author, body in open_prs if links_issue(body, number)}
+    return [login for login, since in assigned.items()
+            if since is not None and claim_expired(since, now) and login not in linked]
 
 
 def links_issue(pr_body, number):
@@ -147,16 +180,21 @@ def handle_command(gh, event):
             return
         ok, reply = decide_unclaim(assignees, user, comment.get("author_association", ""))
         if ok:
-            release(gh, number, assignees)
+            targets = unclaim_targets(labels, assignees, user)
+            release(gh, number, targets, last=len(targets) == len(assignees))
+            if len(targets) < len(assignees):
+                reply = f"@{user} left the race; the others keep their claims."
         gh.comment(number, reply)
 
 
-def release(gh, number, assignees):
-    try:
-        gh.call("DELETE", f"/issues/{number}/labels/{CLAIMED}")
-    except urllib.error.HTTPError as err:
-        if err.code != 404:
-            raise
+def release(gh, number, assignees, last=True):
+    """Unassign `assignees`; `last` says nobody is left, so the `claimed` label goes too."""
+    if last:
+        try:
+            gh.call("DELETE", f"/issues/{number}/labels/{CLAIMED}")
+        except urllib.error.HTTPError as err:
+            if err.code != 404:
+                raise
     if assignees:
         gh.call("DELETE", f"/issues/{number}/assignees", {"assignees": assignees})
 
@@ -213,16 +251,34 @@ def claimed_at(gh, number):
     return last
 
 
+def assigned_at(gh, number, logins):
+    """When each of `logins` was last assigned to issue `number`, or None."""
+    last = dict.fromkeys(logins)
+    for event in gh.pages(f"/issues/{number}/events", {}):
+        login = (event.get("assignee") or {}).get("login")
+        if event.get("event") == "assigned" and login in last:
+            last[login] = parse_time(event["created_at"])
+    return last
+
+
 def expire(gh, now):
     open_prs = [(pr["user"]["login"], pr.get("body") or "") for pr in gh.pages("/pulls", {"state": "open"})]
     for issue in gh.pages("/issues", {"state": "open", "labels": CLAIMED}):
         if "pull_request" in issue:
             continue
         number = issue["number"]
+        assignees = [a["login"] for a in issue.get("assignees", [])]
+        if RACE in {label["name"] for label in issue.get("labels", [])} and assignees:
+            gone = expired_racers(number, assigned_at(gh, number, assignees), now, open_prs)
+            if gone:
+                release(gh, number, gone, last=len(gone) == len(assignees))
+                gh.comment(number, "Claim released for " + ", ".join(f"@{a}" for a in gone) + f": no open pull "
+                                   f"request of theirs links this issue {CLAIM_HOURS} hours after they claimed it.")
+                print(f"released #{number} for " + ", ".join(gone))
+            continue
         since = claimed_at(gh, number)
         if since is None or not claim_expired(since, now):
             continue
-        assignees = [a["login"] for a in issue.get("assignees", [])]
         if any(author in assignees and links_issue(body, number) for author, body in open_prs):
             continue
         release(gh, number, assignees)

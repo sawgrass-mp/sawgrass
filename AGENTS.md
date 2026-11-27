@@ -53,15 +53,18 @@ New crates (gateway, bots, client, launcher) arrive with the tasks that create t
 
 ## Claim before you start
 
-1. Find a task: an open issue labelled `ready` and not `claimed`.
+1. Find a task: an open issue labelled `ready` and either not `claimed` or labelled `race`.
 
    ```sh
    gh issue list -R sawgrass-mp/sawgrass --label ready --search "-label:claimed" --state open
+   gh issue list -R sawgrass-mp/sawgrass --label ready --label race --state open
    ```
 
 2. Comment `/claim` on it, as the first line of the comment. The claim bot labels it `claimed` and assigns you.
-   If it refuses, pick another task. One account holds at most two claims. Working through the maintainer's
-   account, skip this step: opening the draft pull request with `Closes #N` claims the task, with no limit.
+   A task labelled `race` takes a claim from everyone, each added as another assignee, and the first pull
+   request that lands closes it. If it refuses, pick another task. One account holds at most two claims.
+   Working through the maintainer's account, skip this step: opening the draft pull request with `Closes #N`
+   claims the task, with no limit.
 3. Open a **draft** pull request within 72 hours with `Closes #N` in its description, or the claim is released.
 4. Mark it **ready for review** when the task is done, the checks below pass locally and CI is green. Reviews
    skip drafts, so a pull request left in draft is never reviewed or merged.
