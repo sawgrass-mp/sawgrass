@@ -42,18 +42,23 @@ Every task is a GitHub issue with an ID in its title. The prefix names the area:
 | `OPS-` | CI, releases, repository tooling |
 | `DOC-` | documentation |
 
-Labels: `ready` (triaged, can be claimed), `claimed`, `triage` (new, not yet reviewed), `good first task`, and
-`size: S` (an evening), `size: M` (a few days), `size: L` (several pull requests). Only maintainers add `ready`;
+Labels: `ready` (triaged, can be claimed), `claimed`, `race` (several people may claim it), `triage` (new, not yet
+reviewed), `good first task`, and `size: S` (an evening), `size: M` (a few days), `size: L` (several pull
+requests). Only maintainers add `ready` and `race`;
 the dispatcher adds it automatically to tasks a maintainer opens that touch no protected path.
 
 ### Taking a task
 
-1. Pick an open issue labelled `ready` and not `claimed`.
+1. Pick an open issue labelled `ready` and either not `claimed` or labelled `race`.
 2. Comment `/claim` (the first line of the comment). The bot labels it and assigns you. You can hold two
    claims at a time. A maintainer's own pull request claims its task automatically.
 3. Open a draft pull request with `Closes #N` within 72 hours, or the claim is released automatically.
    `/unclaim` releases it yourself.
 4. Mark the pull request ready for review when the work is done and CI is green. Drafts are not reviewed.
+
+A task labelled `race` is open to several people at once: each `/claim` adds another assignee, up to ten. The first
+pull request that lands and works closes the task; the others rebase onto it or close. Your `/unclaim` and the
+72-hour release apply only to your own claim.
 
 ### Reporting something you won't fix
 

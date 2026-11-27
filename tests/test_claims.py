@@ -51,6 +51,76 @@ class DecideUnclaim(unittest.TestCase):
         self.assertFalse(claims.decide_unclaim(["alice"], "mallory", "CONTRIBUTOR")[0])
 
 
+class Race(unittest.TestCase):
+    LABELS = {"ready", "race", "claimed"}
+
+    def test_more_racers_join(self):
+        ok, reply = claims.decide_claim({"ready", "race"}, [], "alice", 0)
+        self.assertTrue(ok)
+        ok, reply = claims.decide_claim(self.LABELS, ["alice"], "bob", 0)
+        self.assertTrue(ok)
+        self.assertIn("@alice", reply)
+        self.assertTrue(claims.decide_claim(self.LABELS, ["alice", "bob"], "carol", 1)[0])
+
+    def test_same_racer_twice(self):
+        self.assertFalse(claims.decide_claim(self.LABELS, ["alice"], "alice", 1)[0])
+
+    def test_assignee_limit(self):
+        full = [f"user{i}" for i in range(claims.MAX_ASSIGNEES)]
+        self.assertFalse(claims.decide_claim(self.LABELS, full, "alice", 0)[0])
+        self.assertTrue(claims.decide_claim(self.LABELS, full[:-1], "alice", 0)[0])
+
+    def test_claim_limit_still_holds(self):
+        self.assertFalse(claims.decide_claim(self.LABELS, ["bob"], "alice", claims.MAX_CLAIMS)[0])
+
+    def test_race_needs_ready(self):
+        self.assertFalse(claims.decide_claim({"race", "triage"}, [], "alice", 0)[0])
+
+    def test_unclaim_targets(self):
+        self.assertEqual(claims.unclaim_targets(self.LABELS, ["alice", "bob"], "bob"), ["bob"])
+        self.assertEqual(claims.unclaim_targets(self.LABELS, ["alice", "bob"], "stiv"), ["alice", "bob"])
+        self.assertEqual(claims.unclaim_targets({"ready", "claimed"}, ["alice"], "alice"), ["alice"])
+
+    def test_unclaim_releases_only_the_racer(self):
+        calls = []
+
+        class Fake:
+            def call(self, method, path, body=None, query=None):
+                calls.append((method, path, body))
+
+            def comment(self, number, text):
+                calls.append(("COMMENT", number, text))
+
+        issue = {"number": 7, "state": "open", "labels": [{"name": n} for n in sorted(self.LABELS)],
+                 "assignees": [{"login": "alice"}, {"login": "bob"}]}
+        event = {"issue": issue, "comment": {"body": "/unclaim", "user": {"login": "bob"},
+                                             "author_association": "NONE"}}
+        claims.handle_command(Fake(), event)
+        self.assertIn(("DELETE", "/issues/7/assignees", {"assignees": ["bob"]}), calls)
+        self.assertNotIn(("DELETE", "/issues/7/labels/claimed", None), calls)
+
+    def test_expiry_per_racer(self):
+        now = claims.parse_time("2026-11-30T10:00:00Z")
+        old = now - datetime.timedelta(hours=claims.CLAIM_HOURS + 1)
+        new = now - datetime.timedelta(hours=1)
+        assigned = {"alice": old, "bob": old, "carol": new, "dave": None}
+        prs = [("bob", "Closes #7"), ("alice", "Closes #8")]
+        self.assertEqual(claims.expired_racers(7, assigned, now, prs), ["alice"])
+
+
+    def test_assigned_at_takes_each_racers_last_assignment(self):
+        class Fake:
+            def pages(self, path, query):
+                return [{"event": "assigned", "assignee": {"login": "alice"}, "created_at": "2026-11-20T10:00:00Z"},
+                        {"event": "labeled", "label": {"name": "claimed"}, "created_at": "2026-11-20T10:00:01Z"},
+                        {"event": "assigned", "assignee": {"login": "bob"}, "created_at": "2026-11-21T10:00:00Z"},
+                        {"event": "assigned", "assignee": {"login": "alice"}, "created_at": "2026-11-22T10:00:00Z"},
+                        {"event": "assigned", "assignee": {"login": "eve"}, "created_at": "2026-11-23T10:00:00Z"}]
+
+        got = claims.assigned_at(Fake(), 7, ["alice", "bob", "carol"])
+        self.assertEqual(got, {"alice": claims.parse_time("2026-11-22T10:00:00Z"),
+                               "bob": claims.parse_time("2026-11-21T10:00:00Z"), "carol": None})
+
 class LinksIssue(unittest.TestCase):
     def test_keywords(self):
         for body in ("Closes #12", "fixes #12.", "Resolves: #12", "closed #12\n"):
