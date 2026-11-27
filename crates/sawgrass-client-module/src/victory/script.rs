@@ -10,8 +10,11 @@ use std::fmt::Write as _;
 use std::sync::TryLockError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::natives::{Native, NativeCheck, ScriptLayout, ScriptScope, TitleTls, vector3};
+use super::game::{ENTITY_HEADING, GameNatives, NativeGame};
+use super::natives::{Native, NativeCheck, ScriptLayout, ScriptScope, TitleTls};
 use super::{FRAME_REPORT, RUNNING, VictoryRuntime, abi};
+use crate::game::GameApi;
+use crate::module::ENTITY_SET_POSE;
 use crate::runtime::{HookRequest, Runtime};
 use crate::table::FunctionTable;
 
@@ -21,8 +24,9 @@ pub const TLS_CONTEXT: &str = "script_tls_context";
 pub const CONTEXT_THREAD: &str = "script_context_thread";
 pub const THREAD_STATE: &str = "script_thread_state";
 pub const THREAD_UPDATING: &str = "script_thread_updating";
-/// Natives the frame report reads, when the table has them with a `hash=`: the local player's ped, and an
-/// entity's position.
+/// Natives the game layer calls ([`super::game`]), when the table has them with a `hash=`: the local player's ped
+/// and an entity's position (which the frame report reads), its heading, and the setter of its position, which is
+/// the module's `entity_set_pose`.
 pub const LOCAL_PLAYER: &str = "local_player";
 pub const ENTITY_POSITION: &str = "entity_position";
 
@@ -42,8 +46,7 @@ type Run = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64;
 pub(super) struct Script {
     layout: ScriptLayout,
     title_tls: TitleTls,
-    local_player: Option<Native>,
-    entity_position: Option<Native>,
+    natives: GameNatives,
 }
 
 /// The script run function's address and the frame's needs, found while the image is still lent.
@@ -98,7 +101,12 @@ pub(super) fn prepare(runtime: &VictoryRuntime, table: &FunctionTable) -> Option
             return None;
         }
     };
-    let resolved = match table.resolve(&build, image, &[SCRIPT_RUN], &[LOCAL_PLAYER, ENTITY_POSITION]) {
+    let resolved = match table.resolve(
+        &build,
+        image,
+        &[SCRIPT_RUN],
+        &[LOCAL_PLAYER, ENTITY_POSITION, ENTITY_HEADING, ENTITY_SET_POSE],
+    ) {
         Ok(resolved) => resolved,
         Err(e) => {
             off(&e.to_string());
@@ -127,8 +135,12 @@ pub(super) fn prepare(runtime: &VictoryRuntime, table: &FunctionTable) -> Option
     let script = Script {
         layout,
         title_tls,
-        local_player: native(LOCAL_PLAYER),
-        entity_position: native(ENTITY_POSITION),
+        natives: GameNatives {
+            local_player: native(LOCAL_PLAYER),
+            entity_position: native(ENTITY_POSITION),
+            entity_heading: native(ENTITY_HEADING),
+            entity_set_pose: native(ENTITY_SET_POSE),
+        },
     };
     Some(Prepared {
         run: resolved.address(SCRIPT_RUN)?,
@@ -210,17 +222,8 @@ unsafe fn frame(context: u64, presents: u64) {
     }
 }
 
-/// The local player's position, through the two natives, when the table has both.
+/// The local player's position, through the game layer's natives, when the table has them.
 fn local_position(scope: &ScriptScope, script: &Script) -> Option<[f32; 3]> {
-    let (local_player, entity_position) = (script.local_player?, script.entity_position?);
-    let mut ret = [0u64; 4];
-    // SAFETY: the local player native takes nothing and returns an entity handle (two slots).
-    unsafe { scope.call(local_player, &mut [], &mut ret) };
-    if ret[0] == 0 {
-        return None;
-    }
-    let mut args = [ret[0], ret[1], 0, 0];
-    // SAFETY: the position native takes the entity handle and a flag, and returns a vector.
-    unsafe { scope.call(entity_position, &mut args, &mut ret) };
-    Some(vector3(&ret))
+    let game = NativeGame::new(scope, &script.natives);
+    Some(game.pose(game.local_player()?)?.position)
 }
