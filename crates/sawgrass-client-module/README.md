@@ -89,6 +89,13 @@ gets the local player. The log shows each change of the connection (`sawgrass: c
 yet`. The network core needs the script thread: when the frame stays at the present, the log says the module is
 not connecting. Without `SAWGRASS_SERVER` the module runs on its own, as before.
 
+On Windows, building the server (`cargo build --release -p sawgrass-server -p sawgrass-bots`) compiles RocksDB, which
+needs LLVM: install it (`winget install LLVM.LLVM`), set `LIBCLANG_PATH` to its `bin` folder and put that folder
+on `PATH` too, or the build script stops with `STATUS_DLL_NOT_FOUND`.
+
+The first run with a server (a242d2b) connected and joined, but sent no position: the local player's handle was
+not read (CLIENT-28).
+
 VIctory's log then shows `sawgrass: running build victory/<version>/<hash>` (the key for the tables' `build`
 lines), `sawgrass: started, N functions located`, one `off until found` line per optional function the table does
 not locate yet, and every 600 frames `sawgrass: N frames` (or, on a script thread, the line described below). A table for another build, or a required entry missing,
@@ -164,6 +171,8 @@ ped = 0x2000      # the ped model for players and peds with no model
 - The runtime reports the title's version and lets the module read the title's mapped code.
 - The runtime installs a hook given a function address and calls the module's handler with the original available.
 - The game has no generation for its entity handles; the adapter counts them (`game::Generations`).
+- Under VIctory an entity handle is two 64-bit slots, both passed back to the natives as they came; the second
+  does not fit a generation, so `victory::game::Handles` keeps it and the handle's generation names it.
 - Each single-player system is switched off by one game function.
 - The enter-seat hook can keep the game from seating the local player, so that the server decides; the module
   then seats it with `GameApi::enter_seat` on the server's grant. The detour must let that call through. Only one
