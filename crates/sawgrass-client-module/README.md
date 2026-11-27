@@ -94,7 +94,10 @@ needs LLVM: install it (`winget install LLVM.LLVM`), set `LIBCLANG_PATH` to its 
 on `PATH` too, or the build script stops with `STATUS_DLL_NOT_FOUND`.
 
 The first run with a server (a242d2b) connected and joined, but sent no position: the local player's handle was
-not read (CLIENT-28).
+not read (CLIENT-28). With that fixed (52132e0) the game joins as entity 0 about 45 s after the start, during
+loading, and the server places the player and follows them for the whole run (about 5.5 minutes), with no move
+refused for bounds, speed or teleport. Remote players are not shown yet: that waits for `ped_spawn` and
+`entity_set_pose`.
 
 VIctory's log then shows `sawgrass: running build victory/<version>/<hash>` (the key for the tables' `build`
 lines), `sawgrass: started, N functions located`, one `off until found` line per optional function the table does
