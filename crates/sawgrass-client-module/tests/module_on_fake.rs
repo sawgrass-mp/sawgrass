@@ -231,6 +231,33 @@ fn some_switches_located_turn_only_those_systems_off() {
 }
 
 #[test]
+fn a_refused_switch_is_recorded_and_the_frame_goes_on() {
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.push(ENTITY_SET_POSE);
+    names.push(SinglePlayerSystem::Police.function());
+    names.push(SinglePlayerSystem::AmbientTraffic.function());
+    let mut module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    let mut game = FakeGame::default();
+    game.refuse_disable.push(SinglePlayerSystem::Police);
+    let mut core = RecordingCore::default();
+    for _ in 0..3 {
+        module.frame(1.0 / 60.0, &mut game, &mut core).expect("frame");
+    }
+    assert_eq!(core.frames, 3);
+    assert_eq!(game.disabled, vec![SinglePlayerSystem::AmbientTraffic]);
+    let refused: Vec<_> = module
+        .refused_switches()
+        .iter()
+        .map(|(system, _)| *system)
+        .collect();
+    assert_eq!(
+        refused,
+        vec![SinglePlayerSystem::Police],
+        "recorded once, not every frame"
+    );
+}
+
+#[test]
 fn a_missing_required_function_stops_the_start() {
     let table = functions_only(&["frame", "ped_spawn", "entity_set_pose"]);
     let Err((StartError::Functions(ResolveError::Functions(failed)), rt)) =

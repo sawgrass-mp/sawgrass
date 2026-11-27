@@ -225,6 +225,8 @@ pub struct FakeGame {
     pub local_player: Option<GameHandle>,
     pub streaming_focus: Vec<[f32; 3]>,
     pub disabled: Vec<SinglePlayerSystem>,
+    /// Systems whose switch the fake refuses, to test that path.
+    pub refuse_disable: Vec<SinglePlayerSystem>,
     /// The weapon in each armed ped's hand.
     pub weapons: BTreeMap<GameHandle, GameAsset>,
     /// The vehicle and seat of each seated ped.
@@ -313,6 +315,9 @@ impl GameApi for FakeGame {
     }
 
     fn disable(&mut self, system: SinglePlayerSystem) -> Result<(), GameError> {
+        if self.refuse_disable.contains(&system) {
+            return Err(GameError::Refused("refused by the fake".into()));
+        }
         if !self.disabled.contains(&system) {
             self.disabled.push(system);
         }

@@ -308,6 +308,8 @@ pub struct Module<R: Runtime> {
     single_player_off: bool,
     /// The single-player systems whose switch the table located.
     switches: Vec<SinglePlayerSystem>,
+    /// Located switches the game refused, and why; those systems keep running.
+    switches_refused: Vec<(SinglePlayerSystem, GameError)>,
     /// The hook points installed.
     hooked: Vec<HookPoint>,
     /// Optional hooks the runtime refused, and why; their events are off.
@@ -379,6 +381,7 @@ impl<R: Runtime> Module<R> {
                 .into_iter()
                 .filter(|s| switches_located.contains(&s.function()))
                 .collect(),
+            switches_refused: Vec::new(),
             hooked,
             refused,
             ambient_removed: 0,
@@ -439,6 +442,12 @@ impl<R: Runtime> Module<R> {
         &self.refused
     }
 
+    /// The located single-player switches the game refused at the first frame, and why. Those systems keep
+    /// running, as if the table had not located them; the frame goes on.
+    pub fn refused_switches(&self) -> &[(SinglePlayerSystem, GameError)] {
+        &self.switches_refused
+    }
+
     /// Whether this hook point is installed.
     pub fn is_hooked(&self, point: HookPoint) -> bool {
         self.hooked.contains(&point)
@@ -461,9 +470,13 @@ impl<R: Runtime> Module<R> {
         core: &mut dyn NetCore,
     ) -> Result<(), GameError> {
         if !self.single_player_off {
-            // Only the systems whose switch the table located; the others keep running until it does.
+            // Only the systems whose switch the table located; the others keep running until it does. A switch the
+            // game refuses is recorded and left on, once: failing the frame for it would stop the network core on
+            // every frame for a system it does not need.
             for &system in &self.switches {
-                game.disable(system)?;
+                if let Err(error) = game.disable(system) {
+                    self.switches_refused.push((system, error));
+                }
             }
             self.single_player_off = true;
         }

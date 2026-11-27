@@ -45,7 +45,10 @@ None of this can be in the repository; it comes from a maintainer with the game:
    table for another build. Every other entry (`module::optional_functions()`: creation and removal of peds,
    vehicles and objects, input, camera, streaming, weapon fire, seat enter and leave, the five single-player
    switches) is used when it is there and switches its feature off when it is not, as does a hook the runtime
-   refuses; `Module::missing_functions` and `Module::refused_hooks` list what is still to find.
+   refuses; `Module::missing_functions` and `Module::refused_hooks` list what is still to find. A located switch
+   the game refuses at the first frame leaves that system running and the frame going on
+   (`Module::refused_switches`); under VIctory each one is logged once. The native game layer refuses every
+   switch so far, so a switch line in the table only adds that warning.
 3. An asset table for that build, with at least the `ped` line (the model players are shown with) and one vehicle,
    plus each weapon the server's resources allow (a shot with a weapon missing from it is not reported) and a line
    for each weather and each door they name (ADR 0006, assumption A4).
