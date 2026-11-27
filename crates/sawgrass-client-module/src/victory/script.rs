@@ -246,6 +246,7 @@ unsafe fn frame(context: u64, presents: u64) {
 /// connection's status logged once.
 fn network_frame(net: &mut Net, module: &mut Module<VictoryRuntime>, scope: &ScriptScope, script: &Script) {
     let now = Instant::now();
+    let first = net.last.is_none();
     // The first frame, and one after a long stall such as a load, count as a 60th of a second: the network core
     // smooths over time and would otherwise take a stall as one long step.
     let dt = net
@@ -259,6 +260,16 @@ fn network_frame(net: &mut Net, module: &mut Module<VictoryRuntime>, scope: &Scr
         net.frame_errors += 1;
         if net.frame_errors == 1 || net.frame_errors % FRAME_REPORT == 0 {
             let text = format!("sawgrass: frame failed ({} times): {e}", net.frame_errors);
+            module.runtime().log(abi::LOG_WARN, &text);
+        }
+    }
+    if first {
+        // The switches are tried at the first frame only, so what the game refused is known now.
+        for (system, why) in module.refused_switches() {
+            let text = format!(
+                "sawgrass: {} refused, that system keeps running: {why}",
+                system.function()
+            );
             module.runtime().log(abi::LOG_WARN, &text);
         }
     }
