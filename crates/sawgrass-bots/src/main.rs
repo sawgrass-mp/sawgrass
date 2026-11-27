@@ -318,10 +318,13 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
     if args.drivers > 0 || args.shooters > 0 {
         let load = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
         println!(
-            "actions: {} drivers sent {} seat requests and {} vehicle states, {} shooters sent {} shots \
-             (the server's log has seats granted and refused, hits accepted and refused)",
+            "actions: {} drivers sent {} seat requests ({} granted, {} refused, {} left) and {} vehicle \
+             states, {} shooters sent {} shots (the server's log has hits accepted and refused)",
             args.drivers.min(args.count),
             load(&counters.seat_requests),
+            load(&counters.seats_granted),
+            load(&counters.seats_refused),
+            load(&counters.seats_left),
             load(&counters.owned_states_sent),
             args.shooters.min(args.count),
             load(&counters.shots_sent)

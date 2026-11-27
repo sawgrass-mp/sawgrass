@@ -85,6 +85,12 @@ pub struct Counters {
     pub decoded_ticks: AtomicU64,
     /// Seat requests sent by driving bots, entering and leaving (BOT-5).
     pub seat_requests: AtomicU64,
+    /// Seat requests the server granted (BOT-11).
+    pub seats_granted: AtomicU64,
+    /// Seat requests the server refused, for any reason (BOT-11).
+    pub seats_refused: AtomicU64,
+    /// Seats left: on the bot's request, or because the server took it out (BOT-11).
+    pub seats_left: AtomicU64,
     /// Vehicle states sent by driving bots.
     pub owned_states_sent: AtomicU64,
     /// Shots sent by shooting bots.

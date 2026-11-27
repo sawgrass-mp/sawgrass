@@ -94,8 +94,13 @@ a vehicle the server says it owns, takes the driver's seat, drives it along its 
 leaves; half the time it then sits 5 to 15 s in the passenger seat of the same parked vehicle. `--shooters N` makes
 the first N bots fire `--shot-hz` times a second (default 2, at most 12, below the weapon's 15) at the nearest
 vehicle in their latest snapshot that is not yet wrecked, where that snapshot saw it. They hit no player: the server
-has no respawn yet. Drivers and shooters decode their snapshots whatever `--decoders` says. The report adds what they sent; the server's log line has what it granted and refused
-(`seats granted`, `shots ... refused`, `hits ... refused`).
+has no respawn yet. Drivers and shooters decode their snapshots whatever `--decoders` says.
+
+A driver drives, and sends its vehicle's state, only once the server's seat answer (NET-21) grants it the seat. A
+refused request, or the server taking it out of its seat, sends it on foot again (BOT-11). The report adds what
+they sent and how the server answered the seat requests (granted, refused, left); the server's log line has the
+seats it granted and refused, and the shots and hits it refused (`seats granted`, `shots ... refused`,
+`hits ... refused`).
 
 `--record FILE` writes every snapshot datagram the first `--record-bots` bots (default 32) receive to FILE, for the
 packet compression benchmark to replay (`docs/research/packet-compression`). It takes about 70 MB a minute at 1,000
