@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::sync::TryLockError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::game::{ENTITY_HEADING, GameNatives, NativeGame};
+use super::game::{ENTITY_HEADING, GameNatives, Handles, NativeGame};
 use super::natives::{Native, NativeCheck, ScriptLayout, ScriptScope, TitleTls};
 use super::{FRAME_REPORT, Net, RUNNING, VictoryRuntime, abi};
 use crate::connection::Status;
@@ -50,6 +50,7 @@ pub(super) struct Script {
     layout: ScriptLayout,
     title_tls: TitleTls,
     natives: GameNatives,
+    handles: Handles,
 }
 
 /// The script run function's address and the frame's needs, found while the image is still lent.
@@ -144,6 +145,7 @@ pub(super) fn prepare(runtime: &VictoryRuntime, table: &FunctionTable) -> Option
             entity_heading: native(ENTITY_HEADING),
             entity_set_pose: native(ENTITY_SET_POSE),
         },
+        handles: Handles::default(),
     };
     Some(Prepared {
         run: resolved.address(SCRIPT_RUN)?,
@@ -223,6 +225,8 @@ unsafe fn frame(context: u64, presents: u64) {
         let mut text = format!("sawgrass: {} frames on a script thread", running.frames);
         if let Some([x, y, z]) = local_position(&scope, script) {
             let _ = write!(text, ", local player at ({x:.2}, {y:.2}, {z:.2})");
+        } else if script.natives.local_player.is_some() {
+            text.push_str(", local player not read");
         }
         if let Some(net) = running.net.as_ref() {
             match net.link.client() {
@@ -254,7 +258,7 @@ fn network_frame(net: &mut Net, module: &mut Module<VictoryRuntime>, scope: &Scr
         .filter(|dt| *dt < MAX_DT)
         .unwrap_or(1.0 / 60.0);
     net.last = Some(now);
-    let mut game = NativeGame::new(scope, &script.natives);
+    let mut game = NativeGame::new(scope, &script.natives, &script.handles);
     if let Err(e) = module.frame(dt, &mut game, &mut net.link) {
         net.frame_errors += 1;
         if net.frame_errors == 1 || net.frame_errors % FRAME_REPORT == 0 {
@@ -284,6 +288,6 @@ const MAX_DT: f32 = 0.25;
 
 /// The local player's position, through the game layer's natives, when the table has them.
 fn local_position(scope: &ScriptScope, script: &Script) -> Option<[f32; 3]> {
-    let game = NativeGame::new(scope, &script.natives);
+    let game = NativeGame::new(scope, &script.natives, &script.handles);
     Some(game.pose(game.local_player()?)?.position)
 }

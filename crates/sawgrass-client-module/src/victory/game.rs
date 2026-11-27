@@ -6,9 +6,12 @@
 //! thread, with that frame's [`NativeCaller`].
 //!
 //! ASSUMPTION: an entity handle is two slots, as the local player native returns it and the position native takes
-//! it; the first slot is kept as [`GameHandle::raw`] and the second as its generation. A float argument is an `f32`
-//! in the low half of a slot. Both hold for the natives read so far; the setter's arguments are checked once it is
-//! located.
+//! it, and both are passed back as they came. The first slot is kept as [`GameHandle::raw`]. The second is a full
+//! 64-bit value in the game (the first run with a server found it does not fit 32 bits), so [`Handles`] keeps it and
+//! the handle's generation names it. A float argument is an `f32` in the low half of a slot. Both hold for the
+//! natives read so far; the setter's arguments are checked once it is located.
+
+use std::cell::RefCell;
 
 use crate::game::{EntityKind, GameApi, GameAsset, GameError, GameHandle, Pose, SinglePlayerSystem};
 
@@ -28,10 +31,39 @@ pub struct GameNatives {
     pub entity_set_pose: Option<Native>,
 }
 
+/// The second slots of the entity handles seen so far, for the whole run: a handle's generation is its second
+/// slot's place here, so the same entity gives the same [`GameHandle`] on every frame.
+#[derive(Debug, Default)]
+pub struct Handles(RefCell<Vec<u64>>);
+
+impl Handles {
+    /// Distinct second slots kept at most; the game layer reads only the local player so far.
+    const MAX: usize = 256;
+
+    fn generation(&self, second: u64) -> Option<u32> {
+        let mut seen = self.0.borrow_mut();
+        let at = match seen.iter().position(|&s| s == second) {
+            Some(at) => at,
+            None if seen.len() < Self::MAX => {
+                seen.push(second);
+                seen.len() - 1
+            }
+            None => return None,
+        };
+        u32::try_from(at).ok()
+    }
+
+    fn slots(&self, handle: GameHandle) -> Option<[u64; 2]> {
+        let second = *self.0.borrow().get(usize::try_from(handle.generation).ok()?)?;
+        Some([handle.raw, second])
+    }
+}
+
 /// The game, for one frame on the script thread.
 pub struct NativeGame<'a> {
     caller: &'a dyn NativeCaller,
     natives: &'a GameNatives,
+    handles: &'a Handles,
 }
 
 impl std::fmt::Debug for NativeGame<'_> {
@@ -43,8 +75,12 @@ impl std::fmt::Debug for NativeGame<'_> {
 }
 
 impl<'a> NativeGame<'a> {
-    pub fn new(caller: &'a dyn NativeCaller, natives: &'a GameNatives) -> Self {
-        Self { caller, natives }
+    pub fn new(caller: &'a dyn NativeCaller, natives: &'a GameNatives, handles: &'a Handles) -> Self {
+        Self {
+            caller,
+            natives,
+            handles,
+        }
     }
 
     fn call(&self, native: Native, args: &mut [u64]) -> [u64; 4] {
@@ -55,11 +91,6 @@ impl<'a> NativeGame<'a> {
         unsafe { self.caller.call(native, args, &mut ret) };
         ret
     }
-}
-
-/// The two slots of an entity handle.
-fn slots(handle: GameHandle) -> [u64; 2] {
-    [handle.raw, u64::from(handle.generation)]
 }
 
 fn float(value: f32) -> u64 {
@@ -82,8 +113,9 @@ impl GameApi for NativeGame<'_> {
     /// ASSUMPTION: the handle names a live entity. That holds for the local player, the only one the module reads
     /// before `ped_spawn` is located; with remote entities this needs the game's check that the entity exists.
     fn pose(&self, handle: GameHandle) -> Option<Pose> {
-        let [lo, hi] = slots(handle);
-        let ret = self.call(self.natives.entity_position?, &mut [lo, hi, 0, 0]);
+        let position = self.natives.entity_position?;
+        let [lo, hi] = self.handles.slots(handle)?;
+        let ret = self.call(position, &mut [lo, hi, 0, 0]);
         let heading = match self.natives.entity_heading {
             Some(native) => f32::from_bits(self.call(native, &mut [lo, hi])[0] as u32),
             None => 0.0,
@@ -98,7 +130,9 @@ impl GameApi for NativeGame<'_> {
         let Some(native) = self.natives.entity_set_pose else {
             return refused();
         };
-        let [lo, hi] = slots(handle);
+        let Some([lo, hi]) = self.handles.slots(handle) else {
+            return Err(GameError::NoSuchEntity(handle));
+        };
         let [x, y, z] = pose.position;
         // ASSUMPTION: the entity, the position, and three flags left off (keep tasks, keep IK, dead check). Not yet
         // run in the game, and the heading is not set: that needs its own native.
@@ -108,8 +142,10 @@ impl GameApi for NativeGame<'_> {
 
     fn local_player(&self) -> Option<GameHandle> {
         let ret = self.call(self.natives.local_player?, &mut []);
-        let generation = u32::try_from(ret[1]).ok()?;
-        (ret[0] != 0).then_some(GameHandle::new(ret[0], generation))
+        if ret[0] == 0 {
+            return None;
+        }
+        Some(GameHandle::new(ret[0], self.handles.generation(ret[1])?))
     }
 
     fn held_weapon(&self, _ped: GameHandle) -> Option<GameAsset> {
@@ -161,7 +197,8 @@ mod tests {
 
     /// The stand-in title: one entity, the local player, at a position and heading, and the last pose set.
     static SET: Mutex<Vec<[u64; 8]>> = Mutex::new(Vec::new());
-    const PLAYER: [u64; 2] = [0x1234, 7];
+    /// The second slot as the game gives it: wider than 32 bits.
+    const PLAYER: [u64; 2] = [0x1234, 0x0000_7ff6_1234_5678];
 
     unsafe extern "C" fn local_player(call: *mut Call) {
         // SAFETY: the bridge's call, with room for two slots.
@@ -208,9 +245,11 @@ mod tests {
             entity_heading: Some(Native::from_handler(heading)),
             entity_set_pose: Some(Native::from_handler(set_pose)),
         };
-        let mut game = NativeGame::new(&Direct, &natives);
+        let handles = Handles::default();
+        let mut game = NativeGame::new(&Direct, &natives, &handles);
         let me = game.local_player().expect("player");
-        assert_eq!(me, GameHandle::new(PLAYER[0], 7));
+        assert_eq!(game.local_player(), Some(me), "the same handle on every call");
+        assert_eq!(me.raw, PLAYER[0]);
         assert_eq!(
             game.pose(me),
             Some(Pose {
@@ -241,7 +280,8 @@ mod tests {
             local_player: Some(Native::from_handler(local_player)),
             ..GameNatives::default()
         };
-        let mut game = NativeGame::new(&Direct, &natives);
+        let handles = Handles::default();
+        let mut game = NativeGame::new(&Direct, &natives, &handles);
         let me = game.local_player().expect("player");
         assert_eq!(game.pose(me), None);
         assert!(
@@ -266,6 +306,14 @@ mod tests {
             .is_err()
         );
         let none = GameNatives::default();
-        assert_eq!(NativeGame::new(&Direct, &none).local_player(), None);
+        assert_eq!(NativeGame::new(&Direct, &none, &handles).local_player(), None);
+        // A handle whose second slot was never seen names no entity.
+        let natives = GameNatives {
+            entity_position: Some(Native::from_handler(position)),
+            ..GameNatives::default()
+        };
+        let fresh = Handles::default();
+        let game = NativeGame::new(&Direct, &natives, &fresh);
+        assert_eq!(game.pose(GameHandle::new(PLAYER[0], 0)), None);
     }
 }

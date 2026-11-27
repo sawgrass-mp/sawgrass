@@ -161,6 +161,8 @@ ped = 0x2000      # the ped model for players and peds with no model
 - The runtime reports the title's version and lets the module read the title's mapped code.
 - The runtime installs a hook given a function address and calls the module's handler with the original available.
 - The game has no generation for its entity handles; the adapter counts them (`game::Generations`).
+- Under VIctory an entity handle is two 64-bit slots, both passed back to the natives as they came; the second
+  does not fit a generation, so `victory::game::Handles` keeps it and the handle's generation names it.
 - Each single-player system is switched off by one game function.
 - The enter-seat hook can keep the game from seating the local player, so that the server decides; the module
   then seats it with `GameApi::enter_seat` on the server's grant. The detour must let that call through. Only one
