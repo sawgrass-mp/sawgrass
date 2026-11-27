@@ -34,6 +34,7 @@ use crate::module::Module;
 use crate::runtime::{CodeImage, GameBuild, HookHandle, HookRequest, Runtime, RuntimeError, RuntimeKind};
 use crate::table::FunctionTable;
 
+pub mod game;
 pub mod natives;
 pub mod script;
 

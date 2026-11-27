@@ -226,13 +226,32 @@ impl ScriptScope {
         IN_SCOPE.set(true);
         Some(Self { slot, before })
     }
+}
 
+/// What natives are called through: a [`ScriptScope`] in the game, a stand-in in tests.
+pub trait NativeCaller {
     /// Calls `native` with `args`; its return values land in `ret`.
     ///
     /// # Safety
     ///
     /// `args` are what the native takes (an entity handle is two slots), and `ret` has room for what it returns.
-    pub unsafe fn call(&self, native: Native, args: &mut [u64], ret: &mut [u64]) {
+    unsafe fn call(&self, native: Native, args: &mut [u64], ret: &mut [u64]);
+}
+
+impl NativeCaller for ScriptScope {
+    unsafe fn call(&self, native: Native, args: &mut [u64], ret: &mut [u64]) {
+        // SAFETY: the caller's contract, on a script thread with its context current.
+        unsafe { native.invoke(args, ret) };
+    }
+}
+
+impl Native {
+    /// Runs the handler.
+    ///
+    /// # Safety
+    ///
+    /// As [`NativeCaller::call`], with the title ready to run it on this thread.
+    unsafe fn invoke(self, args: &mut [u64], ret: &mut [u64]) {
         ret.fill(0);
         let mut call = Call {
             args: args.as_mut_ptr(),
@@ -240,8 +259,27 @@ impl ScriptScope {
             argc: i32::try_from(args.len()).unwrap_or(i32::MAX),
             retc: u32::try_from(ret.len()).unwrap_or(u32::MAX),
         };
-        // SAFETY: a verified handler, on a script thread with its context current, given what it takes.
-        unsafe { (native.handler)(&mut call) };
+        // SAFETY: a verified handler, given what it takes.
+        unsafe { (self.handler)(&mut call) };
+    }
+
+    /// A native from a test's own handler, without the check.
+    #[cfg(test)]
+    pub(crate) fn from_handler(handler: Handler) -> Self {
+        Self { handler }
+    }
+}
+
+/// Calls a test's handlers directly, with no script context.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct Direct;
+
+#[cfg(test)]
+impl NativeCaller for Direct {
+    unsafe fn call(&self, native: Native, args: &mut [u64], ret: &mut [u64]) {
+        // SAFETY: a test's handler, which needs no script context.
+        unsafe { native.invoke(args, ret) };
     }
 }
 
