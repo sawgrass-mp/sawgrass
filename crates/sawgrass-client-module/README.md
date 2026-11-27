@@ -16,7 +16,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 | Script natives | `victory/natives.rs`, `victory/script.rs` | calls a handler checked against its hash, with a script context current; the frame runs on a script thread and reports the local player's position; works in the game on 1.0.2.1; the `GameApi` over natives comes next |
 | Functions located by pattern, per game build | `pattern.rs`, `table.rs` | done; tables live outside the repository |
 | Hook points and their events, an event queue that hooks may push into from any thread | `hooks.rs` | done |
-| `GameApi`: every change the module makes to the game, handles with generations | `game.rs`, `victory/game.rs` | trait and fake done; VIctory's over natives reads the local player and poses and sets a pose; everything not located yet is refused |
+| `GameApi`: every change the module makes to the game, handles with generations | `game.rs`, `victory/game.rs` | trait and fake done; VIctory's over natives reads the local player and poses; setting a pose (position only) is written but not run in the game yet; everything not located yet is refused |
 | Single-player systems switched off, ambient peds and vehicles removed | `module.rs` | done over `GameApi` |
 | Protocol asset ids to game assets, per build | `assets.rs` | done; tables live outside the repository |
 | The network core (`sawgrass-netcode`) in the module: remote entities shown, the local player sent and corrected, owned entities left to the game and their states sent | `link.rs` | done; ped and vehicle blocks are not read from the game yet |
