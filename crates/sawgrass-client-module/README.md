@@ -137,6 +137,33 @@ The game layer for VIctory (`victory/game.rs`, `NativeGame`) is a `GameApi` over
 `local_player`, `entity_position`, `entity_heading` (0 without it) and `entity_set_pose`. Each one that is checked
 is logged as `native <name> checked`; whatever is not located yet answers `Refused` or `None`, so the module runs
 with what is found.
+`entity_set_pose` takes the position packed as the title packs a vector; with `entity_set_heading` it also turns
+the entity (headings are degrees in the natives, radians in `Pose`).
+
+### Spawning peds
+
+Peds are spawned through the title's spawn request function (`victory/spawn.rs`), the one its create-ped natives
+queue into, not through a native. The table names it as `ped_spawn`. The adapter hooks it and keeps the last
+request the title's own create path makes as a template, since only the title fills a request's model fields
+well. Each spawn asks again with that template at the remote player's place, under the title's native lock. The
+request is queued, so `spawn` answers `Refused` until a ped stands at the place, and the network core asks again
+on the next frames. The ped is then found with the closest-ped native. A request that gives no ped is asked
+again after 3 s. The spawned ped has the template's model for now, whatever asset the server names.
+
+The table needs, beside `ped_spawn`:
+
+- `ped_spawn_done`, `ped_spawn_done_keep`, `ped_spawn_done_drop`: the callback the title passes for a spawned
+  ped, and its copy and drop functions;
+- `native_lock`, `native_lock_enter`, `native_lock_leave`: the lock the title takes around a request, and the
+  two functions that take and release it;
+- `ped_closest` (a native, `; hash=`), and optionally `entity_set_heading`;
+- `value ped_request_size`, `ped_request_kind` (the kind word of the create path), `ped_request_position`,
+  `ped_request_owner`, `ped_request_model`, `ped_request_stale_from` and `ped_request_stale_to` (bytes the
+  title's caller leaves stale, cleared).
+
+Without any of them the log says `ped_spawn off` with what is missing, and remote players are not shown. With
+them it says `peds spawn through the title's spawn requests`. No spawning happens until the title has spawned a
+ped of its own after the start, usually within a minute in the world.
 
 ## Table formats
 

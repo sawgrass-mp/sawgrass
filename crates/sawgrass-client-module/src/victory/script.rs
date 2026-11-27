@@ -12,11 +12,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::game::{ENTITY_HEADING, GameNatives, Handles, NativeGame};
 use super::natives::{Native, NativeCheck, ScriptLayout, ScriptScope, TitleTls};
+use super::spawn::{self, Spawner};
 use super::{FRAME_REPORT, Net, RUNNING, VictoryRuntime, abi};
 use crate::connection::Status;
 use crate::game::GameApi;
-use crate::module::ENTITY_SET_POSE;
 use crate::module::Module;
+use crate::module::{ENTITY_SET_POSE, PED_SPAWN};
 use crate::runtime::{HookRequest, Runtime};
 use crate::table::FunctionTable;
 use std::time::Instant;
@@ -51,12 +52,15 @@ pub(super) struct Script {
     title_tls: TitleTls,
     natives: GameNatives,
     handles: Handles,
+    spawner: Option<Spawner>,
 }
 
 /// The script run function's address and the frame's needs, found while the image is still lent.
 #[derive(Debug)]
 pub(super) struct Prepared {
     run: u64,
+    /// The spawn request function, hooked to keep the title's own requests as templates.
+    spawn: Option<(u64, spawn::Layout)>,
     script: Script,
 }
 
@@ -109,7 +113,19 @@ pub(super) fn prepare(runtime: &VictoryRuntime, table: &FunctionTable) -> Option
         &build,
         image,
         &[SCRIPT_RUN],
-        &[LOCAL_PLAYER, ENTITY_POSITION, ENTITY_HEADING, ENTITY_SET_POSE],
+        &[
+            &[
+                LOCAL_PLAYER,
+                ENTITY_POSITION,
+                ENTITY_HEADING,
+                ENTITY_SET_POSE,
+                spawn::CLOSEST_PED,
+                spawn::SET_HEADING,
+                PED_SPAWN,
+            ][..],
+            &spawn::FUNCTIONS[..],
+        ]
+        .concat(),
     ) {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -136,25 +152,91 @@ pub(super) fn prepare(runtime: &VictoryRuntime, table: &FunctionTable) -> Option
             }
         }
     };
+    let natives = GameNatives {
+        local_player: native(LOCAL_PLAYER),
+        entity_position: native(ENTITY_POSITION),
+        entity_heading: native(ENTITY_HEADING),
+        entity_set_pose: native(ENTITY_SET_POSE),
+        ped_closest: native(spawn::CLOSEST_PED),
+        entity_set_heading: native(spawn::SET_HEADING),
+    };
+    let spawn = spawner_parts(table, &resolved, natives.ped_closest.is_some());
+    let spawner = match &spawn {
+        Ok((_, layout, functions)) => Some(Spawner::new(*functions, *layout)),
+        Err(None) => None,
+        Err(Some(why)) => {
+            runtime.log(abi::LOG_WARN, &format!("sawgrass: {PED_SPAWN} off: {why}"));
+            None
+        }
+    };
     let script = Script {
         layout,
         title_tls,
-        natives: GameNatives {
-            local_player: native(LOCAL_PLAYER),
-            entity_position: native(ENTITY_POSITION),
-            entity_heading: native(ENTITY_HEADING),
-            entity_set_pose: native(ENTITY_SET_POSE),
-        },
+        natives,
         handles: Handles::default(),
+        spawner,
     };
     Some(Prepared {
         run: resolved.address(SCRIPT_RUN)?,
+        spawn: spawn.ok().map(|(address, layout, _)| (address, layout)),
         script,
     })
 }
 
+/// The spawn request function, the request's layout and the functions the spawner calls; `Err(None)` when the
+/// table has no `ped_spawn`, and the reason when it has one but not the rest.
+fn spawner_parts(
+    table: &FunctionTable,
+    resolved: &crate::table::ResolvedFunctions,
+    has_closest: bool,
+) -> Result<(u64, spawn::Layout, spawn::Functions), Option<String>> {
+    let address = resolved.address(PED_SPAWN).ok_or(None)?;
+    let missing: Vec<&str> = spawn::FUNCTIONS
+        .into_iter()
+        .filter(|name| resolved.address(name).is_none())
+        .collect();
+    if !missing.is_empty() {
+        return Err(Some(format!("not located: {}", missing.join(", "))));
+    }
+    if !has_closest {
+        return Err(Some(format!("native {} not checked", spawn::CLOSEST_PED)));
+    }
+    let layout = spawn::Layout::from_table(table).map_err(Some)?;
+    let at = |name: &str| resolved.address(name).unwrap_or_default();
+    let functions = spawn::Functions {
+        done: at(spawn::DONE),
+        done_keep: at(spawn::DONE_KEEP),
+        done_drop: at(spawn::DONE_DROP),
+        lock: at(spawn::LOCK),
+        lock_enter: at(spawn::LOCK_ENTER),
+        lock_leave: at(spawn::LOCK_LEAVE),
+    };
+    Ok((address, layout, functions))
+}
+
 /// Hooks the script run function. `None`, with the reason in the log, leaves the frame at the present.
-pub(super) fn install(runtime: &mut VictoryRuntime, prepared: Prepared) -> Option<Script> {
+pub(super) fn install(runtime: &mut VictoryRuntime, mut prepared: Prepared) -> Option<Script> {
+    if let Some((address, layout)) = prepared.spawn {
+        spawn::set_layout(layout);
+        let request = HookRequest {
+            function: PED_SPAWN.into(),
+            address,
+        };
+        match runtime.hook_into(
+            request,
+            spawn::request_detour as *const () as u64,
+            &spawn::ORIGINAL,
+        ) {
+            Ok(_) => runtime.log(
+                abi::LOG_INFO,
+                "sawgrass: peds spawn through the title's spawn requests",
+            ),
+            Err(e) => {
+                runtime.log(abi::LOG_WARN, &format!("sawgrass: {PED_SPAWN} off: {e}"));
+                prepared.script.spawner = None;
+            }
+        }
+    }
     let request = HookRequest {
         function: SCRIPT_RUN.into(),
         address: prepared.run,
@@ -259,7 +341,7 @@ fn network_frame(net: &mut Net, module: &mut Module<VictoryRuntime>, scope: &Scr
         .filter(|dt| *dt < MAX_DT)
         .unwrap_or(1.0 / 60.0);
     net.last = Some(now);
-    let mut game = NativeGame::new(scope, &script.natives, &script.handles);
+    let mut game = NativeGame::new(scope, &script.natives, &script.handles, script.spawner.as_ref());
     if let Err(e) = module.frame(dt, &mut game, &mut net.link) {
         net.frame_errors += 1;
         if net.frame_errors == 1 || net.frame_errors % FRAME_REPORT == 0 {
@@ -299,6 +381,6 @@ const MAX_DT: f32 = 0.25;
 
 /// The local player's position, through the game layer's natives, when the table has them.
 fn local_position(scope: &ScriptScope, script: &Script) -> Option<[f32; 3]> {
-    let game = NativeGame::new(scope, &script.natives, &script.handles);
+    let game = NativeGame::new(scope, &script.natives, &script.handles, script.spawner.as_ref());
     Some(game.pose(game.local_player()?)?.position)
 }

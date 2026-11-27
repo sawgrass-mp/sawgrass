@@ -46,6 +46,7 @@ use crate::table::FunctionTable;
 pub mod game;
 pub mod natives;
 pub mod script;
+pub mod spawn;
 
 /// The loader's C ABI, mirrored from VIctory's `victory-mod-api` crate (version 1). It is not a dependency: that
 /// crate lives in a local VIctory branch, and this repository takes no git or path dependency outside itself.

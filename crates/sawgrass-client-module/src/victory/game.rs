@@ -9,13 +9,20 @@
 //! it, and both are passed back as they came. The first slot is kept as [`GameHandle::raw`]. The second is a full
 //! 64-bit value in the game (the first run with a server found it does not fit 32 bits), so [`Handles`] keeps it and
 //! the handle's generation names it. A float argument is an `f32` in the low half of a slot. Both hold for the
-//! natives read so far; the setter's arguments are checked once it is located.
+//! natives read so far. A position argument is packed as the title packs a vector: x and y in one slot, z in the
+//! low half of the next. Headings are degrees in the natives and radians in [`Pose`].
+//!
+//! Peds are spawned through the title's spawn request function ([`super::spawn`]), not a native: the request is
+//! queued, so [`GameApi::spawn`] answers `Refused` until the ped stands at the asked place, and the network core asks
+//! again on the next frames.
 
 use std::cell::RefCell;
+use std::time::Instant;
 
 use crate::game::{EntityKind, GameApi, GameAsset, GameError, GameHandle, Pose, SinglePlayerSystem};
 
 use super::natives::{Native, NativeCaller, vector3};
+use super::spawn::{self, Spawner};
 
 /// Table names of the natives the game layer uses, beside `local_player` and `entity_position`.
 pub const ENTITY_HEADING: &str = "entity_heading";
@@ -29,6 +36,9 @@ pub struct GameNatives {
     pub entity_position: Option<Native>,
     pub entity_heading: Option<Native>,
     pub entity_set_pose: Option<Native>,
+    /// The closest ped to a place, which finds a spawned ped.
+    pub ped_closest: Option<Native>,
+    pub entity_set_heading: Option<Native>,
 }
 
 /// The second slots of the entity handles seen so far, for the whole run: a handle's generation is its second
@@ -64,6 +74,7 @@ pub struct NativeGame<'a> {
     caller: &'a dyn NativeCaller,
     natives: &'a GameNatives,
     handles: &'a Handles,
+    spawner: Option<&'a Spawner>,
 }
 
 impl std::fmt::Debug for NativeGame<'_> {
@@ -75,12 +86,58 @@ impl std::fmt::Debug for NativeGame<'_> {
 }
 
 impl<'a> NativeGame<'a> {
-    pub fn new(caller: &'a dyn NativeCaller, natives: &'a GameNatives, handles: &'a Handles) -> Self {
+    pub fn new(
+        caller: &'a dyn NativeCaller,
+        natives: &'a GameNatives,
+        handles: &'a Handles,
+        spawner: Option<&'a Spawner>,
+    ) -> Self {
         Self {
             caller,
             natives,
             handles,
+            spawner,
         }
+    }
+
+    /// The closest ped to `at` within `radius`, but not the local player.
+    fn closest_ped(&self, at: [f32; 3], radius: f32) -> Option<GameHandle> {
+        let native = self.natives.ped_closest?;
+        let mut out = [0u64; 2];
+        let [x, y, z] = at;
+        // ASSUMPTION: the place, the radius, two flags on (any ped, alive), where the ped goes, three flags off, and
+        // the ped type (-1, any); as the title's own scripts call it.
+        let mut args = [
+            float(x) | (float(y) << 32),
+            float(z),
+            float(radius),
+            1,
+            1,
+            out.as_mut_ptr() as u64,
+            0,
+            0,
+            0,
+            u64::MAX,
+        ];
+        self.call(native, &mut args);
+        if out[0] == 0 || self.local_player().is_some_and(|me| me.raw == out[0]) {
+            return None;
+        }
+        Some(GameHandle::new(out[0], self.handles.generation(out[1])?))
+    }
+
+    /// Turns an entity, when the table has the heading setter.
+    fn set_heading(&self, handle: GameHandle, heading: f32) -> Result<(), GameError> {
+        let native = self
+            .natives
+            .entity_set_heading
+            .ok_or_else(|| GameError::Refused(NOT_LOCATED.into()))?;
+        let [lo, hi] = self
+            .handles
+            .slots(handle)
+            .ok_or(GameError::NoSuchEntity(handle))?;
+        self.call(native, &mut [lo, hi, float(heading.to_degrees())]);
+        Ok(())
     }
 
     fn call(&self, native: Native, args: &mut [u64]) -> [u64; 4] {
@@ -102,8 +159,29 @@ fn refused<T>() -> Result<T, GameError> {
 }
 
 impl GameApi for NativeGame<'_> {
-    fn spawn(&mut self, _kind: EntityKind, _asset: GameAsset, _pose: Pose) -> Result<GameHandle, GameError> {
-        refused()
+    fn spawn(&mut self, kind: EntityKind, _asset: GameAsset, pose: Pose) -> Result<GameHandle, GameError> {
+        let Some(spawner) = self
+            .spawner
+            .filter(|_| kind == EntityKind::Ped && self.natives.ped_closest.is_some())
+        else {
+            return refused();
+        };
+        if let Some(at) = spawner.awaited() {
+            let found = self.closest_ped(at, spawn::NEAR * 2.0).filter(|ped| {
+                !spawner.is_spawned(ped.raw) && self.pose(*ped).is_some_and(|p| spawn::near(p.position, at))
+            });
+            if let Some(ped) = found {
+                spawner.found(ped.raw);
+                // The place was the asked one; only the heading is left.
+                let _ = self.set_heading(ped, pose.heading);
+                return Ok(ped);
+            }
+        }
+        // SAFETY: the frame runs on a script thread, and the spawner's addresses are the table's for this build.
+        unsafe { spawner.request(pose.position, Instant::now())? };
+        Err(GameError::Refused(
+            "spawn requested, the game creates the ped in a moment".into(),
+        ))
     }
 
     fn remove(&mut self, handle: GameHandle) -> Result<(), GameError> {
@@ -117,7 +195,7 @@ impl GameApi for NativeGame<'_> {
         let [lo, hi] = self.handles.slots(handle)?;
         let ret = self.call(position, &mut [lo, hi, 0, 0]);
         let heading = match self.natives.entity_heading {
-            Some(native) => f32::from_bits(self.call(native, &mut [lo, hi])[0] as u32),
+            Some(native) => f32::from_bits(self.call(native, &mut [lo, hi])[0] as u32).to_radians(),
             None => 0.0,
         };
         Some(Pose {
@@ -134,9 +212,13 @@ impl GameApi for NativeGame<'_> {
             return Err(GameError::NoSuchEntity(handle));
         };
         let [x, y, z] = pose.position;
-        // ASSUMPTION: the entity, the position, and three flags left off (keep tasks, keep IK, dead check). Not yet
-        // run in the game, and the heading is not set: that needs its own native.
-        self.call(native, &mut [lo, hi, float(x), float(y), float(z), 0, 0, 0]);
+        // The entity, the packed position, and five flags left off, as the title's scripts call it (run in the game
+        // with a spawned ped).
+        self.call(
+            native,
+            &mut [lo, hi, float(x) | (float(y) << 32), float(z), 0, 0, 0, 0, 0],
+        );
+        let _ = self.set_heading(handle, pose.heading);
         Ok(())
     }
 
@@ -189,14 +271,16 @@ impl GameApi for NativeGame<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Mutex;
 
     use super::*;
     use crate::victory::natives::{Call, Direct};
 
     /// The stand-in title: one entity, the local player, at a position and heading, and the last pose set.
-    static SET: Mutex<Vec<[u64; 8]>> = Mutex::new(Vec::new());
+    static SET: Mutex<Vec<[u64; 9]>> = Mutex::new(Vec::new());
+    /// Tests that share the spawner's statics run one at a time.
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
     /// The second slot as the game gives it: wider than 32 bits.
     const PLAYER: [u64; 2] = [0x1234, 0x0000_7ff6_1234_5678];
 
@@ -226,11 +310,12 @@ mod tests {
     }
 
     unsafe extern "C" fn set_pose(call: *mut Call) {
-        // SAFETY: as above, eight argument slots.
+        // SAFETY: as above, nine argument slots.
         unsafe {
             let call = &mut *call;
-            let mut args = [0u64; 8];
-            args.copy_from_slice(std::slice::from_raw_parts(call.args, 8));
+            assert_eq!(call.argc, 9);
+            let mut args = [0u64; 9];
+            args.copy_from_slice(std::slice::from_raw_parts(call.args, 9));
             SET.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(args);
@@ -244,9 +329,10 @@ mod tests {
             entity_position: Some(Native::from_handler(position)),
             entity_heading: Some(Native::from_handler(heading)),
             entity_set_pose: Some(Native::from_handler(set_pose)),
+            ..GameNatives::default()
         };
         let handles = Handles::default();
-        let mut game = NativeGame::new(&Direct, &natives, &handles);
+        let mut game = NativeGame::new(&Direct, &natives, &handles, None);
         let me = game.local_player().expect("player");
         assert_eq!(game.local_player(), Some(me), "the same handle on every call");
         assert_eq!(me.raw, PLAYER[0]);
@@ -254,7 +340,7 @@ mod tests {
             game.pose(me),
             Some(Pose {
                 position: [1.5, -2.0, 30.25],
-                heading: 90.0
+                heading: std::f32::consts::FRAC_PI_2
             })
         );
         game.set_pose(
@@ -271,7 +357,14 @@ mod tests {
             .clone();
         assert_eq!(set.len(), 1);
         assert_eq!(&set[0][..2], &PLAYER);
-        assert_eq!(f32::from_bits(set[0][3] as u32), 5.0);
+        assert_eq!(
+            (
+                f32::from_bits(set[0][2] as u32),
+                f32::from_bits((set[0][2] >> 32) as u32)
+            ),
+            (4.0, 5.0)
+        );
+        assert_eq!(f32::from_bits(set[0][3] as u32), 6.0);
     }
 
     #[test]
@@ -281,7 +374,7 @@ mod tests {
             ..GameNatives::default()
         };
         let handles = Handles::default();
-        let mut game = NativeGame::new(&Direct, &natives, &handles);
+        let mut game = NativeGame::new(&Direct, &natives, &handles, None);
         let me = game.local_player().expect("player");
         assert_eq!(game.pose(me), None);
         assert!(
@@ -306,14 +399,96 @@ mod tests {
             .is_err()
         );
         let none = GameNatives::default();
-        assert_eq!(NativeGame::new(&Direct, &none, &handles).local_player(), None);
+        assert_eq!(
+            NativeGame::new(&Direct, &none, &handles, None).local_player(),
+            None
+        );
         // A handle whose second slot was never seen names no entity.
         let natives = GameNatives {
             entity_position: Some(Native::from_handler(position)),
             ..GameNatives::default()
         };
         let fresh = Handles::default();
-        let game = NativeGame::new(&Direct, &natives, &fresh);
+        let game = NativeGame::new(&Direct, &natives, &fresh, None);
         assert_eq!(game.pose(GameHandle::new(PLAYER[0], 0)), None);
+    }
+
+    /// The stand-in ped the title creates for the spawner, at the place it was asked for.
+    const SPAWNED: u64 = 0x77;
+
+    unsafe extern "C" fn closest(call: *mut Call) {
+        // SAFETY: the closest-ped native's ten slots, the sixth where the ped goes.
+        unsafe {
+            let call = &mut *call;
+            assert_eq!(call.argc, 10);
+            let out = *call.args.add(5) as *mut u64;
+            if crate::victory::spawn::tests::REQUESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+                > 1
+            {
+                *out = SPAWNED;
+                *out.add(1) = PLAYER[1];
+            }
+        }
+    }
+
+    unsafe extern "C" fn anywhere(call: *mut Call) {
+        // SAFETY: as `position`, for any entity: it stands at (10, 20, 30).
+        unsafe {
+            let call = &mut *call;
+            *call.ret = u64::from(10.0f32.to_bits()) | (u64::from(20.0f32.to_bits()) << 32);
+            *call.ret.add(1) = u64::from(30.0f32.to_bits());
+        }
+    }
+
+    #[test]
+    fn spawns_a_ped_through_the_request_and_finds_it_at_the_place() {
+        use crate::victory::spawn::{Spawner, tests as stand_in};
+        let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        stand_in::REQUESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        stand_in::title_spawns_once();
+        let natives = GameNatives {
+            local_player: Some(Native::from_handler(local_player)),
+            entity_position: Some(Native::from_handler(anywhere)),
+            ped_closest: Some(Native::from_handler(closest)),
+            ..GameNatives::default()
+        };
+        let handles = Handles::default();
+        let spawner = Spawner::new(stand_in::functions(), stand_in::LAYOUT_FOR_TESTS);
+        let mut game = NativeGame::new(&Direct, &natives, &handles, Some(&spawner));
+        let pose = Pose {
+            position: [10.0, 20.0, 30.0],
+            heading: 0.0,
+        };
+        assert!(matches!(
+            game.spawn(EntityKind::Ped, GameAsset(1), pose),
+            Err(GameError::Refused(_))
+        ));
+        assert_eq!(
+            spawner.awaited(),
+            Some([10.0, 20.0, 30.0]),
+            "requested, and awaited"
+        );
+        let ped = game
+            .spawn(EntityKind::Ped, GameAsset(1), pose)
+            .expect("found at the place");
+        assert_eq!(ped.raw, SPAWNED);
+        assert_eq!(spawner.awaited(), None);
+        // The same ped is never handed out again: a second spawn makes a new request.
+        assert!(game.spawn(EntityKind::Ped, GameAsset(1), pose).is_err());
+        assert_eq!(
+            stand_in::REQUESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            3
+        );
+        // Vehicles and objects are not spawned this way.
+        assert!(game.spawn(EntityKind::Vehicle, GameAsset(1), pose).is_err());
     }
 }
