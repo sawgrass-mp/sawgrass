@@ -7,7 +7,7 @@
 //! sawgrass-server [--tick-hz N] [--ticks N] [--listen ADDR --cert FILE --key FILE] [--net-threads N]
 //!                 [--max-players N] [--max-per-address N] [--max-handshakes N] [--tick-threads N]
 //!                 [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]]
-//!                 [--resources DIR [--script-budget-ms N]] [--vehicles N] [--vehicle-area M]
+//!                 [--resources DIR [--script-budget-ms N] [--script-strikes N]] [--vehicles N] [--vehicle-area M]
 //!                 [--map-min X,Y] [--map-size M] [--height MIN,MAX] [--max-speed M/S] [--move-slack S]
 //!                 [--movement-report-only] [--list-players] [--record FILE]
 //! ```
@@ -42,6 +42,8 @@
 //!   fails to load is reported and left out.
 //! - `--script-budget-ms N`: the time all resources together may take in one tick (default a quarter of the
 //!   tick's 70% p99 target: 8 at 20 Hz, 5 at 30 Hz).
+//! - `--script-strikes N`: turn a resource off after N overruns in a row (default 5; 0 never does). `enable NAME`
+//!   on standard input turns it back on.
 //! - `--record FILE`: write every connection's joins, datagrams, events and leaves to `FILE` as they arrive, for
 //!   `sawgrass-bots replay` (task SRV-22). The file is written out every half second, so a killed server loses at
 //!   most that much. It holds what players sent: keep it private and never commit one.
@@ -106,6 +108,7 @@ struct Args {
     resources: Option<PathBuf>,
     /// `None`: [`scripts::budget_for`] the tick rate.
     script_budget: Option<Duration>,
+    script_strikes: u32,
     movement: MovementRules,
     list_players: bool,
     record: Option<PathBuf>,
@@ -140,6 +143,7 @@ fn parse_args() -> Result<Args, String> {
         vehicle_area: 1500.0,
         resources: None,
         script_budget: None,
+        script_strikes: sawgrass_script::DEFAULT_STRIKES,
         movement: MovementRules::default(),
         list_players: false,
         record: None,
@@ -212,6 +216,11 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--script-budget-ms: {e}"))?;
                 args.script_budget = Some(Duration::from_millis(ms));
+            }
+            "--script-strikes" => {
+                args.script_strikes = value("--script-strikes")?
+                    .parse()
+                    .map_err(|e| format!("--script-strikes: {e}"))?;
             }
             "--map-min" => {
                 let (x, y) = pair("--map-min", &value("--map-min")?)?;
@@ -349,7 +358,7 @@ fn main() -> ExitCode {
                  [--net-threads N] [--max-players N] [--max-per-address N] [--max-handshakes N] \
                  [--tick-threads N] \
                  [--stats-to-clients] [--ledger DIR [--start-cash N] [--money-events]] \
-                 [--resources DIR [--script-budget-ms N]] \
+                 [--resources DIR [--script-budget-ms N] [--script-strikes N]] \
                  [--vehicles N] [--vehicle-area M] [--map-min X,Y] [--map-size M] [--height MIN,MAX] \
                  [--max-speed M/S] [--move-slack S] [--movement-report-only] \
                  [--list-players] [--record FILE]"
@@ -484,7 +493,8 @@ fn main() -> ExitCode {
 
     let report_every = u64::from(config.rate_hz()) * REPORT_EVERY_SECS;
     if let Some(dir) = &args.resources {
-        let (host, errors) = sawgrass_script::Host::load_dir(dir, sawgrass_script::Limits::default());
+        let (mut host, errors) = sawgrass_script::Host::load_dir(dir, sawgrass_script::Limits::default());
+        host.set_strike_limit(args.script_strikes);
         for e in &errors {
             eprintln!("sawgrass-server: {e}");
         }
@@ -493,13 +503,24 @@ fn main() -> ExitCode {
             .unwrap_or_else(|| scripts::budget_for(args.tick_hz));
         let names: Vec<&str> = host.resources().iter().map(|r| r.name()).collect();
         println!(
-            "resources: {} running ({}), {} failed, script budget {:?} per tick",
+            "resources: {} running ({}), {} failed, script budget {:?} per tick, off after {} strikes in a row",
             names.len(),
             names.join(", "),
             errors.len(),
-            budget
+            budget,
+            args.script_strikes
         );
-        let mut scripts = Scripts::new(host, roster.take(), budget, report_every);
+        // Operator commands from standard input; the thread ends when it closes.
+        let (commands, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lines() {
+                let Ok(line) = line else { break };
+                if commands.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut scripts = Scripts::new(host, roster.take(), budget, report_every).with_commands(lines);
         tick_loop.add_system("scripts", move |_, info| scripts.run_tick(info));
     }
 

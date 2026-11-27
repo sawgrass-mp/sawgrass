@@ -284,6 +284,12 @@ impl Resource {
         Ok(resource)
     }
 
+    /// The limits its calls run under.
+    #[must_use]
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// The resource's name (its folder's name).
     #[must_use]
     pub fn name(&self) -> &str {

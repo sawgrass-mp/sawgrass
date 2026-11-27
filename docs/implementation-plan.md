@@ -132,6 +132,8 @@ their own cores can be measured on the two machines available. The gate is measu
 | DB-6 | WAL copy to a second machine before acknowledgement, and the restore procedure (ADR 0003) |
 | DB-7 | PostgreSQL archive fed from the operation records; `sawgrass-db`'s ledger becomes the archive's schema |
 | SCRIPT-3 | Luau runtime in the server: resources, events, deadlines and memory caps (ADR 0005) |
+| SCRIPT-4 | Resources in the server's tick: joins, leaves and ticks within a script budget per tick |
+| SCRIPT-5 | Turn off a resource that keeps overrunning; operators turn it back on without a restart |
 | NET-13 | Voice relay over the same QUIC connection, Opus frames routed by the visible sets (NET-7) |
 
 Phase 4 waits for phase 1's gate, so the tick it adds work to has room for it. Scaling step 2 of

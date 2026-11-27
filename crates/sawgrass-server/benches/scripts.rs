@@ -2,13 +2,13 @@
 //! limits (4 ms per call, 16 MiB) and script budget (8 ms). Run with `cargo bench -p sawgrass-server --bench
 //! scripts`.
 //!
-//! Columns: the phase's p50, p99 and max over the measured ticks; `join ticks`, how many ticks the 4,096 joins
+//! Columns: the phase's p50, p99 and max over the measured ticks; `over`, measured ticks past the budget; `join ticks`, how many ticks the 4,096 joins
 //! took to deliver; `skipped`, tick events skipped for the budget over the measured ticks (out of 400 per
 //! resource).
 
 use std::time::{Duration, Instant};
 
-use sawgrass_script::{Host, Limits, Resource};
+use sawgrass_script::{DEFAULT_STRIKES, Host, Limits, Resource};
 use sawgrass_server::scripts::DEFAULT_BUDGET;
 
 const PLAYERS: u32 = 4096;
@@ -36,8 +36,9 @@ const MEMORY: &str = "sawgrass.on('tick', function() local t = {} while true do 
 const STALL: &str =
     "sawgrass.on('tick', function(tick) local s = string.rep('x', 7 * 1024 * 1024 - tick % 1024) end)";
 
-fn host(sources: &[&str]) -> Host {
+fn host(sources: &[&str], strikes: u32) -> Host {
     let mut host = Host::default();
+    host.set_strike_limit(strikes);
     for (i, source) in sources.iter().enumerate() {
         let name = format!("r{i}");
         match Resource::from_sources(
@@ -52,8 +53,8 @@ fn host(sources: &[&str]) -> Host {
     host
 }
 
-fn run(name: &str, sources: &[&str]) {
-    let mut host = host(sources);
+fn run(name: &str, sources: &[&str], strikes: u32) {
+    let mut host = host(sources, strikes);
     let joined: Vec<u32> = (1..=PLAYERS).collect();
     let mut times = Vec::with_capacity(TICKS as usize);
     let mut skipped = 0;
@@ -69,14 +70,16 @@ fn run(name: &str, sources: &[&str]) {
         times.push(start.elapsed());
         skipped += report.skipped;
     }
+    let over = times.iter().filter(|t| **t > DEFAULT_BUDGET).count();
     times.sort();
     let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     println!(
-        "{name:<34} {:>6.2} {:>6.2} {:>6.2} {:>8} {:>8}",
+        "{name:<34} {:>6.2} {:>6.2} {:>6.2} {:>6} {:>10} {:>8}",
         ms(at(0.5)),
         ms(at(0.99)),
         ms(times[times.len() - 1]),
+        over,
         catching_up,
         skipped
     );
@@ -84,18 +87,23 @@ fn run(name: &str, sources: &[&str]) {
 
 fn main() {
     println!("scripts phase, {TICKS} ticks, {PLAYERS} players, budget {DEFAULT_BUDGET:?}; times in ms");
-    println!(
-        "{:<34} {:>6} {:>6} {:>6} {:>8} {:>8}",
-        "resources", "p50", "p99", "max", "join ticks", "skipped"
-    );
     let typical = [TYPICAL; 8];
-    run("8 typical", &typical);
-    run("8 typical + endless loop", &[&typical[..], &[LOOP]].concat());
-    run("8 typical + memory hog", &[&typical[..], &[MEMORY]].concat());
-    run("8 typical + 7 MiB stall", &[&typical[..], &[STALL]].concat());
-    run(
-        "8 typical + loop, hog and stall",
-        &[&typical[..], &[LOOP, MEMORY, STALL]].concat(),
-    );
-    run("8 typical + 3 stalls", &[&typical[..], &[STALL; 3]].concat());
+    let with = |bad: &[&'static str]| [&typical[..], bad].concat();
+    for strikes in [0, DEFAULT_STRIKES] {
+        println!("\nturned off after {strikes} strikes in a row (0: never)");
+        println!(
+            "{:<34} {:>6} {:>6} {:>6} {:>6} {:>10} {:>8}",
+            "resources", "p50", "p99", "max", "over", "join ticks", "skipped"
+        );
+        run("8 typical", &typical, strikes);
+        run("8 typical + endless loop", &with(&[LOOP]), strikes);
+        run("8 typical + memory hog", &with(&[MEMORY]), strikes);
+        run("8 typical + 7 MiB stall", &with(&[STALL]), strikes);
+        run(
+            "8 typical + loop, hog and stall",
+            &with(&[LOOP, MEMORY, STALL]),
+            strikes,
+        );
+        run("8 typical + 3 stalls", &with(&[STALL; 3]), strikes);
+    }
 }
