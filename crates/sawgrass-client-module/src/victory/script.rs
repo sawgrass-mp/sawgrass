@@ -257,7 +257,7 @@ fn network_frame(net: &mut Net, module: &mut Module<VictoryRuntime>, scope: &Scr
     let mut game = NativeGame::new(scope, &script.natives);
     if let Err(e) = module.frame(dt, &mut game, &mut net.link) {
         net.frame_errors += 1;
-        if net.frame_errors == 1 || net.frame_errors % FRAME_REPORT == 0 {
+        if net.frame_errors == 1 || net.frame_errors.is_multiple_of(FRAME_REPORT) {
             let text = format!("sawgrass: frame failed ({} times): {e}", net.frame_errors);
             module.runtime().log(abi::LOG_WARN, &text);
         }

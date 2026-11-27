@@ -395,7 +395,7 @@ impl View {
             self.chosen.clear();
             let previous = self.last.map(|t| &self.sent[t as usize % HISTORY_TICKS].1);
             match previous {
-                Some(slots) if (tick as usize + me) % RANK_EVERY != 0 => {
+                Some(slots) if !(tick as usize + me).is_multiple_of(RANK_EVERY) => {
                     // Between rankings the cut stays: the entities of the last snapshot that are still visible.
                     let visible = &self.visible;
                     self.chosen

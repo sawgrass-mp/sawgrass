@@ -381,7 +381,7 @@ fn a_joining_link_waits_for_the_join_and_takes_corrections() {
     let mut encoder = DeltaEncoder::default();
     let mut frame_at =
         |frame: u32, module: &mut Module<FakeRuntime>, game: &mut FakeGame, link: &mut NetLink| {
-            if frame % 3 == 0 {
+            if frame.is_multiple_of(3) {
                 let tick = frame / 3;
                 for d in snapshot(
                     &mut encoder,

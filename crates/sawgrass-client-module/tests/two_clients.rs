@@ -148,10 +148,10 @@ fn two_clients_see_each_other() {
     let seen = loop {
         a.frame(dt);
         b.frame(dt);
-        if let (Some(ia), Some(ib)) = (a.entity(), b.entity()) {
-            if let (Some(a_sees_b), Some(b_sees_a)) = (a.shows(ib), b.shows(ia)) {
-                break (a_sees_b, b_sees_a);
-            }
+        if let (Some(ia), Some(ib)) = (a.entity(), b.entity())
+            && let (Some(a_sees_b), Some(b_sees_a)) = (a.shows(ib), b.shows(ia))
+        {
+            break (a_sees_b, b_sees_a);
         }
         assert!(
             Instant::now() < deadline,
