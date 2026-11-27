@@ -12,8 +12,8 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 | Part | Where | State |
 |---|---|---|
 | Runtime boundary, build identity | `runtime.rs` | done |
-| VIctory adapter | `victory.rs` | done against the mod loader's ABI 1 (a local VIctory branch, proposed upstream): loads, reads the tables, hooks, counts frames; the build's `GameApi` and hook detours wait for the game's functions |
-| Script natives | `victory/natives.rs` | calls a handler checked against its hash, with a script context current; the frame runs on a script thread when the table gives the layout, and reports the local player's position; the `GameApi` over natives comes next |
+| VIctory adapter | `victory.rs` | done against the mod loader's ABI 1 (a local VIctory branch, proposed upstream): loads, reads the tables, hooks, runs the frame; runs in the game on 1.0.2.1 (below); the build's `GameApi` and hook detours come next |
+| Script natives | `victory/natives.rs`, `victory/script.rs` | calls a handler checked against its hash, with a script context current; the frame runs on a script thread and reports the local player's position; works in the game on 1.0.2.1; the `GameApi` over natives comes next |
 | Functions located by pattern, per game build | `pattern.rs`, `table.rs` | done; tables live outside the repository |
 | Hook points and their events, an event queue that hooks may push into from any thread | `hooks.rs` | done |
 | `GameApi`: every change the module makes to the game, handles with generations | `game.rs` | trait and fake done; the real one waits for the game |
@@ -58,16 +58,22 @@ see each other in the game.
 ## Running under VIctory
 
 Build the module (`cargo build --release -p sawgrass-client-module` on Windows gives `sawgrass_client_module.dll`;
-the Windows build is not checked by CI yet; the first run in the game, on 1.0.2.1, loaded it and refused to start
-at the empty tables, as it should) and start the game with
-three variables set:
+the Windows build is not checked by CI yet) and start the game with three variables set:
 
 - `VICTORY_MODS`: the path of that DLL, for VIctory's mod loader.
 - `SAWGRASS_FUNCTION_TABLE` and `SAWGRASS_ASSET_TABLE`: the paths of the two tables on this machine.
 
+For a run nobody attends, the local VIctory branch also reads `VICTORY_PAD_START_A=1`, which gets the game past its
+start screen without a controller press. That is VIctory's setting, not the module's.
+
+State in the game, on 1.0.2.1: the module loads, checks `local_player` and `entity_position` as natives, starts
+with only those located, runs its frame on a script thread, and logs the local player's position every 600 frames,
+with no crash. `entity_set_pose` and `ped_spawn` are not located yet, so the log warns that no entity is moved
+and remote players are not shown. It does not connect to a server yet: the `GameApi` over natives comes first.
+
 VIctory's log then shows `sawgrass: running build victory/<version>/<hash>` (the key for the tables' `build`
 lines), `sawgrass: started, N functions located`, one `off until found` line per optional function the table does
-not locate yet, and `sawgrass: N frames` every 600 frames. A table for another build, or a required entry missing,
+not locate yet, and every 600 frames `sawgrass: N frames` (or, on a script thread, the line described below). A table for another build, or a required entry missing,
 shows `sawgrass: not started` with the reason, and nothing is hooked. Take patterns from the running process, not
 from the executable file: VIctory rewrites code before the module sees it.
 
@@ -80,7 +86,11 @@ the host's `title_tls`, added to ABI 1 at host size 104; a warning in the log sa
 it). Before a handler is used it is checked against its native's hash, without running it, so a wrong address in
 the table is refused instead of called. How the check reads a handler is itself in the table: guard patterns
 (`native_guard`, `native_guard_<name>`) with the relative reference each leads through, the windows to search,
-and the rotation and mask that turn a hash into the identity the code must hold. The repository has only the
+and the rotation and mask that turn a hash into the identity the code must hold. A guard pattern has a fixed
+length, so a table lists one line per shape it meets, for example one with an instruction of each length between
+the compare and the branch, written as wildcards; the identity, a full 64-bit value, rejects a false match. A
+refused native's log line says so (`native local_player refused: ...`), and the fix is a guard line in the table,
+not a change here. The repository has only the
 generic matcher. Handler addresses, hashes, the check and the script-thread offsets all come from the table on
 the player's machine; none are in this repository.
 
