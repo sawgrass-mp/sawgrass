@@ -220,8 +220,35 @@ class Marker(unittest.TestCase):
 
     def test_waiting_step(self):
         rows = progress.step_rows(self.tasks(), self.plan)
+        roleplay = next(r for r in rows if r[0]["name"] == "Roleplay base")
+        self.assertEqual((roleplay[2], roleplay[3], roleplay[4]), (0, "waiting for the game", "waiting"))
+
+    def test_a_started_step_is_not_done_from_its_tasks(self):
+        items = [issue(1, "CLIENT-1: x", state="closed", reason="completed"),
+                 issue(2, "CLIENT-2: x", state="closed", reason="completed")]
+        tasks = progress.collect(items, {}, self.plan)
+        rows = progress.step_rows(tasks, self.plan)
         client = next(r for r in rows if r[0]["name"] == "Client module in the game")
-        self.assertEqual((client[2], client[3], client[4]), (0, "waiting for the game", "waiting"))
+        self.assertEqual((client[2], client[3], client[4]), (0, "started, 2 of 2 done", progress.STARTED))
+        # The marker stays on the first unfinished step before it.
+        self.assertEqual(keys(tasks, self.plan).count("current"), 1)
+        self.assertLess(keys(tasks, self.plan).index("current"), rows.index(client))
+        block = progress.render_markdown(tasks, "o/r", self.plan)
+        self.assertIn("| 🛠️ | [**7. Client module in the game**]", block)
+        self.assertIn("| started, 2 of 2 done |", block)
+        svg = progress.render_svg(tasks, self.plan)
+        self.assertIn('class="w" text-anchor="middle">started</text>', svg)
+        self.assertIn('stroke="#14e1f0"/>', svg)
+
+    def test_a_started_step_holds_the_marker_once_the_steps_before_it_are_done(self):
+        steps = [dict(s, state="done") if i < 6 else s for i, s in enumerate(progress.STEPS)]
+        old, progress.STEPS = progress.STEPS, tuple(steps)
+        try:
+            rows = progress.step_rows([], {})
+        finally:
+            progress.STEPS = old
+        client = next(r for r in rows if r[0]["name"] == "Client module in the game")
+        self.assertEqual((client[3], client[4]), ("started", "current"))
 
     def test_a_step_that_needs_the_game_is_not_done_from_its_tasks(self):
         plan = {**self.plan, "SRV-15": (5, "Sync on the server")}

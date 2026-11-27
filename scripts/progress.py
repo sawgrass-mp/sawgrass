@@ -55,7 +55,8 @@ ICON = {"done": "✅", "in review": "🔍", "in progress": "🛠️", "ready": "
 # belongs to the step of its phase in docs/implementation-plan.md (`phase`); a task the plan does not list belongs to
 # the step whose `areas` hold its prefix. A step with a fixed `state` shows that text instead of its tasks, and a
 # step whose `state` is `done` is closed: a task outside the plan that is not done yet never reopens it, it goes to
-# the "outside the plan" line instead, so it cannot move the marker back. The `covers` and `gate` texts of the plan's
+# the "outside the plan" line instead, so it cannot move the marker back. A step whose `state` is `started` has begun
+# on the real game but is never done from its tasks alone: it waits for its gate, which only a maintainer can check. The `covers` and `gate` texts of the plan's
 # phases are copied from docs/implementation-plan.md and are edited together with it.
 # `difficulty` (easy, medium, hard, very hard) is the maintainers' estimate of a step's risk and unknowns, not of its
 # size, and `why` says in one line what makes it so.
@@ -89,7 +90,7 @@ STEPS = (
             "runtime",
      "covers": "One writer with RocksDB, WAL copy to a second machine, PostgreSQL archive, Luau runtime with "
                "deadlines and memory caps, wallets in the server, voice relay; no roleplay gameplay yet"},
-    {"name": "Client module in the game", "short": "In game", "stage": 3, "areas": ("CLIENT",), "state": "waiting",
+    {"name": "Client module in the game", "short": "In game", "stage": 3, "areas": ("CLIENT",), "state": "started",
      "difficulty": "very hard",
      "why": "The hardest part: an undocumented game on a young runtime, functions found by pattern per runtime "
             "and game version, everything can change with a game or runtime update",
@@ -185,6 +186,7 @@ def steps_for(plan):
 
 
 SERVER_READY = "server side ready, waiting for the game"
+STARTED = "started"
 
 
 def step_index(task_id, plan, steps, status="done"):
@@ -309,11 +311,11 @@ def progress(tasks):
 def step_rows(tasks, plan=None):
     """One row per step: (step, its tasks, percent done, state text, state key).
 
-    The state key is `done`, `current`, `waiting` or `todo`. The current step is the first one that is not done:
+    The state key is `done`, `current`, `started`, `waiting` or `todo`. The current step is the first one that is not done:
     a step with tasks is done when every one of them is merged, a step without tasks only when its `state` says
     so. So the marker follows what is merged on `main`, not what is planned. A step whose gate needs the game
     (`needs_game`) is never done from its tasks alone: with every task merged it reads "server side ready, waiting
-    for the game".
+    for the game". A `started` step is never done from its tasks either: it reads "started" with its task count.
     """
     steps = steps_for(plan or {})
     rows, current_found = [], False
@@ -323,17 +325,22 @@ def step_rows(tasks, plan=None):
         done = sum(t["status"] == "done" for t in own)
         all_merged = bool(own) and done == len(own)
         server_ready = all_merged and s.get("needs_game", False)
-        finished = s.get("state") == "done" or (all_merged and s.get("state") != "waiting" and not server_ready)
+        finished = s.get("state") == "done" or (all_merged and s.get("state") not in ("waiting", STARTED)
+                                                and not server_ready)
         if finished:
             key, pct = "done", 100
         elif not current_found:
             key, current_found = "current", True
+        elif s.get("state") == STARTED:
+            key = STARTED
         else:
             key = "waiting" if s.get("state") == "waiting" or server_ready else "todo"
         if s.get("state") == "done":
             text = f"{done} of {len(own)} done" if own else "done"
         elif s.get("state") == "waiting":
             text, pct = "waiting for the game", 0
+        elif s.get("state") == STARTED:
+            text, pct = (f"{STARTED}, {done} of {len(own)} done" if own else STARTED), 0
         elif server_ready:
             text = SERVER_READY
         elif not own:
@@ -403,7 +410,7 @@ def render_markdown(tasks, repo, plan=None):
         "| | Step | What it covers | Gate | Difficulty | Tasks |",
         "|---|---|---|---|---|---|",
     ]
-    icons = {"done": "✅", "current": MARKER, "waiting": "⏸️", "todo": "⚪"}
+    icons = {"done": "✅", "current": MARKER, "waiting": "⏸️", STARTED: "🛠️", "todo": "⚪"}
     for i, (s, own, _, text, key) in enumerate(rows):
         detail = text
         if own and len(own) <= LIST_LIMIT and s.get("state") is None:
@@ -494,6 +501,9 @@ def render_svg(tasks, plan=None):
         if key == "waiting":
             out.append(f'<rect x="{x + 0.5:.1f}" y="{bar_y + 0.5}" width="{seg - 1:.1f}" height="{bar_h - 1}" rx="5" '
                        'fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>')
+        elif key == STARTED:
+            out.append(f'<rect x="{x + 0.5:.1f}" y="{bar_y + 0.5}" width="{seg - 1:.1f}" height="{bar_h - 1}" rx="5" '
+                       'fill="#13201b" stroke="#14e1f0"/>')
         else:
             out.append(f'<rect x="{x:.1f}" y="{bar_y}" width="{seg:.1f}" height="{bar_h}" rx="5" fill="#13201b"/>')
         if pct:
@@ -511,8 +521,9 @@ def render_svg(tasks, plan=None):
         label = "c" if key == "current" else "l"
         out.append(f'<text x="{cx:.1f}" y="{bar_y + 38}" class="{label}" text-anchor="middle">'
                    f'{i + 1}. {escape(s["short"])}</text>')
-        small = {"waiting for the game": "waiting", SERVER_READY: "server ready"}.get(text, text)
-        out.append(f'<text x="{cx:.1f}" y="{bar_y + 54}" class="{"w" if key == "waiting" else "n"}" '
+        small = STARTED if s.get("state") == STARTED else \
+            {"waiting for the game": "waiting", SERVER_READY: "server ready"}.get(text, text)
+        out.append(f'<text x="{cx:.1f}" y="{bar_y + 54}" class="{"w" if key in ("waiting", STARTED) else "n"}" '
                    f'text-anchor="middle">{escape(small)}</text>')
         if "difficulty" in s:
             _, name, colour = DIFFICULTY[s["difficulty"]]
