@@ -49,8 +49,9 @@ impl<'a> NativeGame<'a> {
 
     fn call(&self, native: Native, args: &mut [u64]) -> [u64; 4] {
         let mut ret = [0u64; 4];
-        // SAFETY: each caller below passes what its native takes, per the module's ASSUMPTION; `ret` has room for
-        // the largest return the game layer reads (a vector, two slots).
+        // SAFETY: the table is trusted that each name's `hash=` is that native's, so a handler that passed the check
+        // is the native the name says; each caller below passes what that native takes, per the module's
+        // ASSUMPTION; `ret` has room for the largest return the game layer reads (a vector, two slots).
         unsafe { self.caller.call(native, args, &mut ret) };
         ret
     }
@@ -78,6 +79,8 @@ impl GameApi for NativeGame<'_> {
         Err(GameError::NoSuchEntity(handle))
     }
 
+    /// ASSUMPTION: the handle names a live entity. That holds for the local player, the only one the module reads
+    /// before `ped_spawn` is located; with remote entities this needs the game's check that the entity exists.
     fn pose(&self, handle: GameHandle) -> Option<Pose> {
         let [lo, hi] = slots(handle);
         let ret = self.call(self.natives.entity_position?, &mut [lo, hi, 0, 0]);
@@ -97,7 +100,8 @@ impl GameApi for NativeGame<'_> {
         };
         let [lo, hi] = slots(handle);
         let [x, y, z] = pose.position;
-        // ASSUMPTION: the entity, the position, and three flags left off (keep tasks, keep IK, dead check).
+        // ASSUMPTION: the entity, the position, and three flags left off (keep tasks, keep IK, dead check). Not yet
+        // run in the game, and the heading is not set: that needs its own native.
         self.call(native, &mut [lo, hi, float(x), float(y), float(z), 0, 0, 0]);
         Ok(())
     }

@@ -16,7 +16,7 @@ Everything below is tested on `FakeRuntime` and `FakeGame`:
 | Script natives | `victory/natives.rs`, `victory/script.rs` | calls a handler checked against its hash, with a script context current; the frame runs on a script thread and reports the local player's position; works in the game on 1.0.2.1; the `GameApi` over natives comes next |
 | Functions located by pattern, per game build | `pattern.rs`, `table.rs` | done; tables live outside the repository |
 | Hook points and their events, an event queue that hooks may push into from any thread | `hooks.rs` | done |
-| `GameApi`: every change the module makes to the game, handles with generations | `game.rs`, `victory/game.rs` | trait and fake done; VIctory's over natives reads the local player and poses and sets a pose; everything not located yet is refused |
+| `GameApi`: every change the module makes to the game, handles with generations | `game.rs`, `victory/game.rs` | trait and fake done; VIctory's over natives reads the local player and poses; setting a pose (position only) is written but not run in the game yet; everything not located yet is refused |
 | Single-player systems switched off, ambient peds and vehicles removed | `module.rs` | done over `GameApi` |
 | Protocol asset ids to game assets, per build | `assets.rs` | done; tables live outside the repository |
 | The network core (`sawgrass-netcode`) in the module: remote entities shown, the local player sent and corrected, owned entities left to the game and their states sent | `link.rs` | done; ped and vehicle blocks are not read from the game yet |
@@ -69,7 +69,22 @@ start screen without a controller press. That is VIctory's setting, not the modu
 State in the game, on 1.0.2.1: the module loads, checks `local_player` and `entity_position` as natives, starts
 with only those located, runs its frame on a script thread, and logs the local player's position every 600 frames,
 with no crash. `entity_set_pose` and `ped_spawn` are not located yet, so the log warns that no entity is moved
-and remote players are not shown. It does not connect to a server yet: the `GameApi` over natives comes first.
+and remote players are not shown.
+
+To join a server, set three more variables:
+
+- `SAWGRASS_SERVER`: the server's `address:port` (the server's `--listen`).
+- `SAWGRASS_SERVER_CERT`: the server's certificate (DER) the connection must chain to; for a test server,
+  `sawgrass-bots gen-cert --out DIR` writes `cert.der` and `key.der`, which the server takes as `--cert` and
+  `--key`.
+- `SAWGRASS_SERVER_NAME`: the name in that certificate, `localhost` if unset.
+
+With them the module opens its connection at the start (`sawgrass: connecting to ...`), and on every script-thread
+frame runs `Module::frame` with the natives' `GameApi` (`victory/game.rs`) and the network core, so the server
+gets the local player. The log shows each change of the connection (`sawgrass: connected`,
+`sawgrass: connection closed: ...`), and the report every 600 frames adds `joined as entity N, K shown, M not shown
+yet`. The network core needs the script thread: when the frame stays at the present, the log says the module is
+not connecting. Without `SAWGRASS_SERVER` the module runs on its own, as before.
 
 VIctory's log then shows `sawgrass: running build victory/<version>/<hash>` (the key for the tables' `build`
 lines), `sawgrass: started, N functions located`, one `off until found` line per optional function the table does
