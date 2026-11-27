@@ -75,12 +75,12 @@ So the work is split in three, in this order:
 | ⚪ | [**10. Launcher and releases**](docs/roadmap.md#10-launcher-and-releases)<br><sub>Stage 4</sub> | Detects the runtime and checks its build, installs the signed client module, auto-update, server list, downloads server resources, release process | — | 🟡 **Medium**<br><sub>Known technology (Tauri, signing, updates), but a security boundary on every player's machine</sub> | not started |
 | ⚪ | [**11. Scale**](docs/roadmap.md#11-scale)<br><sub>Stage 5</sub> | Real players on public servers, gateways in their own processes if the gateway limits, zones with entity hand-off only if measurements call for them, operations and moderation | — | 🔴 **Very hard**<br><sub>Real players behave unlike bots; zones with hand-off are the most error-prone step of the architecture</sub> | not started |
 
-Tooling and docs run alongside every step: 26 of 33 tasks done.
+Tooling and docs run alongside every step: 27 of 33 tasks done.
 
 Outside the plan, not counted in any step until a phase of [docs/implementation-plan.md](docs/implementation-plan.md) lists them: 🟢 [SRV-12](https://github.com/sawgrass-mp/sawgrass/issues/122) · 🔍 [BOT-11](https://github.com/sawgrass-mp/sawgrass/issues/260) · 🛠️ [SCRIPT-5](https://github.com/sawgrass-mp/sawgrass/issues/157).
 
 <details>
-<summary><b>All tasks</b>: 122 done, 1 in review, 3 in progress, 2 ready, 7 planned</summary>
+<summary><b>All tasks</b>: 123 done, 1 in review, 3 in progress, 2 ready, 6 planned</summary>
 
 | | Task | Step | Size | Status |
 |---|---|---|---|---|
@@ -217,8 +217,8 @@ Outside the plan, not counted in any step until a phase of [docs/implementation-
 | ✅ | [DOC-17](https://github.com/sawgrass-mp/sawgrass/issues/233): Regenerate the README progress and pictures on current main | Tooling and docs | M | done |
 | ✅ | [DOC-18](https://github.com/sawgrass-mp/sawgrass/issues/247): Steps that need the game are not done from their tasks alone | Tooling and docs | M | done |
 | ✅ | [DOC-19](https://github.com/sawgrass-mp/sawgrass/issues/250): Record NET\-22's render\-time hit check and 500 ms rewind in ADR 0006 | Tooling and docs | M | done |
-| 🛠️ | [DOC-20](https://github.com/sawgrass-mp/sawgrass/issues/274): README status and progress after the client module's first run in the game | Tooling and docs | M | in progress |
-| ⚪ | [DOC-21](https://github.com/sawgrass-mp/sawgrass/issues/276): Show the client step as started after the module's first run in the game | Tooling and docs | M | planned |
+| ✅ | [DOC-20](https://github.com/sawgrass-mp/sawgrass/issues/274): README status and progress after the client module's first run in the game | Tooling and docs | M | done |
+| 🛠️ | [DOC-21](https://github.com/sawgrass-mp/sawgrass/issues/276): Show the client step as started after the module's first run in the game | Tooling and docs | M | in progress |
 
 </details>
 
