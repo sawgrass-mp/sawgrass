@@ -1,5 +1,4 @@
-# ---- never commit the game or anything made from it ----
-# (archives, executables, carved files, shaders, textures, models, audio, reports that quote game data)
+# Game files and anything extracted from them stay out of git (AGENTS.md, "No game data, ever").
 *.rpf
 *.ttpf
 *.xvd

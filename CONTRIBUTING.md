@@ -85,5 +85,6 @@ request, before the code that depends on it.
 
 ## Licence
 
-Sawgrass is licensed under the GNU Affero General Public License v3.0 (see [LICENSE](LICENSE)). By contributing
-you agree that your contribution is licensed under it.
+Sawgrass is licensed under MIT or Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT),
+[LICENSE-APACHE](LICENSE-APACHE), [ADR 0003](docs/adr/0003-licence-mit-or-apache.md)). Unless you say otherwise, any
+contribution you submit is licensed under the same terms, without any additional terms or conditions.
