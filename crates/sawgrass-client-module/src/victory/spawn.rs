@@ -44,6 +44,8 @@ pub const OWNER: &str = "ped_request_owner";
 pub const MODEL: &str = "ped_request_model";
 pub const STALE_FROM: &str = "ped_request_stale_from";
 pub const STALE_TO: &str = "ped_request_stale_to";
+/// Optional: one more stale 8-byte word, outside that range.
+pub const STALE_WORD: &str = "ped_request_stale_word";
 
 /// Every function name the spawner needs, beside `ped_spawn`.
 pub const FUNCTIONS: [&str; 6] = [DONE, DONE_KEEP, DONE_DROP, LOCK, LOCK_ENTER, LOCK_LEAVE];
@@ -63,6 +65,7 @@ pub struct Layout {
     pub owner: usize,
     pub model: usize,
     pub stale: (usize, usize),
+    pub stale_word: Option<usize>,
 }
 
 impl Layout {
@@ -83,6 +86,10 @@ impl Layout {
             owner: at(OWNER),
             model: at(MODEL),
             stale: (at(STALE_FROM), at(STALE_TO)),
+            stale_word: table
+                .values
+                .get(STALE_WORD)
+                .map(|v| usize::try_from(*v).unwrap_or(usize::MAX)),
         };
         let fits = |at: usize, len: usize| at.checked_add(len).is_some_and(|end| end <= layout.size);
         let ok = layout.size <= MAX_SIZE
@@ -90,7 +97,8 @@ impl Layout {
             && fits(layout.owner, 4)
             && fits(layout.model, 4)
             && layout.stale.0 <= layout.stale.1
-            && layout.stale.1 <= layout.size;
+            && layout.stale.1 <= layout.size
+            && layout.stale_word.is_none_or(|at| fits(at, 8));
         if ok {
             Ok(layout)
         } else {
@@ -234,6 +242,9 @@ impl Spawner {
         };
         let l = self.layout;
         request[l.stale.0..l.stale.1].fill(0);
+        if let Some(at) = l.stale_word {
+            request[at..at + 8].fill(0);
+        }
         for (i, v) in at.iter().enumerate() {
             // x and y in one slot, z in the low half of the next, as the title's natives pack a vector.
             let p = l.position + 4 * i;
@@ -299,7 +310,8 @@ pub(crate) mod tests {
         position: 0x10,
         owner: 0x30,
         model: 0x20,
-        stale: (0x38, 0x40),
+        stale: (0x38, 0x3c),
+        stale_word: Some(0x08),
     };
 
     unsafe extern "C" fn title_request(a: u64, _: u64, _: u64, request: u64, kind: u64, _: u64) -> u64 {
@@ -351,6 +363,7 @@ pub(crate) mod tests {
         r[0x18..0x1c].copy_from_slice(&3.0f32.to_le_bytes());
         r[0x20..0x24].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         r[0x30..0x34].copy_from_slice(&0x1cu32.to_le_bytes());
+        r[0x08..0x10].fill(0xee);
         r[0x38..0x40].fill(0xee);
         r
     }
@@ -384,7 +397,8 @@ pub(crate) mod tests {
                 (OWNER, 0x30),
                 (MODEL, 0x20),
                 (STALE_FROM, 0x38),
-                (STALE_TO, 0x40),
+                (STALE_TO, 0x3c),
+                (STALE_WORD, 0x08),
             ],
         );
         assert_eq!(Layout::from_table(&table), Ok(LAYOUT_FOR_TESTS));
@@ -419,7 +433,9 @@ pub(crate) mod tests {
             0x1234_5678u32.to_le_bytes(),
             "the template's model"
         );
-        assert!(ours[0x38..0x40].iter().all(|&b| b == 0), "stale bytes cleared");
+        assert!(ours[0x38..0x3c].iter().all(|&b| b == 0), "stale bytes cleared");
+        assert!(ours[0x08..0x10].iter().all(|&b| b == 0), "the stale word too");
+        assert_eq!(ours[0x3c..0x40], [0xee; 4], "and nothing else");
         assert_eq!(
             *done,
             [0x1c, 0xd0, 0xd1, 0xd2],

@@ -159,7 +159,7 @@ The table needs, beside `ped_spawn`:
 - `ped_closest` (a native, `; hash=`), and optionally `entity_set_heading`;
 - `value ped_request_size`, `ped_request_kind` (the kind word of the create path), `ped_request_position`,
   `ped_request_owner`, `ped_request_model`, `ped_request_stale_from` and `ped_request_stale_to` (bytes the
-  title's caller leaves stale, cleared).
+  title's caller leaves stale, cleared), and optionally `ped_request_stale_word` (one more such 8-byte word).
 
 Without any of them the log says `ped_spawn off` with what is missing, and remote players are not shown. With
 them it says `peds spawn through the title's spawn requests`. No spawning happens until the title has spawned a
