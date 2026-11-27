@@ -3,8 +3,7 @@ name = "sawgrass-bots"
 description = "Headless load-test bots that connect to a Sawgrass gateway like players."
 version.workspace = true
 edition.workspace = true
-# rcgen pulls in `time` 0.3.47, which needs Rust 1.88 (see the gateway's Cargo.toml).
-rust-version = "1.88"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

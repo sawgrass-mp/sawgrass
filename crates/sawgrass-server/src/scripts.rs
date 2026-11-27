@@ -80,7 +80,7 @@ impl Scripts {
             .run_tick(info.tick, dt, &self.joined, &self.left, self.budget);
         self.worst = self.worst.max(report.spent);
         self.skipped += report.skipped;
-        if self.report_every > 0 && info.tick > 0 && info.tick % self.report_every == 0 {
+        if self.report_every > 0 && info.tick > 0 && info.tick.is_multiple_of(self.report_every) {
             for line in self.report() {
                 println!("{line}");
             }
