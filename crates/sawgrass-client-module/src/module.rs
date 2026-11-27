@@ -7,10 +7,15 @@ use std::fmt;
 
 use crate::assets::{AssetId, AssetTable};
 use crate::entity_pool::{BindError, EntityPool, NetId};
-use crate::game::{CameraPose, EntityKind, GameApi, GameError, InputState, Pose, SinglePlayerSystem};
+use sawgrass_protocol::world::{Door, Environment};
+
+use crate::game::{
+    CameraPose, EntityKind, GameApi, GameAsset, GameError, GameShot, InputState, Pose, SinglePlayerSystem,
+    Zone,
+};
 use crate::hooks::{EventSink, GameEvent, HookPoint};
 use crate::runtime::{HookHandle, HookRequest, Runtime, RuntimeError};
-use crate::table::{FunctionTable, ResolveError, ResolvedFunctions};
+use crate::table::{FunctionTable, LookupError, ResolveError, ResolvedFunctions};
 
 /// What the network core learns from the game, between frames.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +25,33 @@ pub enum CoreEvent {
     /// The game removed an entity the server owns (streamed out, destroyed). The core decides whether to spawn it
     /// again.
     EntityLost(NetId),
+    /// The local player fired once.
+    Shot(ShotReport),
+    /// The local player tried to get into `seat` (0 the driver's) of the server's vehicle `vehicle`. The game was
+    /// kept from seating it: that waits for the server.
+    EnterSeat {
+        vehicle: NetId,
+        seat: u8,
+    },
+    /// The local player left its seat in the game.
+    LeftSeat,
+}
+
+/// One of the local player's shots, in server ids and protocol asset ids.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShotReport {
+    pub weapon: AssetId,
+    pub from: [f32; 3],
+    /// The hits on entities the server knows; hits on anything else (the map, a prop) are left out.
+    pub hits: Vec<ShotHit>,
+}
+
+/// One hit of a [`ShotReport`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotHit {
+    pub target: NetId,
+    pub zone: Zone,
+    pub point: [f32; 3],
 }
 
 /// The network core's side of the module.
@@ -33,8 +65,14 @@ pub trait NetCore {
 pub enum WorldError {
     UnknownAsset(AssetId),
     UnknownEntity(NetId),
+    /// The game has no local player ped yet.
+    NoLocalPlayer,
     Bind(BindError),
     Game(GameError),
+    /// The table does not locate `ped_spawn` yet, so remote peds are not shown.
+    NoPedSpawn,
+    /// The table does not locate `entity_set_pose` yet, so the module moves no entity.
+    NoSetPose,
 }
 
 /// The game as the network core sees it: entities by server id, assets by protocol id.
@@ -42,6 +80,10 @@ pub struct World<'a> {
     game: &'a mut dyn GameApi,
     pool: &'a mut EntityPool,
     assets: &'a AssetTable,
+    /// Whether the table located `ped_spawn`.
+    peds_spawn: bool,
+    /// Whether the table located `entity_set_pose`.
+    sets_pose: bool,
 }
 
 impl fmt::Debug for World<'_> {
@@ -63,9 +105,13 @@ impl World<'_> {
         if self.pool.handle(net).is_some() {
             return Err(WorldError::Bind(BindError::NetIdTaken(net)));
         }
-        let game_asset = self
-            .assets
-            .game_asset(asset)
+        if kind == EntityKind::Ped && !self.peds_spawn {
+            return Err(WorldError::NoPedSpawn);
+        }
+        let fallback = (asset == AssetId::NONE && kind == EntityKind::Ped).then(|| self.assets.default_ped());
+        let game_asset = fallback
+            .flatten()
+            .or_else(|| self.assets.game_asset(asset))
             .ok_or(WorldError::UnknownAsset(asset))?;
         let handle = self
             .game
@@ -85,6 +131,9 @@ impl World<'_> {
 
     pub fn set_pose(&mut self, net: NetId, pose: Pose) -> Result<(), WorldError> {
         let handle = self.pool.handle(net).ok_or(WorldError::UnknownEntity(net))?;
+        if !self.sets_pose {
+            return Err(WorldError::NoSetPose);
+        }
         self.game.set_pose(handle, pose).map_err(WorldError::Game)
     }
 
@@ -92,8 +141,83 @@ impl World<'_> {
         self.game.pose(self.game.local_player()?)
     }
 
+    /// Seats the local player in `seat` of the server's vehicle `vehicle`, as the server granted.
+    pub fn seat_local_player(&mut self, vehicle: NetId, seat: u8) -> Result<(), WorldError> {
+        let ped = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
+        let vehicle = self
+            .pool
+            .handle(vehicle)
+            .ok_or(WorldError::UnknownEntity(vehicle))?;
+        self.game.enter_seat(ped, vehicle, seat).map_err(WorldError::Game)
+    }
+
+    /// Takes the local player out of its seat, if the game still has it seated.
+    pub fn unseat_local_player(&mut self) -> Result<(), WorldError> {
+        let ped = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
+        if self.game.seat(ped).is_none() {
+            return Ok(());
+        }
+        self.game.leave_seat(ped).map_err(WorldError::Game)
+    }
+
+    /// The weapon in the local player's hand, [`AssetId::NONE`] when unarmed or when the asset table does not
+    /// name it (the server then takes the player as unarmed).
+    pub fn local_player_weapon(&self) -> AssetId {
+        self.game
+            .local_player()
+            .and_then(|ped| self.game.held_weapon(ped))
+            .and_then(|weapon| self.assets.asset_id(weapon))
+            .unwrap_or(AssetId::NONE)
+    }
+
+    /// Moves the local player, to apply a correction from the server.
+    pub fn set_local_player_pose(&mut self, pose: Pose) -> Result<(), WorldError> {
+        let handle = self.game.local_player().ok_or(WorldError::NoLocalPlayer)?;
+        if !self.sets_pose {
+            return Err(WorldError::NoSetPose);
+        }
+        self.game.set_pose(handle, pose).map_err(WorldError::Game)
+    }
+
     pub fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
         self.game.set_streaming_focus(points);
+    }
+
+    /// Sets the game's clock to `minute` of the day, below [`sawgrass_protocol::world::MINUTES_PER_DAY`].
+    pub fn set_clock(&mut self, minute: f32) -> Result<(), WorldError> {
+        self.game.set_clock(minute).map_err(WorldError::Game)
+    }
+
+    /// Sets the weather from the server's [`Environment`]. Weather [`AssetId::NONE`] leaves the game's own, and a
+    /// next weather of none means no change is under way.
+    pub fn set_weather(&mut self, environment: &Environment) -> Result<(), WorldError> {
+        if environment.weather == AssetId::NONE {
+            return Ok(());
+        }
+        let current = self.asset(environment.weather)?;
+        let next = if environment.next_weather == AssetId::NONE {
+            current
+        } else {
+            self.asset(environment.next_weather)?
+        };
+        let transition = f32::from(environment.transition) / 255.0;
+        self.game
+            .set_weather(current, next, transition)
+            .map_err(WorldError::Game)
+    }
+
+    /// Applies a door's state from the server. The door's id is looked up in the asset table (ADR 0006,
+    /// assumption A4).
+    pub fn set_door(&mut self, door: &Door) -> Result<(), WorldError> {
+        let asset = self.asset(door.id)?;
+        let open = f32::from(door.open) / 255.0;
+        self.game
+            .set_door(asset, door.locked, open)
+            .map_err(WorldError::Game)
+    }
+
+    fn asset(&self, id: AssetId) -> Result<GameAsset, WorldError> {
+        self.assets.game_asset(id).ok_or(WorldError::UnknownAsset(id))
     }
 }
 
@@ -122,11 +246,54 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// Every function the module locates at start-up: the hooks, then the single-player switches.
+/// What the module cannot start without; it does not start unless the table locates both:
+///
+/// - `frame`: the game's frame, hooked to run [`Module::frame`].
+/// - `local_player`: where the game keeps the local player's ped (or the native that names it), whose position is
+///   read and sent.
+///
+/// Two players who see each other also need [`PED_SPAWN`] and [`ENTITY_SET_POSE`]. Until the table locates them the
+/// module starts anyway and sends the local player, but shows no remote peds and moves no entity. The real
+/// [`GameApi`] for the build takes all their addresses from [`Module::functions`].
+pub const REQUIRED_FUNCTIONS: [&str; 2] = ["frame", "local_player"];
+
+/// The game's function that creates a ped, for remote players: optional while it is still being found.
+pub const PED_SPAWN: &str = "ped_spawn";
+/// The game's function that puts an entity at a position, to move remote players and correct the local one:
+/// optional while it is still being found.
+pub const ENTITY_SET_POSE: &str = "entity_set_pose";
+
+/// The functions the module cannot start without: [`REQUIRED_FUNCTIONS`].
 pub fn required_functions() -> Vec<&'static str> {
-    let hooks = HookPoint::ALL.iter().map(|h| h.function());
-    hooks
+    REQUIRED_FUNCTIONS.to_vec()
+}
+
+/// [`required_functions`] on a runtime: one that calls the module once a frame by itself needs no `frame` entry.
+fn required_on(runtime: &impl Runtime) -> Vec<&'static str> {
+    required_functions()
+        .into_iter()
+        .filter(|name| !(runtime.drives_frames() && *name == HookPoint::Frame.function()))
+        .collect()
+}
+
+/// The functions the module uses when the table locates them: the other hooks, then the single-player switches.
+/// Without one, what it serves is switched off: an ambient-life hook missing leaves that life in the world, a
+/// single-player switch missing leaves that system running, the input or camera hook missing leaves the network
+/// core without those events.
+pub fn optional_functions() -> Vec<&'static str> {
+    [PED_SPAWN, ENTITY_SET_POSE]
+        .into_iter()
+        .chain(HookPoint::ALL.iter().map(|h| h.function()))
         .chain(SinglePlayerSystem::ALL.iter().map(|s| s.function()))
+        .filter(|name| !REQUIRED_FUNCTIONS.contains(name))
+        .collect()
+}
+
+/// Every function the module knows of, required first: what a complete table lists.
+pub fn all_functions() -> Vec<&'static str> {
+    required_functions()
+        .into_iter()
+        .chain(optional_functions())
         .collect()
 }
 
@@ -139,14 +306,26 @@ pub struct Module<R: Runtime> {
     pool: EntityPool,
     events: EventSink,
     single_player_off: bool,
+    /// The single-player systems whose switch the table located.
+    switches: Vec<SinglePlayerSystem>,
+    /// The hook points installed.
+    hooked: Vec<HookPoint>,
+    /// Optional hooks the runtime refused, and why; their events are off.
+    refused: Vec<(HookPoint, RuntimeError)>,
+    /// The local player's shots not reported: their weapon is not in the asset table, so the server could not
+    /// check them.
+    pub shots_dropped: u64,
     /// Peds and vehicles the game made by itself and the module removed. Entities that were already gone when the
     /// frame got to them (one of ours spawned and despawned within a frame, say) are not counted.
     pub ambient_removed: u64,
 }
 
 impl<R: Runtime> Module<R> {
-    /// Locates every required function for the running build and installs the hooks. If any step fails, nothing is
-    /// left installed and the runtime is given back with the reason, so the adapter can report it in the game.
+    /// Locates the functions for the running build and installs the hooks the table has. A required function
+    /// missing, or the frame hook refused, stops the start: nothing is left installed and the runtime is given back
+    /// with the reason, so the adapter can report it in the game. Optional functions missing, or optional hooks the
+    /// runtime refuses, only switch off what they serve; [`Module::missing_functions`] and
+    /// [`Module::refused_hooks`] list them.
     pub fn start(
         mut runtime: R,
         functions: &FunctionTable,
@@ -157,13 +336,23 @@ impl<R: Runtime> Module<R> {
             Err(error) => return Err((error, runtime)),
         };
         let mut hooks = Vec::new();
+        let mut hooked = Vec::new();
+        let mut refused = Vec::new();
         for point in HookPoint::ALL {
+            if point == HookPoint::Frame && runtime.drives_frames() {
+                continue;
+            }
             let function = point.function().to_owned();
-            let address = resolved
-                .address(&function)
-                .expect("resolve located every required function");
+            // `frame` is required, so it is always here; another hook missing switches its events off.
+            let Some(address) = resolved.address(&function) else {
+                continue;
+            };
             match runtime.install_hook(HookRequest { function, address }) {
-                Ok(handle) => hooks.push(handle),
+                Ok(handle) => {
+                    hooks.push(handle);
+                    hooked.push(point);
+                }
+                Err(error) if point != HookPoint::Frame => refused.push((point, error)),
                 Err(error) => {
                     for handle in hooks {
                         // Best effort: the start already failed, and the error that caused it is the one to report.
@@ -173,6 +362,11 @@ impl<R: Runtime> Module<R> {
                 }
             }
         }
+        let switches_located: Vec<&str> = SinglePlayerSystem::ALL
+            .iter()
+            .map(|s| s.function())
+            .filter(|name| resolved.address(name).is_some())
+            .collect();
         Ok(Self {
             runtime,
             functions: resolved,
@@ -181,7 +375,14 @@ impl<R: Runtime> Module<R> {
             pool: EntityPool::default(),
             events: EventSink::default(),
             single_player_off: false,
+            switches: SinglePlayerSystem::ALL
+                .into_iter()
+                .filter(|s| switches_located.contains(&s.function()))
+                .collect(),
+            hooked,
+            refused,
             ambient_removed: 0,
+            shots_dropped: 0,
         })
     }
 
@@ -199,7 +400,7 @@ impl<R: Runtime> Module<R> {
         }
         let image = runtime.code_image().map_err(StartError::Runtime)?;
         functions
-            .resolve(&build, image, &required_functions())
+            .resolve(&build, image, &required_on(runtime), &optional_functions())
             .map_err(StartError::Functions)
     }
 
@@ -207,8 +408,40 @@ impl<R: Runtime> Module<R> {
         &self.runtime
     }
 
+    /// The runtime, for an adapter that installs its own hooks during the start, such as the hook that runs the
+    /// frame on VIctory's script thread.
+    pub fn runtime_mut(&mut self) -> &mut R {
+        &mut self.runtime
+    }
+
     pub fn functions(&self) -> &ResolvedFunctions {
         &self.functions
+    }
+
+    /// Whether entities can be moved: the table located [`ENTITY_SET_POSE`].
+    pub fn moves_entities(&self) -> bool {
+        self.functions.address(ENTITY_SET_POSE).is_some()
+    }
+
+    /// Whether remote peds can be shown: the table located [`PED_SPAWN`].
+    pub fn shows_remote_peds(&self) -> bool {
+        self.functions.address(PED_SPAWN).is_some()
+    }
+
+    /// The optional functions the table did not locate, and why: what the adapter shows the player, and the list
+    /// of what to find next.
+    pub fn missing_functions(&self) -> &[(String, LookupError)] {
+        &self.functions.missing
+    }
+
+    /// The optional hooks the runtime refused, and why.
+    pub fn refused_hooks(&self) -> &[(HookPoint, RuntimeError)] {
+        &self.refused
+    }
+
+    /// Whether this hook point is installed.
+    pub fn is_hooked(&self, point: HookPoint) -> bool {
+        self.hooked.contains(&point)
     }
 
     pub fn entities(&self) -> &EntityPool {
@@ -228,7 +461,8 @@ impl<R: Runtime> Module<R> {
         core: &mut dyn NetCore,
     ) -> Result<(), GameError> {
         if !self.single_player_off {
-            for system in SinglePlayerSystem::ALL {
+            // Only the systems whose switch the table located; the others keep running until it does.
+            for &system in &self.switches {
                 game.disable(system)?;
             }
             self.single_player_off = true;
@@ -253,15 +487,58 @@ impl<R: Runtime> Module<R> {
                 }
                 GameEvent::Input(input) => core.on_event(&CoreEvent::Input(input)),
                 GameEvent::Camera(camera) => core.on_event(&CoreEvent::Camera(camera)),
+                GameEvent::Shot(shot) if game.local_player() == Some(shot.shooter) => {
+                    match self.shot_report(&shot) {
+                        Some(report) => core.on_event(&CoreEvent::Shot(report)),
+                        None => self.shots_dropped += 1,
+                    }
+                }
+                // Other peds' shots are the server's to show, from their own clients' reports.
+                GameEvent::Shot(_) => {}
+                GameEvent::SeatRequested { ped, vehicle, seat } if game.local_player() == Some(ped) => {
+                    // A vehicle the server does not know of is not the server's to seat anyone in.
+                    if let Some(vehicle) = self.pool.net_id(vehicle) {
+                        core.on_event(&CoreEvent::EnterSeat { vehicle, seat });
+                    }
+                }
+                GameEvent::SeatLeft { ped } if game.local_player() == Some(ped) => {
+                    core.on_event(&CoreEvent::LeftSeat);
+                }
+                // Other peds sit where the server says, so their seats are not reported.
+                GameEvent::SeatRequested { .. } | GameEvent::SeatLeft { .. } => {}
             }
         }
+        let peds_spawn = self.shows_remote_peds();
+        let sets_pose = self.moves_entities();
         let mut world = World {
             game,
             pool: &mut self.pool,
             assets: &self.assets,
+            peds_spawn,
+            sets_pose,
         };
         core.on_frame(dt, &mut world);
         Ok(())
+    }
+
+    fn shot_report(&self, shot: &GameShot) -> Option<ShotReport> {
+        let weapon = self.assets.asset_id(shot.weapon)?;
+        let hits = shot
+            .hits
+            .iter()
+            .filter_map(|hit| {
+                Some(ShotHit {
+                    target: self.pool.net_id(hit.target)?,
+                    zone: hit.zone,
+                    point: hit.point,
+                })
+            })
+            .collect();
+        Some(ShotReport {
+            weapon,
+            from: shot.from,
+            hits,
+        })
     }
 
     /// Removes every hook and gives the runtime back, with the hooks it could not remove, if any.

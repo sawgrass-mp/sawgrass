@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::game::{CameraPose, EntityKind, GameAsset, GameHandle, InputState};
+use crate::game::{CameraPose, EntityKind, GameAsset, GameHandle, GameShot, InputState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HookPoint {
@@ -30,10 +30,26 @@ pub enum HookPoint {
     CameraUpdate,
     /// Where the game decides what to stream in, so that the world loads around remote players too.
     StreamingUpdate,
+    /// Where the game resolves one pull of a trigger and what it hit, reported as [`GameEvent::Shot`].
+    ///
+    /// ASSUMPTION: one function sees the shooter, the weapon and every hit of the shot, a shotgun's pellets
+    /// included. If the hits come one by one, the adapter gathers them per shot before it pushes the event.
+    WeaponFire,
+    /// Where a ped starts into a vehicle seat, reported as [`GameEvent::SeatRequested`].
+    ///
+    /// ASSUMPTION: for the local player the adapter refuses the game's own entry (it does not call the original),
+    /// since the server decides who sits where; the module seats the player when the server grants it. Other
+    /// peds are seated by the module only. If [`GameApi::enter_seat`](crate::game::GameApi::enter_seat) goes
+    /// through the hooked function, the detour lets the module's own call through, or a grant would be refused by
+    /// the module's own hook.
+    SeatEnter,
+    /// Where a ped leaves a vehicle seat, by itself or thrown out by the vehicle's physics, reported as
+    /// [`GameEvent::SeatLeft`]. The game goes ahead: the server always grants leaving.
+    SeatLeave,
 }
 
 impl HookPoint {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Frame,
         Self::PedCreate,
         Self::PedRemove,
@@ -44,6 +60,9 @@ impl HookPoint {
         Self::InputPoll,
         Self::CameraUpdate,
         Self::StreamingUpdate,
+        Self::WeaponFire,
+        Self::SeatEnter,
+        Self::SeatLeave,
     ];
 
     /// The function table name of the hooked function.
@@ -59,6 +78,9 @@ impl HookPoint {
             Self::InputPoll => "input_poll",
             Self::CameraUpdate => "camera_update",
             Self::StreamingUpdate => "streaming_update",
+            Self::WeaponFire => "weapon_fire",
+            Self::SeatEnter => "ped_seat_enter",
+            Self::SeatLeave => "ped_seat_leave",
         }
     }
 }
@@ -77,6 +99,18 @@ pub enum GameEvent {
     },
     Input(InputState),
     Camera(CameraPose),
+    /// A ped fired once. Only the local player's shots are reported to the server.
+    Shot(GameShot),
+    /// A ped tried to get into `seat` (0 the driver's) of `vehicle`.
+    SeatRequested {
+        ped: GameHandle,
+        vehicle: GameHandle,
+        seat: u8,
+    },
+    /// A ped left the seat it sat in.
+    SeatLeft {
+        ped: GameHandle,
+    },
 }
 
 /// Where hooks queue events. Cloning gives another handle to the same queue.

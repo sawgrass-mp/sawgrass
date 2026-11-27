@@ -7,10 +7,12 @@
 //! runs N of them; see the crate README. [`misbehave`] adds bots that flood, teleport, send malformed events or
 //! reconnect in a storm, to test the server's defences under load.
 
+pub mod actions;
 pub mod bot;
 pub mod cpu;
 pub mod misbehave;
 pub mod record;
+pub mod replay;
 pub mod report;
 pub mod stats;
 pub mod walker;

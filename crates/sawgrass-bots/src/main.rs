@@ -1,4 +1,5 @@
-//! `sawgrass-bots`: run N load-test bots against a Sawgrass server, or write a test certificate for one.
+//! `sawgrass-bots`: run N load-test bots against a Sawgrass server, play a session recording against one, or
+//! write a test certificate for one.
 //!
 //! See the crate README for the commands.
 
@@ -10,6 +11,7 @@ use std::time::Duration;
 
 use sawgrass_bots::misbehave::{self, Kind, Misbehaving};
 use sawgrass_bots::record::Recorder;
+use sawgrass_bots::replay;
 use sawgrass_bots::report::{self, Context};
 use sawgrass_bots::stats::Counters;
 use sawgrass_bots::walker::Area;
@@ -28,8 +30,9 @@ const USAGE: &str = "usage:
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
                     [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
                     [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]
-                    [--decoders N] [--sockets N]
-                    [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]";
+                    [--decoders N] [--sockets N] [--pay-every SECS] [--drivers N] [--shooters N]
+                    [--shot-hz N] [--aim-delay TICKS] [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]
+  sawgrass-bots replay --file FILE --server ADDR --cert FILE [--name NAME] [--speed X]";
 
 struct RunArgs {
     server: SocketAddr,
@@ -47,6 +50,11 @@ struct RunArgs {
     misbehave: [u64; 4],
     decoders: u64,
     sockets: usize,
+    pay_every: Option<Duration>,
+    drivers: u64,
+    shooters: u64,
+    shot_hz: u32,
+    aim_delay: u32,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, value: Option<String>) -> Result<T, String>
@@ -77,6 +85,11 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
         misbehave: [0; 4],
         decoders: u64::MAX,
         sockets: 0,
+        pay_every: None,
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 2,
+        aim_delay: 0,
     };
     while let Some(flag) = args.next() {
         let value = args.next();
@@ -97,6 +110,17 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--record-bots" => run.record_bots = parse(&flag, value)?,
             "--decoders" => run.decoders = parse(&flag, value)?,
             "--sockets" => run.sockets = parse(&flag, value)?,
+            "--pay-every" => {
+                run.pay_every = Some(Duration::from_secs_f64(parse::<f64>(&flag, value)?.max(0.01)))
+            }
+            "--drivers" => run.drivers = parse(&flag, value)?,
+            "--shooters" => run.shooters = parse(&flag, value)?,
+            // Below the placeholder weapon's 15 shots a second, so send jitter never makes an honest shot early.
+            "--shot-hz" => run.shot_hz = parse::<u32>(&flag, value)?.clamp(1, 12),
+            // Within the server's rewind, with room for the shot's transit.
+            "--aim-delay" => {
+                run.aim_delay = parse::<u32>(&flag, value)?.min(sawgrass_bots::actions::MAX_AIM_DELAY)
+            }
             "--misbehave" => run.misbehave = misbehave::parse(&value.ok_or("--misbehave needs a value")?)?,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -105,6 +129,54 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
     run.cert = cert.ok_or("--cert is required")?;
     run.count = count.ok_or("--count is required")?;
     Ok(run)
+}
+
+/// `replay`: plays a server's `--record` file against a server (task SRV-22).
+async fn replay(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (mut file, mut server, mut cert, mut name, mut speed) =
+        (None, None, None, "localhost".to_owned(), 1.0);
+    while let Some(flag) = args.next() {
+        let value = args.next();
+        match flag.as_str() {
+            "--file" => file = Some(PathBuf::from(value.ok_or("--file needs a value")?)),
+            "--server" => server = Some(parse::<SocketAddr>("--server", value)?),
+            "--cert" => cert = Some(PathBuf::from(value.ok_or("--cert needs a value")?)),
+            "--name" => name = value.ok_or("--name needs a value")?,
+            "--speed" => speed = parse::<f64>("--speed", value)?,
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+    }
+    let (file, server, cert) = (
+        file.ok_or("--file is required")?,
+        server.ok_or("--server is required")?,
+        cert.ok_or("--cert is required")?,
+    );
+    if !(speed.is_finite() && speed > 0.0) {
+        return Err(format!("--speed must be positive, not {speed}"));
+    }
+    let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let scripts = replay::parse(&bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+    let der = std::fs::read(&cert).map_err(|e| format!("{}: {e}", cert.display()))?;
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(der))
+        .map_err(|e| format!("{}: {e}", cert.display()))?;
+    let connector = Arc::new(Connector::new(server.is_ipv6(), roots).map_err(|e| e.to_string())?);
+    println!(
+        "replaying {} connections from {} at {speed}x",
+        scripts.len(),
+        file.display()
+    );
+    let done = replay::replay(scripts, server, &name, connector, speed).await;
+    let load = |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed);
+    println!(
+        "replayed: {} connected, {} failed, {} datagrams, {} events",
+        load(&done.connected),
+        load(&done.failed),
+        load(&done.datagrams),
+        load(&done.events)
+    );
+    Ok(())
 }
 
 fn gen_cert(mut args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -157,6 +229,12 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         record: record.clone(),
         decoders: args.decoders,
         sockets,
+        pay_every: args.pay_every,
+        payees: Arc::default(),
+        drivers: args.drivers,
+        shooters: args.shooters,
+        shot_hz: args.shot_hz,
+        aim_delay: args.aim_delay,
     });
     let counters = Arc::new(Counters::default());
     let ctx = Context {
@@ -237,6 +315,18 @@ async fn run_bots(args: RunArgs, cores: usize) -> Result<(), String> {
         println!("first connection error: {error}");
     }
     print!("{}", misbehaving.render(&args.misbehave));
+    if args.drivers > 0 || args.shooters > 0 {
+        let load = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "actions: {} drivers sent {} seat requests and {} vehicle states, {} shooters sent {} shots \
+             (the server's log has seats granted and refused, hits accepted and refused)",
+            args.drivers.min(args.count),
+            load(&counters.seat_requests),
+            load(&counters.owned_states_sent),
+            args.shooters.min(args.count),
+            load(&counters.shots_sent)
+        );
+    }
     let _ = tokio::time::timeout(Duration::from_secs(5), spawner).await;
     if let (Some(recorder), Some(path)) = (&record, &args.record) {
         recorder.flush().map_err(|e| format!("{}: {e}", path.display()))?;
@@ -258,6 +348,11 @@ fn main() -> ExitCode {
                 .map_err(|e| e.to_string())?;
             runtime.block_on(run_bots(run_args, cores))
         }),
+        Some("replay") => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|runtime| runtime.block_on(replay(args))),
         _ => Err("expected a command".to_owned()),
     };
     match result {

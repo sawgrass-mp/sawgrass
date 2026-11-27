@@ -83,8 +83,24 @@ pub struct Counters {
     pub ticks_seen: AtomicU64,
     /// Of [`Counters::ticks_seen`], the ticks whose snapshot a bot decoded, so entities per tick need no guess.
     pub decoded_ticks: AtomicU64,
+    /// Seat requests sent by driving bots, entering and leaving (BOT-5).
+    pub seat_requests: AtomicU64,
+    /// Vehicle states sent by driving bots.
+    pub owned_states_sent: AtomicU64,
+    /// Shots sent by shooting bots.
+    pub shots_sent: AtomicU64,
     /// How late each state send ran after its scheduled time. A generator that runs out of CPU sends late.
     pub send_lateness: Histogram,
+    /// Payments sent to other bots (BOT-7).
+    pub payments_sent: AtomicU64,
+    /// Payments the server answered as done.
+    pub payments_done: AtomicU64,
+    /// Payments refused because the payer had too little money.
+    pub payments_short: AtomicU64,
+    /// Payments answered with any other refusal or failure.
+    pub payments_refused: AtomicU64,
+    /// Time from sending a payment to its answer, which leaves the server once the payment is on disk.
+    pub payment_answer: Histogram,
     /// The latest figures the server reported, if it was started with `--stats-to-clients`.
     pub server: Mutex<Option<ServerStats>>,
     /// The first connection error, to show why bots failed.
@@ -136,6 +152,16 @@ pub struct Sample {
     pub decoded_ticks: u64,
     /// [`Counters::send_lateness`].
     pub lateness: [u64; BUCKETS],
+    /// [`Counters::payments_sent`].
+    pub payments_sent: u64,
+    /// [`Counters::payments_done`].
+    pub payments_done: u64,
+    /// [`Counters::payments_short`].
+    pub payments_short: u64,
+    /// [`Counters::payments_refused`].
+    pub payments_refused: u64,
+    /// [`Counters::payment_answer`].
+    pub payment_answer: [u64; BUCKETS],
     /// CPU time of this process so far.
     pub cpu: Option<Duration>,
 }
@@ -159,6 +185,11 @@ impl Counters {
             ticks_seen: load(&self.ticks_seen),
             decoded_ticks: load(&self.decoded_ticks),
             lateness: self.send_lateness.counts(),
+            payments_sent: load(&self.payments_sent),
+            payments_done: load(&self.payments_done),
+            payments_short: load(&self.payments_short),
+            payments_refused: load(&self.payments_refused),
+            payment_answer: self.payment_answer.counts(),
             cpu: crate::cpu::process_time(),
         }
     }

@@ -12,9 +12,11 @@
 //! [`SNAPSHOT_MAX_ENTITIES`] entities is split over several datagrams with the same tick, so each one fits in
 //! [`MAX_DATAGRAM`] bytes on any path quinn accepts.
 
+use crate::combat::Shot;
 use crate::delta::{put_varint, take_varint};
 use crate::entity::MAX_FIELDS;
 use crate::ped::PedBlock;
+use crate::world::{Door, Environment};
 use crate::{
     DecodeError, EncodeError, EntityState, PacketHeader, Position, Reader, Rotation, Velocity, Writer,
 };
@@ -79,7 +81,10 @@ impl ClientState {
         for o in owned {
             put_varint(out, u64::from(o.id));
             out.push(o.epoch);
-            o.state.encode(&mut buf)?;
+            if let Err(e) = o.state.encode(&mut buf) {
+                out.truncate(start);
+                return Err(e);
+            }
             out.extend_from_slice(&buf);
             put_fields(o.fields(), out);
         }
@@ -298,10 +303,98 @@ impl ServerStats {
 /// Event codes. The values are part of the wire format.
 const JOINED: u8 = 1;
 const STATS: u8 = 2;
+const PAID: u8 = 3;
+const OWNERSHIP: u8 = 4;
+const CORRECTED: u8 = 5;
+const ENVIRONMENT: u8 = 6;
+const DOOR: u8 = 7;
+const SEAT: u8 = 8;
 const REQUEST_STATS: u8 = 128;
+const PAY: u8 = 129;
+const ENTER_SEAT: u8 = 130;
+const LEAVE_SEAT: u8 = 131;
+const SHOT: u8 = 132;
+
+/// How the server answered a [`ClientEvent::Pay`]. The values are part of the wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PayResult {
+    /// The money moved, and is durable.
+    Done = 0,
+    /// The payer's balance is below the amount.
+    InsufficientFunds = 1,
+    /// The payee is not a player with a wallet.
+    UnknownPayee = 2,
+    /// A zero amount, a payment to oneself, or a key reused with other parameters.
+    Invalid = 3,
+    /// The server could not store it; nothing moved.
+    Failed = 4,
+    /// The server takes no payments from clients.
+    Refused = 5,
+}
+
+impl PayResult {
+    fn from_code(code: u8) -> Result<Self, DecodeError> {
+        Ok(match code {
+            0 => Self::Done,
+            1 => Self::InsufficientFunds,
+            2 => Self::UnknownPayee,
+            3 => Self::Invalid,
+            4 => Self::Failed,
+            5 => Self::Refused,
+            _ => return Err(DecodeError::OutOfRange),
+        })
+    }
+}
+
+/// How the server answered a [`ClientEvent::EnterSeat`] or [`ClientEvent::LeaveSeat`], in a [`ServerEvent::Seat`].
+/// The values are part of the wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SeatAnswer {
+    /// The player sits in the seat now; the driver's seat also makes it the vehicle's owner.
+    Granted = 0,
+    /// The player left the seat: on its request, or because the server took it out (it died, or the vehicle went).
+    Left = 1,
+    /// The id is not a spawned vehicle.
+    NotAVehicle = 2,
+    /// The seat index is past the vehicle's seats.
+    NoSuchSeat = 3,
+    /// Someone sits there.
+    Taken = 4,
+    /// The vehicle is locked.
+    Locked = 5,
+    /// The player is too far from the vehicle, has no position yet, or is dead.
+    CannotReach = 6,
+    /// The player already sits in a vehicle and must leave it first.
+    AlreadySeated = 7,
+    /// A request to leave from a player in no seat.
+    NotSeated = 8,
+}
+
+impl SeatAnswer {
+    fn from_code(code: u8) -> Result<Self, DecodeError> {
+        Ok(match code {
+            0 => Self::Granted,
+            1 => Self::Left,
+            2 => Self::NotAVehicle,
+            3 => Self::NoSuchSeat,
+            4 => Self::Taken,
+            5 => Self::Locked,
+            6 => Self::CannotReach,
+            7 => Self::AlreadySeated,
+            8 => Self::NotSeated,
+            _ => return Err(DecodeError::OutOfRange),
+        })
+    }
+}
 
 /// An event from the server.
+///
+/// New events are added in later protocol versions, so readers outside this crate need a catch-all arm and
+/// ignore what they do not use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ServerEvent {
     /// The player's character was spawned with this entity id; snapshots arrive at `tick_hz`.
     Joined {
@@ -313,6 +406,43 @@ pub enum ServerEvent {
     /// Server figures, sent periodically to clients that sent [`ClientEvent::RequestStats`] when the server
     /// allows it.
     Stats(ServerStats),
+    /// The answer to the [`ClientEvent::Pay`] with this `key`, and the payer's balance after it.
+    Paid {
+        /// The client's key for the payment.
+        key: u64,
+        /// What happened.
+        result: PayResult,
+        /// The payer's balance after the payment, or as it stands if nothing moved.
+        balance: i64,
+    },
+    /// The client now simulates `entity` (`yours`), or no longer does (ADR 0006, section 4). Its
+    /// [`OwnedState`]s for the entity must carry `epoch`; the server drops any other.
+    Ownership {
+        /// The entity's id.
+        entity: u32,
+        /// The entity's epoch from now on.
+        epoch: u8,
+        /// Whether this client is its owner now.
+        yours: bool,
+    },
+    /// The server refused a state the client sent for this entity (its own player, or an entity it simulates)
+    /// and holds it here: the last state it accepted. The client moves the entity back. Sent only to the
+    /// entity's current owner, at most every few hundred milliseconds per entity.
+    Corrected(EntityState),
+    /// The clock and the weather (ADR 0006, section 7): sent on joining and whenever the server changes them.
+    Environment(Environment),
+    /// A door's state: every registered door on joining, then each change.
+    Door(Door),
+    /// The answer to one of the player's seat requests, or the news that the server took it out of its seat
+    /// (ADR 0006, section 4). One for every [`ClientEvent::EnterSeat`] and [`ClientEvent::LeaveSeat`], in order.
+    Seat {
+        /// The vehicle's entity id: the one asked for, or the one left; 0 for [`SeatAnswer::NotSeated`].
+        vehicle: u32,
+        /// The seat index, 0 the driver's: the one asked for, or the one left.
+        seat: u8,
+        /// Granted, left, or why the request was refused.
+        answer: SeatAnswer,
+    },
 }
 
 impl ServerEvent {
@@ -340,6 +470,43 @@ impl ServerEvent {
                 }
                 out.extend_from_slice(&s.sent_bytes_per_sec.to_le_bytes());
                 out.extend_from_slice(&s.received_bytes_per_sec.to_le_bytes());
+            }
+            Self::Paid { key, result, balance } => {
+                out.push(PAID);
+                out.extend_from_slice(&key.to_le_bytes());
+                out.push(*result as u8);
+                out.extend_from_slice(&balance.to_le_bytes());
+            }
+            Self::Ownership { entity, epoch, yours } => {
+                out.push(OWNERSHIP);
+                out.extend_from_slice(&entity.to_le_bytes());
+                out.push(*epoch);
+                out.push(u8::from(*yours));
+            }
+            Self::Corrected(state) => {
+                out.push(CORRECTED);
+                let mut buf = [0; EntityState::SIZE];
+                // The buffer is exactly one state long, so encoding cannot fail.
+                let _ = state.encode(&mut buf);
+                out.extend_from_slice(&buf);
+            }
+            Self::Environment(environment) => {
+                out.push(ENVIRONMENT);
+                environment.write(out);
+            }
+            Self::Door(door) => {
+                out.push(DOOR);
+                door.write(out);
+            }
+            Self::Seat {
+                vehicle,
+                seat,
+                answer,
+            } => {
+                out.push(SEAT);
+                out.extend_from_slice(&vehicle.to_le_bytes());
+                out.push(*seat);
+                out.push(*answer as u8);
             }
         }
     }
@@ -384,6 +551,39 @@ impl ServerEvent {
                     received_bytes_per_sec: u64::from_le_bytes(r.array()?),
                 }))
             }
+            PAID => Ok(Self::Paid {
+                key: u64::from_le_bytes(r.array()?),
+                result: PayResult::from_code(r.array::<1>()?[0])?,
+                balance: i64::from_le_bytes(r.array()?),
+            }),
+            OWNERSHIP => {
+                let entity = u32::from_le_bytes(r.array()?);
+                let [epoch, yours] = r.array::<2>()?;
+                if yours > 1 {
+                    return Err(DecodeError::OutOfRange);
+                }
+                Ok(Self::Ownership {
+                    entity,
+                    epoch,
+                    yours: yours == 1,
+                })
+            }
+            CORRECTED => {
+                let (state, rest) = EntityState::decode(r.input)?;
+                r.input = rest;
+                Ok(Self::Corrected(state))
+            }
+            ENVIRONMENT => Ok(Self::Environment(Environment::read(&mut r)?)),
+            DOOR => Ok(Self::Door(Door::read(&mut r)?)),
+            SEAT => {
+                let vehicle = u32::from_le_bytes(r.array()?);
+                let [seat, answer] = r.array::<2>()?;
+                Ok(Self::Seat {
+                    vehicle,
+                    seat,
+                    answer: SeatAnswer::from_code(answer)?,
+                })
+            }
             other => Err(DecodeError::UnknownEvent(other)),
         }?;
         r.finish()?;
@@ -392,10 +592,41 @@ impl ServerEvent {
 }
 
 /// An event from a client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// New events are added in later protocol versions, so readers outside this crate need a catch-all arm and
+/// ignore what they do not use.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ClientEvent {
     /// Ask for [`ServerEvent::Stats`]. A server started without load-test reporting ignores it.
     RequestStats,
+    /// Ask to sit in `seat` (0 the driver's) of `vehicle` (ADR 0006, section 4). The server decides and answers with
+    /// [`ServerEvent::Seat`]: granted, or why not. Other players see a granted seat in the player's ped block
+    /// (motion "in vehicle", the vehicle and the seat); a refused request changes nothing.
+    EnterSeat {
+        /// The vehicle's entity id.
+        vehicle: u32,
+        /// The seat index, 0 the driver's.
+        seat: u8,
+    },
+    /// Ask to leave the seat the player sits in, or say that the vehicle's physics threw the player out. The
+    /// server always grants it, answering [`SeatAnswer::Left`], or [`SeatAnswer::NotSeated`] if the player sat
+    /// nowhere.
+    LeaveSeat,
+    /// The client's player fired once, and what it hit (ADR 0006, section 5). Shots have their own rate limit,
+    /// separate from the other events'.
+    Shot(Box<Shot>),
+    /// Pay `amount` from the player's wallet to the player with entity id `to`; answered by [`ServerEvent::Paid`]
+    /// with the same `key`. Sending the same key again is answered without paying twice. Only servers started
+    /// for money load tests take it (task DB-8); others answer [`PayResult::Refused`].
+    Pay {
+        /// The client's key for this payment, unique per payment.
+        key: u64,
+        /// The payee's entity id.
+        to: u32,
+        /// The amount, in the smallest unit of money.
+        amount: u32,
+    },
 }
 
 impl ClientEvent {
@@ -403,6 +634,22 @@ impl ClientEvent {
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::RequestStats => out.push(REQUEST_STATS),
+            Self::EnterSeat { vehicle, seat } => {
+                out.push(ENTER_SEAT);
+                out.extend_from_slice(&vehicle.to_le_bytes());
+                out.push(*seat);
+            }
+            Self::LeaveSeat => out.push(LEAVE_SEAT),
+            Self::Shot(shot) => {
+                out.push(SHOT);
+                shot.write(out);
+            }
+            Self::Pay { key, to, amount } => {
+                out.push(PAY);
+                out.extend_from_slice(&key.to_le_bytes());
+                out.extend_from_slice(&to.to_le_bytes());
+                out.extend_from_slice(&amount.to_le_bytes());
+            }
         }
     }
 
@@ -411,6 +658,18 @@ impl ClientEvent {
         let mut r = Reader { input };
         let event = match r.array::<1>()? {
             [REQUEST_STATS] => Self::RequestStats,
+            [ENTER_SEAT] => {
+                let vehicle = u32::from_le_bytes(r.array()?);
+                let [seat] = r.array::<1>()?;
+                Self::EnterSeat { vehicle, seat }
+            }
+            [LEAVE_SEAT] => Self::LeaveSeat,
+            [SHOT] => Self::Shot(Box::new(Shot::read(&mut r)?)),
+            [PAY] => Self::Pay {
+                key: u64::from_le_bytes(r.array()?),
+                to: u32::from_le_bytes(r.array()?),
+                amount: u32::from_le_bytes(r.array()?),
+            },
             [other] => return Err(DecodeError::UnknownEvent(other)),
         };
         r.finish()?;

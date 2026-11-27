@@ -4,7 +4,7 @@ Status: proposed, 2026-11-25
 
 ## Context
 
-Step 8 of the [roadmap](../roadmap.md#8-sync-in-the-game) lists what can be built before the game runs on PC: the
+Step 9 of the [roadmap](../roadmap.md#9-sync-in-the-game) lists what can be built before the game runs on PC: the
 replicated state of peds and their animations and its encoding, the ownership rules and checks for vehicles and
 NPCs, the server's checks of weapons and damage, and the server side of world state. Today the protocol carries one
 kind of entity, a position, velocity and rotation with an id ([`sawgrass-protocol`](../../crates/sawgrass-protocol/src/lib.rs)),
@@ -129,8 +129,10 @@ A ped's health and armour live on the server. A client cannot heal and cannot ch
   closes the connection. The per-weapon fire-rate check is what bounds the hits.
 - The server accepts it only if: the shooter is alive and holds that weapon; the weapon's fire rate allows another
   shot; the target is in the same routing bucket and in the shooter's visible set; the distance is within the
-  weapon's range; the reported tick is at most the rewind limit old (placeholder 250 ms); and the target's position
-  at that tick, from the server's snapshot history, is within a tolerance of the hit point. The server keeps that
+  weapon's range; the reported render time is at most the rewind limit old (placeholder 500 ms: 400 ms of render
+  delay plus 100 ms of transit, a hard cap); and the target's position at that time, interpolated between the two
+  snapshot ticks around it in the server's history (NET-22: the shot names a tick and a fraction towards the next),
+  is within a tolerance of the hit point. The server keeps that
   history already for delta snapshots.
 - The server computes the damage from the weapon's figures and the zone, applies armour, and sets health in the
   ped block. At zero health it sets `motion` to dead and tells the scripts, which decide what happens next.

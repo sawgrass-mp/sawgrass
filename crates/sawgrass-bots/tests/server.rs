@@ -56,6 +56,12 @@ async fn bots_move_on_the_server_and_see_each_other() {
         record: None,
         decoders: u64::MAX,
         sockets: Vec::new(),
+        pay_every: None,
+        payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
+        aim_delay: 0,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(4);
@@ -122,6 +128,78 @@ async fn bots_move_on_the_server_and_see_each_other() {
     assert!(entities > 60, "each bot saw the other: {entities} states");
 }
 
+/// The rate SRV-8 makes the default: the server ticks at 30 Hz, says so on join, and bots sending 30 states a
+/// second get a snapshot for every tick, half again what 20 Hz carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_and_bots_run_at_30_hz() {
+    const HZ: u32 = 30;
+    const SECONDS: u64 = 4;
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    let mut players = net::listen(gateway, ListenConfig::default());
+    let tick_config = TickConfig::new(HZ).expect("30 Hz");
+    let mut tick_loop = TickLoop::new(tick_config);
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+    let config = Arc::new(BotConfig {
+        server: addr,
+        server_name: "localhost".to_owned(),
+        roots,
+        send_hz: HZ,
+        area: Area {
+            size: 100.0,
+            hotspots: 0,
+            ..Area::default()
+        },
+        record: None,
+        decoders: u64::MAX,
+        sockets: Vec::new(),
+        pay_every: None,
+        payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
+        aim_delay: 0,
+    });
+    let counters = Arc::new(Counters::default());
+    let stop = Instant::now() + Duration::from_secs(SECONDS);
+    let mut joined = Vec::new();
+    for index in 0..2 {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Joined>();
+        tokio::spawn(run(
+            config.clone(),
+            index,
+            counters.clone(),
+            false,
+            stop,
+            Some(tx),
+        ));
+        joined.push(rx);
+    }
+    let interval = Duration::from_secs(1) / HZ;
+    let ticks = std::thread::spawn(move || {
+        let mut next = std::time::Instant::now();
+        while std::time::Instant::now() < stop.into_std() {
+            tick_loop.run_tick();
+            next += interval;
+            std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+        }
+    });
+    let first = tokio::time::timeout(Duration::from_secs(5), joined.remove(0))
+        .await
+        .expect("joined in time")
+        .expect("joined");
+    assert_eq!(u32::from(first.tick_hz), HZ);
+    tokio::task::spawn_blocking(move || ticks.join().expect("tick thread"))
+        .await
+        .expect("join");
+    // Two bots for SECONDS at 30 Hz: up to 240 states sent and 240 snapshots seen. 20 Hz would carry at most 160.
+    let at_20_hz = 2 * 20 * SECONDS;
+    let sent = counters.sent_datagrams.load(Ordering::Relaxed);
+    let ticks_seen = counters.ticks_seen.load(Ordering::Relaxed);
+    assert!(sent > at_20_hz + 20, "sent {sent}");
+    assert!(ticks_seen > at_20_hz + 20, "snapshots for {ticks_seen} ticks");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn misbehaving_bots_are_stopped_and_an_honest_one_plays_on() {
     use sawgrass_bots::misbehave::{self, Kind, Misbehaving};
@@ -155,6 +233,12 @@ async fn misbehaving_bots_are_stopped_and_an_honest_one_plays_on() {
         record: None,
         decoders: u64::MAX,
         sockets: Vec::new(),
+        pay_every: None,
+        payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
+        aim_delay: 0,
     });
     let stop = Instant::now() + Duration::from_secs(3);
     let honest = Arc::new(Counters::default());
@@ -236,6 +320,12 @@ async fn refused_bots_retry_and_light_bots_on_shared_sockets_play() {
         record: None,
         decoders: 2,
         sockets,
+        pay_every: None,
+        payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
+        aim_delay: 0,
     });
     let counters = Arc::new(Counters::default());
     let stop = Instant::now() + Duration::from_secs(5);
@@ -272,4 +362,90 @@ async fn refused_bots_retry_and_light_bots_on_shared_sockets_play() {
         load(&counters.received_entities) > decoded,
         "decoders saw the others"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bots_pay_each_other_through_the_ledger() {
+    use sawgrass_server::money::Money;
+    use sawgrass_store::{Config, Kind, Operation, Outcome, RocksStore, Writer};
+
+    let dir = std::env::temp_dir().join(format!("sawgrass-bots-pay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let writer = Writer::start(RocksStore::open(&dir).expect("store"), Config::default()).expect("writer");
+    let money = Money::open(writer.handle(), 10_000, 1).expect("money");
+    let (gateway, roots) = gateway();
+    let addr = gateway.local_addr().expect("addr");
+    let listen = ListenConfig {
+        money_events: true,
+        ..ListenConfig::default()
+    };
+    let mut players = net::listen_with_money(gateway, listen, Some(money.clone()));
+    let mut tick_loop = TickLoop::new(TickConfig::default());
+    tick_loop.add_system("net", move |world, info| players.run_tick(world, info));
+
+    const BOTS: u64 = 4;
+    let config = Arc::new(BotConfig {
+        server: addr,
+        server_name: "localhost".to_owned(),
+        roots,
+        send_hz: 20,
+        area: Area {
+            size: 100.0,
+            hotspots: 0,
+            ..Area::default()
+        },
+        record: None,
+        decoders: u64::MAX,
+        sockets: Vec::new(),
+        pay_every: Some(Duration::from_millis(100)),
+        payees: Arc::default(),
+        drivers: 0,
+        shooters: 0,
+        shot_hz: 1,
+        aim_delay: 0,
+    });
+    let counters = Arc::new(Counters::default());
+    let stop = Instant::now() + Duration::from_secs(3);
+    for index in 0..BOTS {
+        tokio::spawn(run(config.clone(), index, counters.clone(), false, stop, None));
+    }
+    let ticks = std::thread::spawn(move || {
+        while std::time::Instant::now() < stop.into_std() + Duration::from_millis(300) {
+            tick_loop.run_tick();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    tokio::task::spawn_blocking(move || ticks.join().expect("tick thread"))
+        .await
+        .expect("join");
+
+    let load = |n: &std::sync::atomic::AtomicU64| n.load(Ordering::Relaxed);
+    let (sent, done) = (load(&counters.payments_sent), load(&counters.payments_done));
+    assert!(done > 40, "{done} of {sent} payments done");
+    // Each bot started with 10,000 and pays at most 100 a time: none ran short, and none was refused.
+    assert_eq!(load(&counters.payments_short), 0);
+    assert_eq!(load(&counters.payments_refused), 0);
+    // Payments still waiting for their durable answer when the bots stopped are not answered: a bot pays every
+    // 100 ms and does not wait for the answer, so on a slow disk several per bot can be in flight at the stop.
+    assert!(done <= sent, "{done} done of {sent} sent");
+
+    // The money only moved between the bots: their wallets still hold what the treasury gave out.
+    drop(money);
+    let ledger = writer.handle();
+    let mut total = 0;
+    for connection in 1..=BOTS {
+        let Ok(Outcome::Opened { wallet, .. }) = ledger
+            .submit(Operation::OpenWallet {
+                key: format!("player/1/{connection}"),
+                kind: Kind::Character,
+            })
+            .wait()
+        else {
+            panic!("wallet {connection}");
+        };
+        total += ledger.balance(wallet).wait().expect("balance");
+    }
+    assert_eq!(total, 10_000 * BOTS as i64);
+    writer.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }

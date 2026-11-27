@@ -30,7 +30,7 @@ fn resolves_and_hooks_on_the_build_the_table_was_written_for() {
     let resolved = {
         let build = rt.build().expect("build");
         let image = rt.code_image().expect("image");
-        table.resolve(&build, image, &required).expect("resolves")
+        table.resolve(&build, image, &required, &[]).expect("resolves")
     };
     for name in required {
         let address = resolved.address(name).expect("resolved");
@@ -57,6 +57,6 @@ fn a_game_patch_stops_start_up_until_a_new_table_exists() {
     let rt = runtime("1.0.1");
     let table = FunctionTable::parse(TABLE).expect("valid table");
     let build = rt.build().expect("build");
-    let result = table.resolve(&build, rt.code_image().expect("image"), &["frame"]);
+    let result = table.resolve(&build, rt.code_image().expect("image"), &["frame"], &[]);
     assert!(matches!(result, Err(ResolveError::WrongBuild { .. })));
 }

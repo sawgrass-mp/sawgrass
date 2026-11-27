@@ -52,7 +52,8 @@ impl GameBuild {
     }
 }
 
-/// The title's executable code as the runtime has it mapped.
+/// The title's image as the runtime has it mapped: its code, and the data around it that table entries such as
+/// `local_player` may name.
 #[derive(Debug, Clone, Copy)]
 pub struct CodeImage<'a> {
     /// Address of `bytes[0]` in the game process.
@@ -107,4 +108,9 @@ pub trait Runtime {
     fn code_image(&self) -> Result<CodeImage<'_>, RuntimeError>;
     fn install_hook(&mut self, request: HookRequest) -> Result<HookHandle, RuntimeError>;
     fn remove_hook(&mut self, handle: HookHandle) -> Result<(), RuntimeError>;
+    /// Whether the runtime calls the module once a frame by itself, as VIctory's frame callback does. Then the
+    /// module needs no `frame` entry in its table and hooks no frame function.
+    fn drives_frames(&self) -> bool {
+        false
+    }
 }

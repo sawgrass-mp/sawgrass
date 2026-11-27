@@ -423,6 +423,31 @@ mod game_payloads {
     }
 
     #[test]
+    fn the_ownership_event_round_trips() {
+        for event in [
+            ServerEvent::Ownership {
+                entity: 5 << 16 | 2,
+                epoch: 255,
+                yours: true,
+            },
+            ServerEvent::Ownership {
+                entity: 0,
+                epoch: 0,
+                yours: false,
+            },
+        ] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(out.len(), 7);
+            assert_eq!(ServerEvent::decode(&out), Ok(event));
+            assert_eq!(ServerEvent::decode(&out[..6]), Err(DecodeError::Truncated));
+            let mut bad = out.clone();
+            bad[6] = 2;
+            assert_eq!(ServerEvent::decode(&bad), Err(DecodeError::OutOfRange));
+        }
+    }
+
+    #[test]
     fn full_snapshot_fits_in_one_datagram() {
         let states: Vec<_> = (0..SNAPSHOT_MAX_ENTITIES as u32).map(state).collect();
         let mut out = vec![0; PacketHeader::SIZE];
@@ -473,10 +498,24 @@ mod game_payloads {
                 tick_hz: 20,
             },
             ServerEvent::Stats(stats),
+            ServerEvent::Paid {
+                key: u64::MAX,
+                result: PayResult::InsufficientFunds,
+                balance: -3,
+            },
+            ServerEvent::Corrected(EntityState {
+                id: 0x0001_0007,
+                position: Position::from_metres([-12.5, 3000.25, 31.0]).expect("position"),
+                velocity: Velocity::from_metres_per_second([1.5, 0.0, -2.0]).expect("velocity"),
+                rotation: Rotation::from_quaternion([0.0, 0.0, 0.6, 0.8]).expect("rotation"),
+            }),
         ] {
             let mut out = Vec::new();
             event.encode(&mut out);
             assert_eq!(ServerEvent::decode(&out), Ok(event));
+            let mut longer = out.clone();
+            longer.push(0);
+            assert_eq!(ServerEvent::decode(&longer), Err(DecodeError::TrailingBytes));
             assert_eq!(
                 ServerEvent::decode(&out[..out.len() - 1]),
                 Err(DecodeError::Truncated)
@@ -488,5 +527,163 @@ mod game_payloads {
         assert_eq!(ClientEvent::decode(&[128, 0]), Err(DecodeError::TrailingBytes));
         assert_eq!(ServerEvent::decode(&out), Err(DecodeError::UnknownEvent(128)));
         assert_eq!(ClientEvent::decode(&[1]), Err(DecodeError::UnknownEvent(1)));
+
+        let pay = ClientEvent::Pay {
+            key: 1 << 40,
+            to: 9,
+            amount: u32::MAX,
+        };
+        let mut out = Vec::new();
+        pay.encode(&mut out);
+        assert_eq!(out.len(), 17);
+        assert_eq!(ClientEvent::decode(&out), Ok(pay));
+        assert_eq!(ClientEvent::decode(&out[..16]), Err(DecodeError::Truncated));
+        // A result code the format does not define.
+        let mut out = Vec::new();
+        ServerEvent::Paid {
+            key: 1,
+            result: PayResult::Done,
+            balance: 0,
+        }
+        .encode(&mut out);
+        out[9] = 6;
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::OutOfRange));
+    }
+
+    #[test]
+    fn seat_answers_round_trip_and_reject_unknown_answers() {
+        let answers = [
+            SeatAnswer::Granted,
+            SeatAnswer::Left,
+            SeatAnswer::NotAVehicle,
+            SeatAnswer::NoSuchSeat,
+            SeatAnswer::Taken,
+            SeatAnswer::Locked,
+            SeatAnswer::CannotReach,
+            SeatAnswer::AlreadySeated,
+            SeatAnswer::NotSeated,
+        ];
+        for answer in answers {
+            let event = ServerEvent::Seat {
+                vehicle: 0x0102_0304,
+                seat: 1,
+                answer,
+            };
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(out, [8, 4, 3, 2, 1, 1, answer as u8]);
+            assert_eq!(ServerEvent::decode(&out), Ok(event));
+            assert_eq!(ServerEvent::decode(&out[..6]), Err(DecodeError::Truncated));
+            let mut longer = out.clone();
+            longer.push(0);
+            assert_eq!(ServerEvent::decode(&longer), Err(DecodeError::TrailingBytes));
+        }
+        assert_eq!(
+            ServerEvent::decode(&[8, 4, 3, 2, 1, 1, 9]),
+            Err(DecodeError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn seat_requests_round_trip_and_reject_bad_lengths() {
+        let enter = || ClientEvent::EnterSeat {
+            vehicle: 0x0102_0304,
+            seat: 2,
+        };
+        for event in [enter(), ClientEvent::LeaveSeat] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(ClientEvent::decode(&out), Ok(event));
+            let mut longer = out.clone();
+            longer.push(0);
+            assert_eq!(ClientEvent::decode(&longer), Err(DecodeError::TrailingBytes));
+        }
+        let mut out = Vec::new();
+        enter().encode(&mut out);
+        assert_eq!(out, [130, 4, 3, 2, 1, 2]);
+        assert_eq!(ClientEvent::decode(&out[..5]), Err(DecodeError::Truncated));
+    }
+
+    #[test]
+    fn a_shot_round_trips_with_up_to_sixteen_hits_and_rejects_more() {
+        use crate::combat::{Hit, MAX_HITS, Shot, Zone};
+        use crate::entity::AssetId;
+        let at = |x: f32| Position::from_metres([x, 2.0, 3.0]).expect("position");
+        let mut shot = Shot::new(77, AssetId(9), at(1.0));
+        shot.frac = 200;
+        for (i, zone) in [Zone::Head, Zone::Torso, Zone::Arm, Zone::Leg, Zone::Other]
+            .into_iter()
+            .cycle()
+            .take(MAX_HITS)
+            .enumerate()
+        {
+            assert!(shot.push(Hit {
+                target: i as u32 + 1,
+                zone,
+                point: at(i as f32),
+            }));
+        }
+        assert!(!shot.push(Hit::default()));
+        let mut out = Vec::new();
+        ClientEvent::Shot(Box::new(shot)).encode(&mut out);
+        assert_eq!(out.len(), 1 + 4 + 1 + 4 + 9 + 1 + MAX_HITS * 14);
+        assert_eq!(out[5], 200);
+        assert_eq!(ClientEvent::decode(&out), Ok(ClientEvent::Shot(Box::new(shot))));
+        for cut in [1, 10, out.len() - 1] {
+            assert_eq!(
+                ClientEvent::decode(&out[..cut]),
+                Err(DecodeError::Truncated),
+                "cut {cut}"
+            );
+        }
+        let mut more = out.clone();
+        more[19] = MAX_HITS as u8 + 1;
+        assert_eq!(ClientEvent::decode(&more), Err(DecodeError::OutOfRange));
+        let mut bad_zone = out.clone();
+        bad_zone[20 + 4] = 5;
+        assert_eq!(ClientEvent::decode(&bad_zone), Err(DecodeError::OutOfRange));
+        let mut empty = Vec::new();
+        ClientEvent::Shot(Box::new(Shot::new(1, AssetId(9), at(0.0)))).encode(&mut empty);
+        assert_eq!(
+            ClientEvent::decode(&empty).map(|e| match e {
+                ClientEvent::Shot(s) => s.hits().len(),
+                _ => 99,
+            }),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn world_state_events_round_trip_and_reject_bad_values() {
+        use crate::entity::AssetId;
+        use crate::world::{Door, Environment};
+        let environment = ServerEvent::Environment(Environment {
+            tick: 900,
+            minute: 1439,
+            rate: 200,
+            weather: AssetId(3),
+            next_weather: AssetId(4),
+            transition: 128,
+        });
+        let door = ServerEvent::Door(Door {
+            id: AssetId(77),
+            locked: true,
+            open: 0,
+        });
+        for (event, size) in [(environment, 18), (door, 7)] {
+            let mut out = Vec::new();
+            event.encode(&mut out);
+            assert_eq!(out.len(), size);
+            assert_eq!(ServerEvent::decode(&out), Ok(event));
+            assert_eq!(ServerEvent::decode(&out[..size - 1]), Err(DecodeError::Truncated));
+        }
+        let mut out = Vec::new();
+        environment.encode(&mut out);
+        out[5..7].copy_from_slice(&1440u16.to_le_bytes());
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::OutOfRange));
+        let mut out = Vec::new();
+        door.encode(&mut out);
+        out[5] = 2;
+        assert_eq!(ServerEvent::decode(&out), Err(DecodeError::OutOfRange));
     }
 }

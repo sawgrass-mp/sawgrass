@@ -7,10 +7,11 @@ use sawgrass_client_module::game::{
 };
 use sawgrass_client_module::hooks::{EventSink, GameEvent, HookPoint};
 use sawgrass_client_module::module::{
-    CoreEvent, Module, NetCore, StartError, World, WorldError, required_functions,
+    CoreEvent, ENTITY_SET_POSE, Module, NetCore, PED_SPAWN, REQUIRED_FUNCTIONS, StartError, World,
+    WorldError, all_functions, optional_functions,
 };
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
-use sawgrass_client_module::table::FunctionTable;
+use sawgrass_client_module::table::{FunctionTable, LookupError, ResolveError};
 
 const BUILD_KEY: &str = "victory/1.0.0/00ff";
 const CAR: GameAsset = GameAsset(0xCA);
@@ -22,8 +23,8 @@ fn runtime() -> FakeRuntime {
         image_digest: "00ff".into(),
     };
     // Made-up bytes: function `i` sits at 0x10 * i and starts with 5A i A5 3C.
-    let mut image = vec![0u8; 0x10 * required_functions().len()];
-    for i in 0..required_functions().len() {
+    let mut image = vec![0u8; 0x10 * all_functions().len()];
+    for i in 0..all_functions().len() {
         image[0x10 * i..0x10 * i + 4].copy_from_slice(&[0x5A, i as u8, 0xA5, 0x3C]);
     }
     FakeRuntime::new(build, 0x4000, image)
@@ -31,7 +32,7 @@ fn runtime() -> FakeRuntime {
 
 fn functions() -> FunctionTable {
     let mut text = format!("build = {BUILD_KEY}\n");
-    for (i, name) in required_functions().iter().enumerate() {
+    for (i, name) in all_functions().iter().enumerate() {
         text += &format!("{name} = 5A {i:02X} A5 3C\n");
     }
     FunctionTable::parse(&text).expect("valid table")
@@ -163,14 +164,120 @@ fn installs_one_hook_per_hook_point() {
     assert_eq!(hooked, HookPoint::ALL.map(HookPoint::function).to_vec());
 }
 
+/// A table with only these entries, at the same made-up places as [`functions`].
+fn functions_only(names: &[&str]) -> FunctionTable {
+    let mut text = format!("build = {BUILD_KEY}\n");
+    for (i, name) in all_functions().iter().enumerate() {
+        if names.contains(name) {
+            text += &format!("{name} = 5A {i:02X} A5 3C\n");
+        }
+    }
+    FunctionTable::parse(&text).expect("valid table")
+}
+
 #[test]
-fn a_refused_hook_leaves_nothing_installed() {
+fn starts_with_the_required_functions_and_switches_the_rest_off() {
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.push(ENTITY_SET_POSE);
+    let mut module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    // Only the frame is hooked; the others are the real game interface's to call.
+    let hooked: Vec<_> = module
+        .runtime()
+        .hooks
+        .iter()
+        .map(|(_, r)| r.function.as_str())
+        .collect();
+    assert_eq!(hooked, vec!["frame"]);
+    assert!(module.is_hooked(HookPoint::Frame));
+    assert!(!module.is_hooked(HookPoint::PedCreate));
+    for name in &names {
+        assert!(module.functions().address(name).is_some(), "{name}");
+    }
+    let missing: Vec<_> = module
+        .missing_functions()
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let mut optional = optional_functions();
+    optional.retain(|name| *name != ENTITY_SET_POSE);
+    assert_eq!(missing, optional);
+    assert!(
+        module
+            .missing_functions()
+            .iter()
+            .all(|(_, e)| *e == LookupError::NotInTable)
+    );
+
+    // Frames run, and no single-player switch is called without its function.
+    let mut game = FakeGame::default();
+    let mut core = RecordingCore::default();
+    for _ in 0..3 {
+        module.frame(1.0 / 60.0, &mut game, &mut core).expect("frame");
+    }
+    assert!(game.disabled.is_empty());
+    assert_eq!(core.frames, 3);
+}
+
+#[test]
+fn some_switches_located_turn_only_those_systems_off() {
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.push(SinglePlayerSystem::Police.function());
+    let mut module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    let mut game = FakeGame::default();
+    module
+        .frame(1.0 / 60.0, &mut game, &mut RecordingCore::default())
+        .expect("frame");
+    assert_eq!(game.disabled, vec![SinglePlayerSystem::Police]);
+}
+
+#[test]
+fn a_missing_required_function_stops_the_start() {
+    let table = functions_only(&["frame", "ped_spawn", "entity_set_pose"]);
+    let Err((StartError::Functions(ResolveError::Functions(failed)), rt)) =
+        Module::start(runtime(), &table, assets(BUILD_KEY))
+    else {
+        panic!("the start needs every required function");
+    };
+    assert_eq!(failed, vec![("local_player".to_owned(), LookupError::NotInTable)]);
+    assert!(rt.hooks.is_empty());
+}
+
+#[test]
+fn a_refused_frame_hook_leaves_nothing_installed() {
     let mut rt = runtime();
-    rt.refuse.push(HookPoint::StreamingUpdate.function().into());
+    rt.refuse.push(HookPoint::Frame.function().into());
     let Err((StartError::Runtime(_), rt)) = Module::start(rt, &functions(), assets(BUILD_KEY)) else {
-        panic!("a refused hook stops the start");
+        panic!("a refused frame hook stops the start");
     };
     assert!(rt.hooks.is_empty());
+}
+
+#[test]
+fn a_refused_optional_hook_only_switches_its_events_off() {
+    let mut rt = runtime();
+    rt.refuse.push(HookPoint::StreamingUpdate.function().into());
+    let module = Module::start(rt, &functions(), assets(BUILD_KEY)).expect("started");
+    assert!(!module.is_hooked(HookPoint::StreamingUpdate));
+    assert!(module.is_hooked(HookPoint::PedCreate));
+    let refused: Vec<_> = module.refused_hooks().iter().map(|(p, _)| *p).collect();
+    assert_eq!(refused, vec![HookPoint::StreamingUpdate]);
+}
+
+#[test]
+fn a_runtime_that_drives_frames_needs_no_frame_entry() {
+    let mut rt = runtime();
+    rt.drives_frames = true;
+    let table = functions_only(&["local_player", "ped_spawn", "entity_set_pose"]);
+    let mut module = Module::start(rt, &table, assets(BUILD_KEY)).expect("started");
+    assert!(module.runtime().hooks.is_empty());
+    assert!(!module.is_hooked(HookPoint::Frame));
+    module
+        .frame(
+            1.0 / 60.0,
+            &mut FakeGame::default(),
+            &mut RecordingCore::default(),
+        )
+        .expect("frame");
 }
 
 #[test]
@@ -211,11 +318,32 @@ impl GameApi for ReentrantGame {
     fn local_player(&self) -> Option<GameHandle> {
         self.inner.local_player()
     }
+    fn held_weapon(&self, ped: GameHandle) -> Option<GameAsset> {
+        self.inner.held_weapon(ped)
+    }
+    fn seat(&self, ped: GameHandle) -> Option<(GameHandle, u8)> {
+        self.inner.seat(ped)
+    }
+    fn enter_seat(&mut self, ped: GameHandle, vehicle: GameHandle, seat: u8) -> Result<(), GameError> {
+        self.inner.enter_seat(ped, vehicle, seat)
+    }
+    fn leave_seat(&mut self, ped: GameHandle) -> Result<(), GameError> {
+        self.inner.leave_seat(ped)
+    }
     fn set_streaming_focus(&mut self, points: &[[f32; 3]]) {
         self.inner.set_streaming_focus(points);
     }
     fn disable(&mut self, system: SinglePlayerSystem) -> Result<(), GameError> {
         self.inner.disable(system)
+    }
+    fn set_clock(&mut self, minute: f32) -> Result<(), GameError> {
+        self.inner.set_clock(minute)
+    }
+    fn set_weather(&mut self, current: GameAsset, next: GameAsset, transition: f32) -> Result<(), GameError> {
+        self.inner.set_weather(current, next, transition)
+    }
+    fn set_door(&mut self, door: GameAsset, locked: bool, open: f32) -> Result<(), GameError> {
+        self.inner.set_door(door, locked, open)
     }
 }
 
@@ -274,4 +402,105 @@ fn stop_gives_the_runtime_back_with_every_failure() {
         vec!["frame", "input_poll"],
         "every other hook was still removed"
     );
+}
+
+/// Spawns entity 1, then on the next frame despawns it and spawns entity 2, which gets the same raw handle.
+struct Replace {
+    frames: u32,
+    events: Vec<CoreEvent>,
+}
+
+impl NetCore for Replace {
+    fn on_event(&mut self, event: &CoreEvent) {
+        self.events.push(event.clone());
+    }
+    fn on_frame(&mut self, _dt: f32, world: &mut World<'_>) {
+        match self.frames {
+            0 => world
+                .spawn(1, EntityKind::Vehicle, AssetId(5), pose(1.0))
+                .expect("spawned"),
+            1 => {
+                world.despawn(1).expect("despawned");
+                world
+                    .spawn(2, EntityKind::Vehicle, AssetId(5), pose(2.0))
+                    .expect("spawned");
+            }
+            _ => {}
+        }
+        self.frames += 1;
+    }
+}
+
+#[test]
+fn a_late_event_about_a_reused_handle_does_not_reach_the_new_entity() {
+    let mut module = Module::start(runtime(), &functions(), assets(BUILD_KEY)).expect("started");
+    let mut game = ReentrantGame {
+        inner: FakeGame::default(),
+        hooks: module.event_sink(),
+    };
+    let mut core = Replace {
+        frames: 0,
+        events: Vec::new(),
+    };
+    for _ in 0..3 {
+        module.frame(0.016, &mut game, &mut core).expect("frame");
+    }
+    let second = module.entities().handle(2).expect("entity 2 bound");
+    assert_eq!(second.generation, 2, "the raw handle of entity 1 was reused");
+    assert!(
+        game.inner.entities.contains_key(&second),
+        "entity 2 is neither removed as ambient nor lost"
+    );
+    assert!(
+        core.events.is_empty(),
+        "the removal of entity 1 is not reported as a loss of entity 2"
+    );
+    assert_eq!(module.ambient_removed, 0);
+}
+
+/// Tries to show a remote ped and a vehicle, and to move the vehicle, on its first frame.
+#[derive(Default)]
+struct SpawnTry {
+    results: Vec<Result<(), WorldError>>,
+}
+
+impl NetCore for SpawnTry {
+    fn on_event(&mut self, _event: &CoreEvent) {}
+
+    fn on_frame(&mut self, _dt: f32, world: &mut World<'_>) {
+        if self.results.is_empty() {
+            self.results
+                .push(world.spawn(1, EntityKind::Ped, AssetId(5), pose(1.0)));
+            self.results
+                .push(world.spawn(2, EntityKind::Vehicle, AssetId(5), pose(2.0)));
+            self.results.push(world.set_pose(2, pose(3.0)));
+        }
+    }
+}
+
+#[test]
+fn with_only_the_required_functions_the_module_starts_and_shows_and_moves_nothing() {
+    let mut module =
+        Module::start(runtime(), &functions_only(&REQUIRED_FUNCTIONS), assets(BUILD_KEY)).expect("started");
+    assert!(!module.shows_remote_peds());
+    assert!(!module.moves_entities());
+    for name in [PED_SPAWN, ENTITY_SET_POSE] {
+        assert!(
+            module.missing_functions().iter().any(|(n, _)| n == name),
+            "{name}"
+        );
+    }
+    let mut core = SpawnTry::default();
+    module
+        .frame(1.0 / 60.0, &mut FakeGame::default(), &mut core)
+        .expect("frame");
+    assert_eq!(
+        core.results,
+        vec![Err(WorldError::NoPedSpawn), Ok(()), Err(WorldError::NoSetPose)]
+    );
+
+    let mut names = REQUIRED_FUNCTIONS.to_vec();
+    names.extend([PED_SPAWN, ENTITY_SET_POSE]);
+    let module = Module::start(runtime(), &functions_only(&names), assets(BUILD_KEY)).expect("started");
+    assert!(module.shows_remote_peds() && module.moves_entities());
 }

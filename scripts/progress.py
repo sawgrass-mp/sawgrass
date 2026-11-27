@@ -55,12 +55,13 @@ ICON = {"done": "✅", "in review": "🔍", "in progress": "🛠️", "ready": "
 # belongs to the step of its phase in docs/implementation-plan.md (`phase`); a task the plan does not list belongs to
 # the step whose `areas` hold its prefix. A step with a fixed `state` shows that text instead of its tasks, and a
 # step whose `state` is `done` is closed: a task outside the plan that is not done yet never reopens it, it goes to
-# the "outside the plan" line instead, so it cannot move the marker back. The `covers` and `gate` texts of the plan's
+# the "outside the plan" line instead, so it cannot move the marker back. A step whose `state` is `started` has begun
+# on the real game but is never done from its tasks alone: it waits for its gate, which only a maintainer can check. The `covers` and `gate` texts of the plan's
 # phases are copied from docs/implementation-plan.md and are edited together with it.
 # `difficulty` (easy, medium, hard, very hard) is the maintainers' estimate of a step's risk and unknowns, not of its
 # size, and `why` says in one line what makes it so.
 STEPS = (
-    {"name": "Foundation", "short": "Foundation", "stage": 0, "state": "done", "difficulty": "easy",
+    {"name": "Foundation", "short": "Setup", "stage": 0, "state": "done", "difficulty": "easy",
      "why": "Known tools, no game and no server code",
      "covers": "Workspace, rules, CI, claim bot, review agent"},
     {"name": "Prototype and measurements", "short": "Prototype", "stage": 1, "state": "done", "difficulty": "medium",
@@ -78,26 +79,35 @@ STEPS = (
     {"name": "Fewer bytes, then 30 Hz", "short": "30 Hz", "stage": 1, "phase": 2, "difficulty": "medium",
      "why": "The formats are chosen and measured; delta snapshots against acknowledgements need care, the rest is "
             "plumbing",
-     "covers": "postcard payloads, delta snapshots, visible sets cut to a byte budget, 30 Hz by default",
+     "covers": "Delta snapshots, visible sets cut to a byte budget, 30 Hz by default",
      "gate": "4,096 bots from a second machine: the roadmap's stage 1 gate"},
     {"name": "Reliability of the realtime core", "short": "Reliability", "stage": 1, "phase": 3,
      "difficulty": "medium", "why": "Well-known techniques; the work is covering every abuse case and testing it "
                                    "with hostile bots",
      "covers": "Movement validation, per-connection limits, overload policy, misbehaving bots as a load test"},
-    {"name": "Roleplay base", "short": "Roleplay", "stage": 2, "phase": 4, "areas": ("RP",), "difficulty": "hard",
+    {"name": "Roleplay foundations", "short": "Infra", "stage": 2, "phase": 4, "difficulty": "hard",
      "why": "Money must never be lost: a durable single writer with a replicated log, plus a sandboxed script "
             "runtime",
      "covers": "One writer with RocksDB, WAL copy to a second machine, PostgreSQL archive, Luau runtime with "
-               "deadlines and memory caps, voice relay, then characters, money, inventory, jobs and admin tools"},
-    {"name": "Client module in the game", "short": "In game", "stage": 3, "areas": ("CLIENT",), "state": "waiting",
+               "deadlines and memory caps, wallets in the server, voice relay; no roleplay gameplay yet"},
+    {"name": "Client module in the game", "short": "In game", "stage": 3, "areas": ("CLIENT",), "state": "started",
      "difficulty": "very hard",
      "why": "The hardest part: an undocumented game on a young runtime, functions found by pattern per runtime "
             "and game version, everything can change with a game or runtime update",
      "covers": "VIctory adapter with module loading through an API proposed upstream; game functions found per "
                "build; hooks for the frame, peds, vehicles, input, camera and streaming; single-player systems "
                "turned off; the real GameApi; XCL's adapter later",
-     "gate": "Starts when the game runs on PC through VIctory or XCL with a controllable character"},
-    {"name": "Sync in the game", "short": "Sync", "stage": 3, "state": "waiting", "difficulty": "very hard",
+     "gate": "Starts when the game runs on PC through VIctory or XCL with a controllable character; done when "
+             "two clients on one server see each other move"},
+    {"name": "Roleplay base", "short": "Roleplay", "stage": 3, "areas": ("RP",), "state": "waiting",
+     "difficulty": "medium",
+     "why": "Resources over a finished scripting API and ledger; the risk is an API that is hard to change once "
+            "resources depend on it",
+     "covers": "Characters, money, inventory, property, jobs and admin tools as resources over the public "
+               "scripting API",
+     "gate": "Starts once two clients see each other in one world (step 7's gate)"},
+    {"name": "Sync in the game", "short": "Sync", "stage": 3, "phase": 5, "difficulty": "very hard",
+     "needs_game": True,
      "why": "Game physics and animation the server does not own; animations and ped tasks are the largest piece "
             "of work",
      "covers": "Interpolation and prediction of players, animations and ped tasks, vehicles with owners, weapons "
@@ -116,7 +126,7 @@ STEPS = (
 )
 DIFFICULTY = {"easy": ("🟢", "Easy", "#7cf000"), "medium": ("🟡", "Medium", "#f5d547"),
               "hard": ("🟠", "Hard", "#ff9f43"), "very hard": ("🔴", "Very hard", "#ff5c5c")}
-STAGE_NAMES = {0: "repository foundation", 1: "server without the game", 2: "roleplay base",
+STAGE_NAMES = {0: "repository foundation", 1: "server without the game", 2: "roleplay foundations",
                3: "client in the game", 4: "launcher and releases", 5: "scale"}
 TRACK = {"name": "Tooling and docs", "areas": ("OPS", "DOC")}
 OUTSIDE = "Outside the plan"
@@ -173,6 +183,10 @@ def steps_for(plan):
                                 "stage": steps[last]["stage"], "phase": phase,
                                 "covers": "See docs/implementation-plan.md", "generated": True})
     return steps
+
+
+SERVER_READY = "server side ready, waiting for the game"
+STARTED = "started"
 
 
 def step_index(task_id, plan, steps, status="done"):
@@ -297,9 +311,11 @@ def progress(tasks):
 def step_rows(tasks, plan=None):
     """One row per step: (step, its tasks, percent done, state text, state key).
 
-    The state key is `done`, `current`, `waiting` or `todo`. The current step is the first one that is not done:
+    The state key is `done`, `current`, `started`, `waiting` or `todo`. The current step is the first one that is not done:
     a step with tasks is done when every one of them is merged, a step without tasks only when its `state` says
-    so. So the marker follows what is merged on `main`, not what is planned.
+    so. So the marker follows what is merged on `main`, not what is planned. A step whose gate needs the game
+    (`needs_game`) is never done from its tasks alone: with every task merged it reads "server side ready, waiting
+    for the game". A `started` step is never done from its tasks either: it reads "started" with its task count.
     """
     steps = steps_for(plan or {})
     rows, current_found = [], False
@@ -307,17 +323,26 @@ def step_rows(tasks, plan=None):
         own = [t for t in tasks if t.get("step") == i]
         _, _, pct = progress(own)
         done = sum(t["status"] == "done" for t in own)
-        finished = s.get("state") == "done" or (bool(own) and done == len(own) and s.get("state") != "waiting")
+        all_merged = bool(own) and done == len(own)
+        server_ready = all_merged and s.get("needs_game", False)
+        finished = s.get("state") == "done" or (all_merged and s.get("state") not in ("waiting", STARTED)
+                                                and not server_ready)
         if finished:
             key, pct = "done", 100
         elif not current_found:
             key, current_found = "current", True
+        elif s.get("state") == STARTED:
+            key = STARTED
         else:
-            key = "waiting" if s.get("state") == "waiting" else "todo"
+            key = "waiting" if s.get("state") == "waiting" or server_ready else "todo"
         if s.get("state") == "done":
             text = f"{done} of {len(own)} done" if own else "done"
         elif s.get("state") == "waiting":
             text, pct = "waiting for the game", 0
+        elif s.get("state") == STARTED:
+            text, pct = (f"{STARTED}, {done} of {len(own)} done" if own else STARTED), 0
+        elif server_ready:
+            text = SERVER_READY
         elif not own:
             text = "not started"
         else:
@@ -385,7 +410,7 @@ def render_markdown(tasks, repo, plan=None):
         "| | Step | What it covers | Gate | Difficulty | Tasks |",
         "|---|---|---|---|---|---|",
     ]
-    icons = {"done": "✅", "current": MARKER, "waiting": "⏸️", "todo": "⚪"}
+    icons = {"done": "✅", "current": MARKER, "waiting": "⏸️", STARTED: "🛠️", "todo": "⚪"}
     for i, (s, own, _, text, key) in enumerate(rows):
         detail = text
         if own and len(own) <= LIST_LIMIT and s.get("state") is None:
@@ -476,6 +501,9 @@ def render_svg(tasks, plan=None):
         if key == "waiting":
             out.append(f'<rect x="{x + 0.5:.1f}" y="{bar_y + 0.5}" width="{seg - 1:.1f}" height="{bar_h - 1}" rx="5" '
                        'fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>')
+        elif key == STARTED:
+            out.append(f'<rect x="{x + 0.5:.1f}" y="{bar_y + 0.5}" width="{seg - 1:.1f}" height="{bar_h - 1}" rx="5" '
+                       'fill="#13201b" stroke="#14e1f0"/>')
         else:
             out.append(f'<rect x="{x:.1f}" y="{bar_y}" width="{seg:.1f}" height="{bar_h}" rx="5" fill="#13201b"/>')
         if pct:
@@ -493,8 +521,9 @@ def render_svg(tasks, plan=None):
         label = "c" if key == "current" else "l"
         out.append(f'<text x="{cx:.1f}" y="{bar_y + 38}" class="{label}" text-anchor="middle">'
                    f'{i + 1}. {escape(s["short"])}</text>')
-        small = {"waiting for the game": "waiting"}.get(text, text)
-        out.append(f'<text x="{cx:.1f}" y="{bar_y + 54}" class="{"w" if key == "waiting" else "n"}" '
+        small = STARTED if s.get("state") == STARTED else \
+            {"waiting for the game": "waiting", SERVER_READY: "server ready"}.get(text, text)
+        out.append(f'<text x="{cx:.1f}" y="{bar_y + 54}" class="{"w" if key in ("waiting", STARTED) else "n"}" '
                    f'text-anchor="middle">{escape(small)}</text>')
         if "difficulty" in s:
             _, name, colour = DIFFICULTY[s["difficulty"]]

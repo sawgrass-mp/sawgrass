@@ -7,16 +7,23 @@
 //! through an in-process gateway and sends them snapshots. [`slots`] gives every entity a dense, recycled index.
 //! [`scripts`] runs the Luau resources in the tick.
 
+pub mod combat;
 pub mod cpu;
 pub mod interest;
 pub mod limits;
 pub mod metrics;
+pub mod money;
 pub mod movement;
 pub mod net;
+pub mod owned;
+pub mod ownership;
+pub mod recording;
 pub mod scripts;
+pub mod seats;
 pub mod slots;
 pub mod snapshot;
 pub mod tick;
+pub mod world;
 
 pub use hecs;
 pub use metrics::{TickMetrics, TickStats};
