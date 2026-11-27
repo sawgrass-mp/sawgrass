@@ -12,11 +12,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::game::{ENTITY_HEADING, GameNatives, NativeGame};
 use super::natives::{Native, NativeCheck, ScriptLayout, ScriptScope, TitleTls};
-use super::{FRAME_REPORT, RUNNING, VictoryRuntime, abi};
+use super::{FRAME_REPORT, Net, RUNNING, VictoryRuntime, abi};
+use crate::connection::Status;
 use crate::game::GameApi;
 use crate::module::ENTITY_SET_POSE;
+use crate::module::Module;
 use crate::runtime::{HookRequest, Runtime};
 use crate::table::FunctionTable;
+use std::time::Instant;
 
 /// Table names: the script run function (six integer arguments, the context first), and the layout values.
 pub const SCRIPT_RUN: &str = "script_run";
@@ -213,14 +216,71 @@ unsafe fn frame(context: u64, presents: u64) {
     };
     LAST.store(presents, Ordering::Relaxed);
     running.frames += 1;
+    if let Some(net) = running.net.as_mut() {
+        network_frame(net, &mut running.module, &scope, script);
+    }
     if running.frames % FRAME_REPORT == 0 {
         let mut text = format!("sawgrass: {} frames on a script thread", running.frames);
         if let Some([x, y, z]) = local_position(&scope, script) {
             let _ = write!(text, ", local player at ({x:.2}, {y:.2}, {z:.2})");
         }
+        if let Some(net) = running.net.as_ref() {
+            match net.link.client() {
+                Some(client) => {
+                    let _ = write!(
+                        text,
+                        "; joined as entity {}, {} shown, {} not shown yet",
+                        client.entity(),
+                        running.module.entities().len(),
+                        net.link.not_located
+                    );
+                }
+                None => text.push_str("; not joined yet"),
+            }
+        }
         running.module.runtime().log(abi::LOG_INFO, &text);
     }
 }
+
+/// One frame of the network core: the module's frame over the natives, fed to the link, and each change of the
+/// connection's status logged once.
+fn network_frame(net: &mut Net, module: &mut Module<VictoryRuntime>, scope: &ScriptScope, script: &Script) {
+    let now = Instant::now();
+    // The first frame, and one after a long stall such as a load, count as a 60th of a second: the network core
+    // smooths over time and would otherwise take a stall as one long step.
+    let dt = net
+        .last
+        .map(|last| now.duration_since(last).as_secs_f32())
+        .filter(|dt| *dt < MAX_DT)
+        .unwrap_or(1.0 / 60.0);
+    net.last = Some(now);
+    let mut game = NativeGame::new(scope, &script.natives);
+    if let Err(e) = module.frame(dt, &mut game, &mut net.link) {
+        net.frame_errors += 1;
+        if net.frame_errors == 1 || net.frame_errors % FRAME_REPORT == 0 {
+            let text = format!("sawgrass: frame failed ({} times): {e}", net.frame_errors);
+            module.runtime().log(abi::LOG_WARN, &text);
+        }
+    }
+    let status = net.connection.status();
+    if status != net.status {
+        let text = match &status {
+            Status::Connecting => "sawgrass: connecting".to_owned(),
+            Status::Connected => "sawgrass: connected".to_owned(),
+            Status::Closed(why) => format!("sawgrass: connection closed: {why}"),
+        };
+        let level = if matches!(status, Status::Closed(_)) {
+            abi::LOG_WARN
+        } else {
+            abi::LOG_INFO
+        };
+        module.runtime().log(level, &text);
+        net.status = status;
+    }
+}
+
+/// The longest frame the network core takes as it is, in seconds.
+const MAX_DT: f32 = 0.25;
 
 /// The local player's position, through the game layer's natives, when the table has them.
 fn local_position(scope: &ScriptScope, script: &Script) -> Option<[f32; 3]> {

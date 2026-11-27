@@ -29,7 +29,16 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
+use std::ffi::OsString;
+use std::net::SocketAddr;
+use std::time::Instant;
+
+use sawgrass_gateway::RootCertStore;
+use sawgrass_netcode::ClientConfig;
+
 use crate::assets::AssetTable;
+use crate::connection::{ConnectConfig, Connection, Status};
+use crate::link::NetLink;
 use crate::module::Module;
 use crate::runtime::{CodeImage, GameBuild, HookHandle, HookRequest, Runtime, RuntimeError, RuntimeKind};
 use crate::table::FunctionTable;
@@ -327,6 +336,48 @@ struct Running {
     frames: u64,
     /// Set when the frame runs on a script thread.
     script: Option<script::Script>,
+    /// The network core and its connection, when `SAWGRASS_SERVER` names a server.
+    net: Option<Net>,
+}
+
+/// The module's network side in the game: the link the frame feeds, and the connection that moves its bytes.
+#[derive(Debug)]
+struct Net {
+    link: NetLink,
+    connection: Connection,
+    /// The connection's status last logged, so that each change is logged once.
+    status: Status,
+    /// When the last network frame ran, for its `dt`.
+    last: Option<Instant>,
+    /// Frames the module's frame failed, logged at the first and every [`FRAME_REPORT`]th.
+    frame_errors: u64,
+}
+
+/// Where the module connects, from the environment: `None` without `SAWGRASS_SERVER`, the module then runs on its
+/// own. `SAWGRASS_SERVER` is `address:port`, `SAWGRASS_SERVER_NAME` the name in the server's certificate
+/// (`localhost` if unset), and `SAWGRASS_SERVER_CERT` the path of the certificate (DER) it must chain to.
+fn connect_config(var: impl Fn(&str) -> Option<OsString>) -> Result<Option<ConnectConfig>, String> {
+    let Some(server) = var("SAWGRASS_SERVER") else {
+        return Ok(None);
+    };
+    let server = server.to_string_lossy();
+    let server: SocketAddr = server
+        .parse()
+        .map_err(|e| format!("SAWGRASS_SERVER ({server}): {e}"))?;
+    let server_name =
+        var("SAWGRASS_SERVER_NAME").map_or_else(|| "localhost".into(), |n| n.to_string_lossy().into_owned());
+    let cert = var("SAWGRASS_SERVER_CERT").ok_or("SAWGRASS_SERVER_CERT is not set")?;
+    let der = std::fs::read(&cert)
+        .map_err(|e| format!("SAWGRASS_SERVER_CERT ({}): {e}", cert.to_string_lossy()))?;
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(der.into())
+        .map_err(|e| format!("SAWGRASS_SERVER_CERT: {e}"))?;
+    Ok(Some(ConnectConfig {
+        server,
+        server_name,
+        roots,
+    }))
 }
 
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
@@ -390,11 +441,52 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
         );
     }
     let script = prepared.and_then(|prepared| script::install(module.runtime_mut(), prepared));
+    let net = match (connect_config(|name| std::env::var_os(name)), &script) {
+        (Ok(None), _) => None,
+        (Err(e), _) => {
+            module
+                .runtime()
+                .log(abi::LOG_WARN, &format!("sawgrass: not connecting: {e}"));
+            None
+        }
+        (Ok(Some(_)), None) => {
+            module.runtime().log(
+                abi::LOG_WARN,
+                "sawgrass: not connecting: the network core runs on a script thread, and the frame stays at the present",
+            );
+            None
+        }
+        (Ok(Some(config)), Some(_)) => {
+            let server = config.server;
+            let link = NetLink::joining(ClientConfig::default());
+            match Connection::start(config, &link) {
+                Ok(connection) => {
+                    module
+                        .runtime()
+                        .log(abi::LOG_INFO, &format!("sawgrass: connecting to {server}"));
+                    Some(Net {
+                        link,
+                        connection,
+                        status: Status::Connecting,
+                        last: None,
+                        frame_errors: 0,
+                    })
+                }
+                Err(e) => {
+                    module
+                        .runtime()
+                        .log(abi::LOG_WARN, &format!("sawgrass: not connecting: {e}"));
+                    None
+                }
+            }
+        }
+    };
     module.runtime().on_frame(frame).map_err(|e| e.to_string())?;
     *RUNNING.lock().unwrap_or_else(PoisonError::into_inner) = Some(Running {
         module,
         frames: 0,
         script,
+        net,
     });
     Ok(())
 }
@@ -567,6 +659,40 @@ mod tests {
         let tls = abi::title_tls(newer_host(old, test_tls)).expect("given");
         // SAFETY: the test's function.
         assert_eq!(unsafe { tls() }, std::ptr::dangling_mut());
+    }
+
+    #[test]
+    fn the_server_comes_from_the_environment() {
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| OsString::from(*v))
+            }
+        };
+        assert!(matches!(connect_config(vars(&[])), Ok(None)));
+        let bad = connect_config(vars(&[("SAWGRASS_SERVER", "not an address")]));
+        assert!(bad.is_err_and(|e| e.starts_with("SAWGRASS_SERVER (not an address)")));
+        let no_cert = connect_config(vars(&[("SAWGRASS_SERVER", "127.0.0.1:7777")]));
+        assert_eq!(no_cert.err().as_deref(), Some("SAWGRASS_SERVER_CERT is not set"));
+
+        let dir = std::env::temp_dir().join(format!("sawgrass-module-cert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let cert = rcgen::generate_simple_self_signed(vec!["game.test".into()]).expect("cert");
+        let path = dir.join("cert.der");
+        std::fs::write(&path, cert.cert.der()).expect("written");
+        let path: &'static str = Box::leak(path.to_string_lossy().into_owned().into_boxed_str());
+        let pairs: &'static [(&str, &str)] = Box::leak(Box::new([
+            ("SAWGRASS_SERVER", "127.0.0.1:7777"),
+            ("SAWGRASS_SERVER_NAME", "game.test"),
+            ("SAWGRASS_SERVER_CERT", path),
+        ]));
+        let config = connect_config(vars(pairs)).expect("valid").expect("a server");
+        assert_eq!(config.server, "127.0.0.1:7777".parse().expect("address"));
+        assert_eq!(config.server_name, "game.test");
+        assert_eq!(config.roots.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
