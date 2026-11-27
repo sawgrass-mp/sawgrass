@@ -41,9 +41,9 @@
 <text x="440.0" y="170" class="c" text-anchor="middle">6. Infra</text>
 <text x="440.0" y="186" class="n" text-anchor="middle">3 of 6 done</text>
 <text x="440.0" y="202" class="d" fill="#ff9f43" text-anchor="middle">hard</text>
-<rect x="481.2" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
+<rect x="481.2" y="132.5" width="68.5" height="17" rx="5" fill="#13201b" stroke="#14e1f0"/>
 <text x="515.5" y="170" class="l" text-anchor="middle">7. In game</text>
-<text x="515.5" y="186" class="w" text-anchor="middle">waiting</text>
+<text x="515.5" y="186" class="w" text-anchor="middle">started</text>
 <text x="515.5" y="202" class="d" fill="#ff5c5c" text-anchor="middle">very hard</text>
 <rect x="556.7" y="132.5" width="68.5" height="17" rx="5" fill="none" stroke="#2b6f78" stroke-dasharray="4 3"/>
 <text x="590.9" y="170" class="l" text-anchor="middle">8. Roleplay</text>

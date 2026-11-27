@@ -87,9 +87,10 @@ wallets in the server, the voice relay. No roleplay gameplay: the resources that
 
 ### 7. Client module in the game
 
-🔴 Very hard. Stage 3, waits for the game. This is where the hardest part starts: the game is undocumented, it runs on
-a young runtime, and every game or runtime update can move what the module relies on. VIctory first, XCL second ([ADR
-0004](adr/0004-victory-client-runtime.md)).
+🔴 Very hard. Stage 3, started: the client module has run inside the game under a local VIctory build, on a script
+thread and reading the local player's position, and its gate is next. This is where the hardest part starts: the game
+is undocumented, it runs on a young runtime, and every game or runtime update can move what the module relies on.
+VIctory first, XCL second ([ADR 0004](adr/0004-victory-client-runtime.md)).
 
 | Work | Before the game |
 |---|---|
