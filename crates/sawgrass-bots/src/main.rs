@@ -28,7 +28,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 const USAGE: &str = "usage:
   sawgrass-bots gen-cert --out DIR [--name NAME]
   sawgrass-bots run --server ADDR --cert FILE --count N [--duration SECS] [--send-hz N]
-                    [--connect-per-sec N] [--area METRES] [--hotspots N] [--seed N] [--threads N]
+                    [--connect-per-sec N] [--area METRES] [--center X,Y] [--height METRES] [--hotspots N] [--seed N] [--threads N]
                     [--report-every SECS] [--name NAME] [--record FILE] [--record-bots N]
                     [--decoders N] [--sockets N] [--pay-every SECS] [--drivers N] [--shooters N]
                     [--shot-hz N] [--aim-delay TICKS] [--misbehave flood=N,teleport=N,bad-event=N,reconnect=N]
@@ -67,6 +67,16 @@ where
         .map_err(|e| format!("{name}: {e}"))
 }
 
+/// `X,Y` in metres.
+fn point(name: &str, value: Option<String>) -> Result<[f32; 2], String> {
+    let value = value.ok_or_else(|| format!("{name} needs a value"))?;
+    let (x, y) = value
+        .split_once(',')
+        .ok_or_else(|| format!("{name}: expected X,Y"))?;
+    let coordinate = |v: &str| v.trim().parse::<f32>().map_err(|e| format!("{name}: {e}"));
+    Ok([coordinate(x)?, coordinate(y)?])
+}
+
 fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> {
     let (mut server, mut cert, mut count) = (None, None, None);
     let mut run = RunArgs {
@@ -102,6 +112,8 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunArgs, String> 
             "--send-hz" => run.send_hz = parse::<u32>(&flag, value)?.clamp(1, 1000),
             "--connect-per-sec" => run.connect_per_sec = parse::<u32>(&flag, value)?.max(1),
             "--area" => run.area.size = parse(&flag, value)?,
+            "--center" => run.area.center = point(&flag, value)?,
+            "--height" => run.area.height = parse(&flag, value)?,
             "--hotspots" => run.area.hotspots = parse(&flag, value)?,
             "--seed" => run.area.seed = parse(&flag, value)?,
             "--threads" => run.threads = Some(parse::<usize>(&flag, value)?.max(1)),

@@ -9,6 +9,8 @@
 pub struct Area {
     /// Centre of the area, in metres.
     pub center: [f32; 2],
+    /// Height the bots move at, in metres.
+    pub height: f32,
     /// Side of the square, in metres.
     pub size: f32,
     /// Number of hotspots, placed by the seed of the run.
@@ -22,10 +24,11 @@ pub struct Area {
 }
 
 impl Default for Area {
-    /// A 4 km square at the origin with 8 hotspots of 40 m that draw 30% of the waypoints.
+    /// A 4 km square at the origin, 30 m up, with 8 hotspots of 40 m that draw 30% of the waypoints.
     fn default() -> Self {
         Self {
             center: [0.0, 0.0],
+            height: 30.0,
             size: 4000.0,
             hotspots: 8,
             hotspot_share: 0.3,
@@ -68,8 +71,6 @@ impl Rng {
 const GAITS: [(f32, f32); 3] = [(1.4, 0.55), (5.5, 0.25), (18.0, 0.20)];
 /// Longest pause at a waypoint, in seconds.
 const MAX_PAUSE: f32 = 5.0;
-/// Height the bots move at, in metres.
-const HEIGHT: f32 = 30.0;
 
 /// One bot's position and the leg it is on.
 #[derive(Debug, Clone)]
@@ -200,7 +201,7 @@ impl Walker {
     /// Position in metres.
     #[must_use]
     pub fn position(&self) -> [f32; 3] {
-        [self.position[0], self.position[1], HEIGHT]
+        [self.position[0], self.position[1], self.area.height]
     }
 
     /// Velocity in metres per second.
@@ -219,6 +220,27 @@ impl Walker {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn walks_around_the_area_centre_at_its_height() {
+        let area = Area {
+            center: [-2268.0, -5700.0],
+            height: 4.5,
+            size: 20.0,
+            hotspots: 0,
+            ..Area::default()
+        };
+        let mut walker = Walker::new(area, 3);
+        for _ in 0..200 {
+            walker.step(0.1);
+            let [x, y, z] = walker.position();
+            assert!(
+                (x + 2268.0).abs() <= 10.0 && (y + 5700.0).abs() <= 10.0,
+                "({x}, {y})"
+            );
+            assert_eq!(z, 4.5);
+        }
+    }
     use super::*;
 
     #[test]

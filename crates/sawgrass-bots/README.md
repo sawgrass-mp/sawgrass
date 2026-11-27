@@ -48,7 +48,8 @@ generator: cpu 0.85 of 2 cores, send lateness p50 <2.05 ms p99 <4.10 ms (period 
   of their machine's cores, or when their state sends ran later than one send period at p99. A saturated run
   measures the load generator, not the server: run the bots on another machine, or on more of them.
 
-Other options: `--send-hz` (default 20), `--area` (side of the square in metres, default 4000), `--hotspots`
+Other options: `--send-hz` (default 20), `--area` (side of the square in metres, default 4000), `--center X,Y` (its centre, default the
+origin; put it where a game client stands to watch the bots there), `--height` (in metres, default 30), `--hotspots`
 (default 8), `--seed` (same seed, same routes), `--threads` (runtime threads, default all cores) and `--name`
 (the name in the server certificate, default `localhost`).
 
