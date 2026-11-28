@@ -101,8 +101,12 @@ impl<'a> NativeGame<'a> {
     }
 
     /// The closest ped to `at` within `radius`, but not the local player.
-    fn closest_ped(&self, at: [f32; 3], radius: f32) -> Option<GameHandle> {
-        let native = self.natives.ped_closest?;
+    /// The native also answers, for the log, with its return slot and the two slots it wrote for the ped.
+    /// the log.
+    fn closest_ped_raw(&self, at: [f32; 3], radius: f32) -> (Option<GameHandle>, [u64; 3]) {
+        let Some(native) = self.natives.ped_closest else {
+            return (None, [0; 3]);
+        };
         let mut out = [0u64; 2];
         let [x, y, z] = at;
         // ASSUMPTION: the place, the radius, two flags on (any ped, alive), where the ped goes, three flags off, and
@@ -119,11 +123,16 @@ impl<'a> NativeGame<'a> {
             0,
             u64::MAX,
         ];
-        self.call(native, &mut args);
+        let ret = self.call(native, &mut args);
+        let raw = [ret[0], out[0], out[1]];
         if out[0] == 0 || self.local_player().is_some_and(|me| me.raw == out[0]) {
-            return None;
+            return (None, raw);
         }
-        Some(GameHandle::new(out[0], self.handles.generation(out[1])?))
+        let handle = self
+            .handles
+            .generation(out[1])
+            .map(|generation| GameHandle::new(out[0], generation));
+        (handle, raw)
     }
 
     /// Turns an entity, when the table has the heading setter.
@@ -167,9 +176,19 @@ impl GameApi for NativeGame<'_> {
             return refused();
         };
         if let Some(at) = spawner.awaited() {
-            let closest = self.closest_ped(at, spawn::NEAR * 2.0);
+            let (closest, raw) = self.closest_ped_raw(at, spawn::NEAR * 2.0);
             let place = closest.and_then(|ped| self.pose(ped)).map(|p| p.position);
-            spawner.report.borrow_mut().closest = place.map(|p| (p[0] - at[0]).hypot(p[1] - at[1]));
+            {
+                let mut report = spawner.report.borrow_mut();
+                report.closest = place.map(|p| (p[0] - at[0]).hypot(p[1] - at[1]));
+                report.closest_raw = raw;
+                if place.is_none() {
+                    // Further out, only for the log: where the peds asked for went, if not to the place.
+                    let (wide, wide_raw) = self.closest_ped_raw(at, spawn::WIDE);
+                    report.wide_raw = wide_raw;
+                    report.wide = wide.and_then(|ped| self.pose(ped)).map(|p| p.position);
+                }
+            }
             let found = closest
                 .filter(|ped| !spawner.is_spawned(ped.raw) && place.is_some_and(|p| spawn::near(p, at)));
             if let Some(ped) = found {

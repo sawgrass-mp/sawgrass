@@ -58,6 +58,8 @@ pub const NEAR: f32 = 1.5;
 /// Requests in a row that gave no ped found before the spawner pauses: each one leaves a ped in the world, so a
 /// ped never found would otherwise grow a crowd.
 pub const MAX_UNFOUND: u32 = 3;
+/// How far the log looks for a ped when none stands at the asked place, in metres.
+pub const WIDE: f32 = 30.0;
 /// How long the spawner pauses after [`MAX_UNFOUND`] requests gave no ped found.
 pub const PAUSE: Duration = Duration::from_secs(30);
 
@@ -219,6 +221,14 @@ pub struct Report {
     /// How far from the awaited place the closest ped stood when it was last looked for, in metres, if any stood
     /// within the search radius.
     pub closest: Option<f32>,
+    /// What the closest-ped native answered at the asked place: its return slot and the two slots it wrote.
+    pub closest_raw: [u64; 3],
+    /// Where the closest ped within [`WIDE`] stood when none stood at the asked place, and the native's answer.
+    pub wide: Option<[f32; 3]>,
+    pub wide_raw: [u64; 3],
+    /// Where the template asked for its ped, and where the last request asked.
+    pub template_at: [f32; 3],
+    pub asked_at: [f32; 3],
 }
 
 impl std::fmt::Display for Report {
@@ -228,10 +238,23 @@ impl std::fmt::Display for Report {
             "{} spawn requests, last answer {}, template owner {:#x}",
             self.requests, self.last_id, self.owner
         )?;
+        let [x, y, z] = self.asked_at;
+        let [tx, ty, tz] = self.template_at;
+        write!(
+            f,
+            ", asked at ({x:.1}, {y:.1}, {z:.1}), template at ({tx:.1}, {ty:.1}, {tz:.1})"
+        )?;
         match self.closest {
-            Some(d) => write!(f, ", closest ped {d:.1} m from the asked place"),
-            None => f.write_str(", no ped near the asked place"),
+            Some(d) => write!(f, ", closest ped {d:.1} m from the asked place")?,
+            None => f.write_str(", no ped near the asked place")?,
         }
+        let [r, a, b] = self.closest_raw;
+        write!(f, " (native {r:#x}, {a:#x}, {b:#x})")?;
+        if let Some([x, y, z]) = self.wide {
+            write!(f, ", closest within 30 m at ({x:.1}, {y:.1}, {z:.1})")?;
+        }
+        let [r, a, b] = self.wide_raw;
+        write!(f, " (native {r:#x}, {a:#x}, {b:#x})")
     }
 }
 
@@ -292,6 +315,12 @@ impl Spawner {
             ));
         };
         let l = self.layout;
+        let float = |at: usize| {
+            request
+                .get(at..at + 4)
+                .map_or(0.0, |b| f32::from_le_bytes(b.try_into().unwrap_or_default()))
+        };
+        let template_at = [float(l.position), float(l.position + 4), float(l.position + 8)];
         request[l.stale.0..l.stale.1].fill(0);
         if let Some(at) = l.stale_word {
             request[at..at + 8].fill(0);
@@ -335,6 +364,8 @@ impl Spawner {
             let mut report = self.report.borrow_mut();
             report.last_id = id;
             report.owner = owner;
+            report.template_at = template_at;
+            report.asked_at = at;
             if id >= 0 {
                 report.requests += 1;
             }
