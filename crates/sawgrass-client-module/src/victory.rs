@@ -46,6 +46,7 @@ use crate::table::FunctionTable;
 pub mod game;
 pub mod natives;
 pub mod script;
+pub mod spawn;
 
 /// The loader's C ABI, mirrored from VIctory's `victory-mod-api` crate (version 1). It is not a dependency: that
 /// crate lives in a local VIctory branch, and this repository takes no git or path dependency outside itself.
@@ -385,6 +386,10 @@ static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 /// How often the frame callback reports that it runs, in frames.
 const FRAME_REPORT: u64 = 600;
 
+/// How long the local player must stay readable, without a jump, before the link sends its state or changes the
+/// game, in seconds (see [`NetLink::settle`]).
+const SETTLE: f64 = 20.0;
+
 /// Starts the module on `runtime` with the two tables' text, and registers the frame callback. Everything it found
 /// and everything missing goes to VIctory's log.
 fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), String> {
@@ -458,7 +463,9 @@ fn start(runtime: VictoryRuntime, functions: &str, assets: &str) -> Result<(), S
         }
         (Ok(Some(config)), Some(_)) => {
             let server = config.server;
-            let link = NetLink::joining(ClientConfig::default());
+            let mut link = NetLink::joining(ClientConfig::default());
+            // The title moves the player by itself while it loads the world, and a pose set then can hold the load.
+            link.settle = SETTLE;
             match Connection::start(config, &link) {
                 Ok(connection) => {
                     module
