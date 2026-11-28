@@ -8,7 +8,7 @@ use sawgrass_client_module::game::{
 };
 use sawgrass_client_module::hooks::GameEvent;
 use sawgrass_client_module::link::{MAX_QUEUED, NetLink, SEAT_REQUEST_TIMEOUT};
-use sawgrass_client_module::module::{ENTITY_SET_POSE, Module, PED_SPAWN, all_functions};
+use sawgrass_client_module::module::{ENTITY_SET_POSE, Module, PED_SPAWN, WorldError, all_functions};
 use sawgrass_client_module::runtime::{GameBuild, RuntimeKind};
 use sawgrass_client_module::table::FunctionTable;
 use sawgrass_netcode::{Client, ClientConfig};
@@ -176,6 +176,8 @@ fn remote_entities_follow_the_snapshots_and_the_local_player_reports() {
     );
     assert!(sent > 0, "the local player's state is sent");
     assert_eq!(link.world_errors, 0);
+    assert!(link.remote_samples > 0, "remote samples are counted");
+    assert_eq!(link.last_world_error, None);
     assert!(game.streaming_focus.is_empty(), "nothing left to stream around");
 }
 
@@ -877,6 +879,10 @@ fn without_spawn_and_set_pose_nothing_is_counted_as_an_error_and_corrections_are
     assert!(module.entities().handle(7).is_none());
     assert_eq!(link.world_errors, 0);
     assert!(link.not_located > 0);
+    assert!(matches!(
+        link.last_world_error,
+        Some(WorldError::NoPedSpawn | WorldError::NoSetPose)
+    ));
 
     // A small correction cannot be applied, so it is not sent either: the state stays where the game has the
     // player, and the server is not shown a gap it would correct again.

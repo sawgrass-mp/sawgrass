@@ -181,6 +181,10 @@ pub struct NetLink {
     pub not_located: u64,
     /// Seat requests from the game not sent because an earlier one still waited for its answer, for diagnostics.
     pub seat_requests_held: u64,
+    /// Samples of remote entities taken from the server's snapshots, for diagnostics.
+    pub remote_samples: u64,
+    /// The last refusal counted in `world_errors` or `not_located`, for diagnostics.
+    pub last_world_error: Option<WorldError>,
 }
 
 /// How long a seat request waits for the server's answer before the next one may go. The server answers every
@@ -219,6 +223,8 @@ impl NetLink {
             world_errors: 0,
             not_located: 0,
             seat_requests_held: 0,
+            remote_samples: 0,
+            last_world_error: None,
         }
     }
 
@@ -412,9 +418,13 @@ impl NetLink {
     /// Counts a refusal: in [`NetLink::not_located`] when the table lacks the game function, else in
     /// [`NetLink::world_errors`].
     fn count<T>(&mut self, result: Result<T, WorldError>) -> Option<T> {
-        result
-            .map_err(|error| tally(&error, &mut self.world_errors, &mut self.not_located))
-            .ok()
+        result.map_err(|error| self.refused(error)).ok()
+    }
+
+    /// Counts a refusal and keeps it as the last one.
+    fn refused(&mut self, error: WorldError) {
+        tally(&error, &mut self.world_errors, &mut self.not_located);
+        keep_last(&mut self.last_world_error, error);
     }
 
     fn show_remote(&mut self, dt: f32, world: &mut World<'_>) {
@@ -437,6 +447,7 @@ impl NetLink {
             self.owned.remove(&id);
         }
         let samples = std::mem::take(&mut self.samples);
+        self.remote_samples += samples.len() as u64;
         for sample in &samples {
             let pose = game_pose(&sample.pose);
             let shown = self.shown.get(&sample.id);
@@ -493,7 +504,10 @@ impl NetLink {
             // and sending the corrected pose would show the server a gap it would correct again.
             match world.set_local_player_pose(corrected) {
                 Ok(()) => local = corrected,
-                Err(error) => tally(&error, &mut self.world_errors, &mut self.not_located),
+                Err(error) => {
+                    tally(&error, &mut self.world_errors, &mut self.not_located);
+                    keep_last(&mut self.last_world_error, error);
+                }
             }
         }
         // Measured after the correction offset, so a correction shows as velocity for its frames; corrections are
@@ -526,6 +540,13 @@ impl NetLink {
         {
             self.outbox.push(datagram);
         }
+    }
+}
+
+/// Keeps a refusal as the last one, without replacing an equal one.
+fn keep_last(last: &mut Option<WorldError>, error: WorldError) {
+    if last.as_ref() != Some(&error) {
+        *last = Some(error);
     }
 }
 

@@ -315,11 +315,16 @@ unsafe fn frame(context: u64, presents: u64) {
                 Some(client) => {
                     let _ = write!(
                         text,
-                        "; joined as entity {}, {} shown, {} not shown yet",
+                        "; joined as entity {}, {} shown, {} not shown yet, {} remote samples, {} refused",
                         client.entity(),
                         running.module.entities().len(),
-                        net.link.not_located
+                        net.link.not_located,
+                        net.link.remote_samples,
+                        net.link.world_errors
                     );
+                    if let Some(error) = net.link.last_world_error.as_ref() {
+                        let _ = write!(text, ", last refusal {error:?}");
+                    }
                 }
                 None => text.push_str("; not joined yet"),
             }
