@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::game::GameError;
+use crate::game::{GameError, GameHandle};
 use crate::table::FunctionTable;
 
 /// Table names: the request function (the module's `ped_spawn`, hooked), the callback the title passes it for a
@@ -201,8 +201,9 @@ pub struct Spawner {
     functions: Functions,
     layout: Layout,
     pending: RefCell<Option<Pending>>,
-    /// The first slots of the peds spawned so far, so that a ped found at a place is never handed out twice.
-    spawned: RefCell<Vec<u64>>,
+    /// The peds spawned so far, so that a ped found at a place is never handed out twice. The whole handle counts:
+    /// under VIctory every ped's first slot may be the same, and the second tells them apart.
+    spawned: RefCell<Vec<GameHandle>>,
     /// What the requests did so far, for the log.
     pub report: RefCell<Report>,
     /// Requests in a row that gave no ped found, and when the last of them was made.
@@ -287,15 +288,15 @@ impl Spawner {
         self.pending.borrow().map(|p| p.at)
     }
 
-    /// Whether the ped `raw` names was spawned here before.
-    pub fn is_spawned(&self, raw: u64) -> bool {
-        self.spawned.borrow().contains(&raw)
+    /// Whether `ped` was spawned here before.
+    pub fn is_spawned(&self, ped: GameHandle) -> bool {
+        self.spawned.borrow().contains(&ped)
     }
 
-    /// Marks the awaited request done: its ped `raw` was found.
-    pub fn found(&self, raw: u64) {
+    /// Marks the awaited request done: its ped was found.
+    pub fn found(&self, ped: GameHandle) {
         self.pending.borrow_mut().take();
-        self.spawned.borrow_mut().push(raw);
+        self.spawned.borrow_mut().push(ped);
         *self.unfound.borrow_mut() = (0, None);
     }
 

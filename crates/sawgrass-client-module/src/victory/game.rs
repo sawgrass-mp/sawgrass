@@ -125,13 +125,15 @@ impl<'a> NativeGame<'a> {
         ];
         let ret = self.call(native, &mut args);
         let raw = [ret[0], out[0], out[1]];
-        if out[0] == 0 || self.local_player().is_some_and(|me| me.raw == out[0]) {
+        if out[0] == 0 {
             return (None, raw);
         }
+        // The whole handle tells the local player apart: every ped's first slot may be the same.
         let handle = self
             .handles
             .generation(out[1])
-            .map(|generation| GameHandle::new(out[0], generation));
+            .map(|generation| GameHandle::new(out[0], generation))
+            .filter(|ped| self.local_player() != Some(*ped));
         (handle, raw)
     }
 
@@ -196,10 +198,10 @@ impl GameApi for NativeGame<'_> {
                     report.wide = wide.and_then(|ped| self.pose(ped)).map(|p| p.position);
                 }
             }
-            let found = closest
-                .filter(|ped| !spawner.is_spawned(ped.raw) && place.is_some_and(|p| spawn::near(p, at)));
+            let found =
+                closest.filter(|ped| !spawner.is_spawned(*ped) && place.is_some_and(|p| spawn::near(p, at)));
             if let Some(ped) = found {
-                spawner.found(ped.raw);
+                spawner.found(ped);
                 // The place was the asked one; only the heading is left.
                 let _ = self.set_heading(ped, pose.heading);
                 return Ok(ped);
@@ -441,8 +443,9 @@ pub(crate) mod tests {
         assert_eq!(game.pose(GameHandle::new(PLAYER[0], 0)), None);
     }
 
-    /// The stand-in ped the title creates for the spawner, at the place it was asked for.
-    const SPAWNED: u64 = 0x77;
+    /// The stand-in ped the title creates for the spawner, at the place it was asked for: as under VIctory, its first
+    /// slot is the local player's, and only the second tells them apart.
+    const SPAWNED: [u64; 2] = [PLAYER[0], 0x0000_7ff6_1234_9abc];
 
     unsafe extern "C" fn closest(call: *mut Call) {
         // SAFETY: the closest-ped native's ten slots, the sixth where the ped goes.
@@ -456,7 +459,11 @@ pub(crate) mod tests {
                 .len()
                 > 1
             {
-                *out = SPAWNED;
+                *out = SPAWNED[0];
+                *out.add(1) = SPAWNED[1];
+            } else {
+                // Before the title spawned one, the closest ped is the local player.
+                *out = PLAYER[0];
                 *out.add(1) = PLAYER[1];
             }
         }
@@ -505,7 +512,7 @@ pub(crate) mod tests {
         let ped = game
             .spawn(EntityKind::Ped, GameAsset(1), pose)
             .expect("found at the place");
-        assert_eq!(ped.raw, SPAWNED);
+        assert_eq!(handles.slots(ped), Some(SPAWNED));
         assert_eq!(spawner.awaited(), None);
         // The same ped is never handed out again: a second spawn makes a new request.
         assert!(game.spawn(EntityKind::Ped, GameAsset(1), pose).is_err());
