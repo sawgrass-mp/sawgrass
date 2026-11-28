@@ -901,3 +901,57 @@ fn without_spawn_and_set_pose_nothing_is_counted_as_an_error_and_corrections_are
     assert_eq!(game.entities[&me].2.position[0], 0.0);
     assert_eq!(link.world_errors, 0);
 }
+
+#[test]
+fn the_link_waits_for_the_local_player_to_settle_before_it_changes_the_game() {
+    let mut module = module();
+    let mut game = FakeGame::default();
+    let me = game.create_natively(
+        EntityKind::Ped,
+        GameAsset(1),
+        Pose {
+            position: [0.0, 5.0, 30.0],
+            heading: 0.0,
+        },
+    );
+    game.local_player = Some(me);
+    let mut link = NetLink::new(Client::new(LOCAL, TICK_HZ, ClientConfig::default()));
+    link.settle = 1.0;
+    let (inbox, outbox) = (link.inbox(), link.outbox());
+    let mut encoder = DeltaEncoder::default();
+    let mut frames = |range: std::ops::Range<u32>,
+                      module: &mut Module<FakeRuntime>,
+                      game: &mut FakeGame,
+                      link: &mut NetLink| {
+        let mut sent = 0;
+        for frame in range {
+            if frame % 3 == 0 {
+                for d in snapshot(&mut encoder, frame / 3, &[state(1, 0.0), state(LOCAL, 0.0)]) {
+                    inbox.push(d);
+                }
+            }
+            module.frame(1.0 / FRAME_HZ, game, link).expect("frame");
+            sent += outbox.take().len();
+        }
+        sent
+    };
+
+    // Half a second in, the game still loads: nothing is spawned and no state goes out.
+    assert_eq!(frames(0..30, &mut module, &mut game, &mut link), 0);
+    assert!(module.entities().handle(1).is_none());
+    assert!(link.remote_samples > 0, "the samples still arrive");
+
+    // The game moves the player by itself, as it does at the end of a load: the settle time starts again.
+    game.entities.get_mut(&me).expect("player").2.position = [200.0, 5.0, 30.0];
+    assert_eq!(frames(30..80, &mut module, &mut game, &mut link), 0);
+    assert!(module.entities().handle(1).is_none());
+
+    // A second after the jump the link takes part.
+    let sent = frames(80..120, &mut module, &mut game, &mut link);
+    assert!(sent > 0, "the local player's state goes out once it settled");
+    assert!(
+        module.entities().handle(1).is_some(),
+        "the remote entity is spawned once it settled"
+    );
+    assert_eq!(link.world_errors, 0);
+}

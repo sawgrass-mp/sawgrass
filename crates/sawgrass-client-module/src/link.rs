@@ -185,7 +185,18 @@ pub struct NetLink {
     pub remote_samples: u64,
     /// The last refusal counted in `world_errors` or `not_located`, for diagnostics.
     pub last_world_error: Option<WorldError>,
+    /// How long the local player must stay readable, without a jump, before the link changes the game: it sends no
+    /// state, applies no correction and spawns or moves no remote entity before that. Zero takes part at once.
+    pub settle: f64,
+    /// Since when, in local time, the local player has been readable without a jump.
+    settled_since: Option<f64>,
+    /// Frames in which a correction from the server moved the local player, for diagnostics.
+    pub corrections: u64,
 }
+
+/// A move of the local player between two frames longer than this is a jump the game made (a load or a
+/// teleport), and the settle time starts again.
+pub const SETTLE_JUMP: f32 = 5.0;
 
 /// How long a seat request waits for the server's answer before the next one may go. The server answers every
 /// request it takes, so this only matters when its event budget dropped the request.
@@ -225,6 +236,9 @@ impl NetLink {
             seat_requests_held: 0,
             remote_samples: 0,
             last_world_error: None,
+            settle: 0.0,
+            settled_since: None,
+            corrections: 0,
         }
     }
 
@@ -448,6 +462,11 @@ impl NetLink {
         }
         let samples = std::mem::take(&mut self.samples);
         self.remote_samples += samples.len() as u64;
+        if !settled(self.settled_since, self.settle, self.now) {
+            // Nothing is spawned or moved while the game may still be loading; the samples come again.
+            self.samples = samples;
+            return;
+        }
         for sample in &samples {
             let pose = game_pose(&sample.pose);
             let shown = self.shown.get(&sample.id);
@@ -493,8 +512,20 @@ impl NetLink {
         };
         let Some(mut local) = world.local_player_pose() else {
             self.last_local = None;
+            self.settled_since = None;
             return;
         };
+        let jumped = self
+            .last_local
+            .is_some_and(|l| distance(l, local.position) > SETTLE_JUMP);
+        if jumped || self.settled_since.is_none() {
+            self.settled_since = Some(self.now);
+        }
+        if !settled(self.settled_since, self.settle, self.now) {
+            // While the game may still be loading it moves the player by itself: no state, no correction.
+            self.last_local = Some(local.position);
+            return;
+        }
         if let Some(offset) = client.frame(dt) {
             let mut corrected = local;
             for (p, o) in corrected.position.iter_mut().zip(offset) {
@@ -503,7 +534,10 @@ impl NetLink {
             // Only a correction the game applied is sent: without `entity_set_pose` the player stays where it is,
             // and sending the corrected pose would show the server a gap it would correct again.
             match world.set_local_player_pose(corrected) {
-                Ok(()) => local = corrected,
+                Ok(()) => {
+                    local = corrected;
+                    self.corrections += 1;
+                }
                 Err(error) => {
                     tally(&error, &mut self.world_errors, &mut self.not_located);
                     keep_last(&mut self.last_world_error, error);
@@ -541,6 +575,16 @@ impl NetLink {
             self.outbox.push(datagram);
         }
     }
+}
+
+/// Whether the local player has been readable without a jump for `settle` seconds at `now`.
+fn settled(since: Option<f64>, settle: f64, now: f64) -> bool {
+    settle <= 0.0 || since.is_some_and(|since| now - since >= settle)
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
 }
 
 /// Keeps a refusal as the last one, without replacing an equal one.
