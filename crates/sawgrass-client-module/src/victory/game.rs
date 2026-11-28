@@ -184,7 +184,8 @@ impl GameApi for NativeGame<'_> {
                 let mut report = spawner.report.borrow_mut();
                 report.closest = place.map(|p| (p[0] - at[0]).hypot(p[1] - at[1]));
                 report.closest_raw = raw;
-                report.player_closest = raw[1] != 0 && self.local_player().is_some_and(|me| me.raw == raw[1]);
+                report.player_closest = raw[1] != 0
+                    && self.local_player().and_then(|me| self.handles.slots(me)) == Some([raw[1], raw[2]]);
                 if place.is_none() {
                     let template = report.template_at;
                     report.near_template = self
