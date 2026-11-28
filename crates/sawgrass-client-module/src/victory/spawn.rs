@@ -226,6 +226,10 @@ pub struct Report {
     /// Where the closest ped within [`WIDE`] stood when none stood at the asked place, and the native's answer.
     pub wide: Option<[f32; 3]>,
     pub wide_raw: [u64; 3],
+    /// Where the closest ped near the template's place stood, if one did: the title may keep the template's place.
+    pub near_template: Option<[f32; 3]>,
+    /// Whether the closest ped the native named was the local player, which is never taken.
+    pub player_closest: bool,
     /// Where the template asked for its ped, and where the last request asked.
     pub template_at: [f32; 3],
     pub asked_at: [f32; 3],
@@ -250,11 +254,19 @@ impl std::fmt::Display for Report {
         }
         let [r, a, b] = self.closest_raw;
         write!(f, " (native {r:#x}, {a:#x}, {b:#x})")?;
-        if let Some([x, y, z]) = self.wide {
-            write!(f, ", closest within 30 m at ({x:.1}, {y:.1}, {z:.1})")?;
+        if self.player_closest {
+            f.write_str(", the closest is the local player")?;
+        }
+        match self.wide {
+            Some([x, y, z]) => write!(f, ", closest within 30 m at ({x:.1}, {y:.1}, {z:.1})")?,
+            None => f.write_str(", none other within 30 m")?,
         }
         let [r, a, b] = self.wide_raw;
-        write!(f, " (native {r:#x}, {a:#x}, {b:#x})")
+        write!(f, " (wide native {r:#x}, {a:#x}, {b:#x})")?;
+        match self.near_template {
+            Some([x, y, z]) => write!(f, ", a ped at the template's place ({x:.1}, {y:.1}, {z:.1})"),
+            None => f.write_str(", no ped at the template's place"),
+        }
     }
 }
 

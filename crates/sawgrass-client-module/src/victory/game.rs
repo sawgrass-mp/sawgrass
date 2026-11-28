@@ -182,7 +182,14 @@ impl GameApi for NativeGame<'_> {
                 let mut report = spawner.report.borrow_mut();
                 report.closest = place.map(|p| (p[0] - at[0]).hypot(p[1] - at[1]));
                 report.closest_raw = raw;
+                report.player_closest = raw[1] != 0 && self.local_player().is_some_and(|me| me.raw == raw[1]);
                 if place.is_none() {
+                    let template = report.template_at;
+                    report.near_template = self
+                        .closest_ped_raw(template, spawn::NEAR * 2.0)
+                        .0
+                        .and_then(|ped| self.pose(ped))
+                        .map(|p| p.position);
                     // Further out, only for the log: where the peds asked for went, if not to the place.
                     let (wide, wide_raw) = self.closest_ped_raw(at, spawn::WIDE);
                     report.wide_raw = wide_raw;
