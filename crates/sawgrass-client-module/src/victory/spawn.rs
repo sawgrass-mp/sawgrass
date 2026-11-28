@@ -55,6 +55,11 @@ const VALUES: [&str; 7] = [SIZE, KIND, POSITION, OWNER, MODEL, STALE_FROM, STALE
 pub const WAIT: Duration = Duration::from_secs(3);
 /// How far from the asked place the spawned ped may stand, in metres.
 pub const NEAR: f32 = 1.5;
+/// Requests in a row that gave no ped found before the spawner pauses: each one leaves a ped in the world, so a
+/// ped never found would otherwise grow a crowd.
+pub const MAX_UNFOUND: u32 = 3;
+/// How long the spawner pauses after [`MAX_UNFOUND`] requests gave no ped found.
+pub const PAUSE: Duration = Duration::from_secs(30);
 
 /// The request's layout, from the table's values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +201,38 @@ pub struct Spawner {
     pending: RefCell<Option<Pending>>,
     /// The first slots of the peds spawned so far, so that a ped found at a place is never handed out twice.
     spawned: RefCell<Vec<u64>>,
+    /// What the requests did so far, for the log.
+    pub report: RefCell<Report>,
+    /// Requests in a row that gave no ped found, and when the last of them was made.
+    unfound: RefCell<(u32, Option<Instant>)>,
+}
+
+/// What the spawner did, for the log.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Report {
+    /// Requests the title took.
+    pub requests: u64,
+    /// The title's answer to the last request.
+    pub last_id: i32,
+    /// The owner thread of the template the last request was made from.
+    pub owner: u32,
+    /// How far from the awaited place the closest ped stood when it was last looked for, in metres, if any stood
+    /// within the search radius.
+    pub closest: Option<f32>,
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} spawn requests, last answer {}, template owner {:#x}",
+            self.requests, self.last_id, self.owner
+        )?;
+        match self.closest {
+            Some(d) => write!(f, ", closest ped {d:.1} m from the asked place"),
+            None => f.write_str(", no ped near the asked place"),
+        }
+    }
 }
 
 impl Spawner {
@@ -205,6 +242,8 @@ impl Spawner {
             layout,
             pending: RefCell::new(None),
             spawned: RefCell::new(Vec::new()),
+            report: RefCell::new(Report::default()),
+            unfound: RefCell::new((0, None)),
         }
     }
 
@@ -222,6 +261,7 @@ impl Spawner {
     pub fn found(&self, raw: u64) {
         self.pending.borrow_mut().take();
         self.spawned.borrow_mut().push(raw);
+        *self.unfound.borrow_mut() = (0, None);
     }
 
     /// Makes a request at `at` unless one is awaited, or one awaited longer than [`WAIT`] is given up for a new one.
@@ -233,6 +273,17 @@ impl Spawner {
         if let Some(p) = *self.pending.borrow() {
             if now.duration_since(p.since) < WAIT {
                 return Ok(());
+            }
+        }
+        let (unfound, last) = *self.unfound.borrow();
+        if unfound >= MAX_UNFOUND {
+            match last {
+                Some(last) if now.duration_since(last) < WAIT + PAUSE => {
+                    return Err(GameError::Refused(format!(
+                        "paused: {unfound} spawn requests in a row gave no ped found"
+                    )));
+                }
+                _ => *self.unfound.borrow_mut() = (0, None),
             }
         }
         let Some(mut request) = TEMPLATE.lock().unwrap_or_else(PoisonError::into_inner).clone() else {
@@ -280,12 +331,22 @@ impl Spawner {
             leave(f.lock);
             id as u32 as i32
         };
+        {
+            let mut report = self.report.borrow_mut();
+            report.last_id = id;
+            report.owner = owner;
+            if id >= 0 {
+                report.requests += 1;
+            }
+        }
         if id < 0 {
             return Err(GameError::Refused(format!(
                 "the game refused the spawn request ({id})"
             )));
         }
         *self.pending.borrow_mut() = Some(Pending { at, since: now });
+        let mut unfound = self.unfound.borrow_mut();
+        *unfound = (unfound.0 + 1, Some(now));
         Ok(())
     }
 }
@@ -456,6 +517,25 @@ pub(crate) mod tests {
                 .expect("asks again")
         };
         assert_eq!(REQUESTS.lock().unwrap_or_else(PoisonError::into_inner).len(), 3);
+        // A third request with no ped found, then the spawner pauses instead of growing a crowd.
+        // SAFETY: as above.
+        unsafe {
+            spawner
+                .request([10.0, 20.0, 30.0], now + WAIT * 2)
+                .expect("asks a third time")
+        };
+        // SAFETY: as above.
+        let paused = unsafe { spawner.request([10.0, 20.0, 30.0], now + WAIT * 3) };
+        assert!(matches!(paused, Err(GameError::Refused(_))), "{paused:?}");
+        assert_eq!(REQUESTS.lock().unwrap_or_else(PoisonError::into_inner).len(), 4);
+        assert_eq!(spawner.report.borrow().requests, 3);
+        // SAFETY: as above.
+        unsafe {
+            spawner
+                .request([10.0, 20.0, 30.0], now + WAIT * 3 + PAUSE)
+                .expect("asks again after the pause")
+        };
+        assert_eq!(REQUESTS.lock().unwrap_or_else(PoisonError::into_inner).len(), 5);
         let locks = LOCKS.lock().unwrap_or_else(PoisonError::into_inner).clone();
         assert!(
             locks.ends_with(&["enter", "leave", "enter", "leave"]),

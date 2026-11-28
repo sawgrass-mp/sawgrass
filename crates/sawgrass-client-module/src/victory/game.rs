@@ -167,9 +167,11 @@ impl GameApi for NativeGame<'_> {
             return refused();
         };
         if let Some(at) = spawner.awaited() {
-            let found = self.closest_ped(at, spawn::NEAR * 2.0).filter(|ped| {
-                !spawner.is_spawned(ped.raw) && self.pose(*ped).is_some_and(|p| spawn::near(p.position, at))
-            });
+            let closest = self.closest_ped(at, spawn::NEAR * 2.0);
+            let place = closest.and_then(|ped| self.pose(ped)).map(|p| p.position);
+            spawner.report.borrow_mut().closest = place.map(|p| (p[0] - at[0]).hypot(p[1] - at[1]));
+            let found = closest
+                .filter(|ped| !spawner.is_spawned(ped.raw) && place.is_some_and(|p| spawn::near(p, at)));
             if let Some(ped) = found {
                 spawner.found(ped.raw);
                 // The place was the asked one; only the heading is left.

@@ -326,6 +326,9 @@ unsafe fn frame(context: u64, presents: u64) {
                     if let Some(error) = net.link.last_world_error.as_ref() {
                         let _ = write!(text, ", last refusal {error:?}");
                     }
+                    if let Some(spawner) = script.spawner.as_ref() {
+                        let _ = write!(text, "; {}", spawner.report.borrow());
+                    }
                 }
                 None => text.push_str("; not joined yet"),
             }
